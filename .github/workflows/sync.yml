@@ -1,0 +1,56 @@
+name: Canvas–Notion sync
+
+on:
+  schedule:
+    - cron: "17 */4 * * *"
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Run mode
+        required: true
+        default: sync
+        type: choice
+        options:
+          - sync
+          - dry-run
+          - validate
+      disable_removals:
+        description: Disable removed-assignment detection
+        required: true
+        default: false
+        type: boolean
+
+concurrency:
+  group: canvas-notion-sync
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - name: Synchronize assignments
+        shell: bash
+        env:
+          CANVAS_ICS_URL: ${{ secrets.CANVAS_ICS_URL }}
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          NOTION_ASSIGNMENTS_DATA_SOURCE_ID: ${{ vars.NOTION_ASSIGNMENTS_DATA_SOURCE_ID }}
+          NOTION_COURSES_DATA_SOURCE_ID: ${{ vars.NOTION_COURSES_DATA_SOURCE_ID }}
+          NOTION_SYNC_LOG_DATA_SOURCE_ID: ${{ vars.NOTION_SYNC_LOG_DATA_SOURCE_ID }}
+          NOTION_TIMEZONE: ${{ vars.NOTION_TIMEZONE || 'America/Los_Angeles' }}
+          RUN_MODE: ${{ github.event_name == 'schedule' && 'sync' || inputs.mode }}
+          RUN_TRIGGER: ${{ github.event_name == 'schedule' && 'scheduled' || 'manual' }}
+          DISABLE_REMOVALS: ${{ github.event_name == 'workflow_dispatch' && inputs.disable_removals || false }}
+        run: |
+          args=(--mode "$RUN_MODE" --trigger "$RUN_TRIGGER")
+          if [[ "$DISABLE_REMOVALS" == "true" ]]; then args+=(--disable-removals); fi
+          npm run sync -- "${args[@]}"

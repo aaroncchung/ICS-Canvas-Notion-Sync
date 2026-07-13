@@ -1,0 +1,9 @@
+[
+  { "type": "Quiz", "patterns": ["quiz"] },
+  { "type": "Exam", "patterns": ["exam", "test"] },
+  { "type": "Lab", "patterns": ["lab"] },
+  { "type": "Paper", "patterns": ["paper", "essay"] },
+  { "type": "Project", "patterns": ["project"] },
+  { "type": "Reading", "patterns": ["reading"] },
+  { "type": "Homework", "patterns": ["homework", "problem set", "pset"] }
+]

@@ -1,0 +1,28 @@
+BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//Canvas Synthetic//EN
+BEGIN:VTIMEZONE
+TZID:America/Los_Angeles
+END:VTIMEZONE
+BEGIN:VEVENT
+UID:event-assignment-1001@canvas.example.edu
+DTSTART;VALUE=DATE:20260720
+SUMMARY:Quiz 1 [EE 10]
+DESCRIPTION:<p>A quiz with <strong>HTML</strong>.</p>
+URL:https://canvas.example.edu/courses/123/assignments/1001
+END:VEVENT
+BEGIN:VEVENT
+UID:event-assignment-1002@canvas.example.edu
+DTSTART;TZID=America/Los_Angeles:20261101T013000
+SUMMARY:Lab 2 [EE 10]
+DESCRIPTION:Folded long description that continues across a fold and contains an escap
+ ed comma\, semicolon\; backslash\\ and newline\nnext.
+URL:https://canvas.example.edu/courses/123/assignments/1002
+END:VEVENT
+BEGIN:VEVENT
+UID:event-assignment-1003@canvas.example.edu
+DTSTART:20260722T180000Z
+SUMMARY:Midterm Exam [EE 10]
+URL:https://canvas.example.edu/courses/123/assignments/1003
+END:VEVENT
+END:VCALENDAR

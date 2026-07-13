@@ -1,0 +1,16 @@
+BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//Canvas Synthetic//EN
+BEGIN:VEVENT
+UID:event-assignment-456@canvas.example.edu
+DTSTART:20260715T235900Z
+DTEND:20260716T000000Z
+SUMMARY:Homework 1 [EE 10]
+DESCRIPTION:<p>Read chapter 1 and solve problems.</p>
+URL:https://canvas.example.edu/courses/123/assignments/456
+LAST-MODIFIED:20260713T120000Z
+SEQUENCE:1
+STATUS:CONFIRMED
+CATEGORIES:Assignment
+END:VEVENT
+END:VCALENDAR

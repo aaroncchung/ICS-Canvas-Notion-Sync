@@ -1,0 +1,11 @@
+BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//Canvas Synthetic//EN
+BEGIN:VEVENT
+UID:event-calendar-999@canvas.example.edu
+DTSTART:20260715T170000Z
+SUMMARY:Office hours [EE 10]
+DESCRIPTION:Bring questions
+URL:https://canvas.example.edu/calendar?event_id=999
+END:VEVENT
+END:VCALENDAR
