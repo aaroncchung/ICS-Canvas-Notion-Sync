@@ -108,6 +108,8 @@ export interface AssignmentRecord {
   canvasDueDate?: string;
   effectiveDueDate?: string;
   overrideDueDate?: string;
+  canvasMissingSince?: string;
+  canvasMissingCount?: number;
   descriptionExcerpt?: string;
   descriptionHash?: string;
   personalStatus?: string;
@@ -145,6 +147,21 @@ export interface AssignmentUpdate {
   properties: AssignmentPropertyUpdate;
   verifyDescription: boolean;
   descriptionHash: string;
+  missingEvidenceCleared: boolean;
+}
+
+export interface AssignmentMissingEvidenceUpdate {
+  pageId: string;
+  canvasMissingSince: string;
+  canvasMissingCount: number;
+  transition: "observed" | "advanced";
+}
+
+export interface AssignmentRemoval extends AssignmentRecord {
+  reason: "explicit-cancellation" | "persistent-absence";
+  markRemoved: boolean;
+  clearMissingEvidence: boolean;
+  canvasMissingCountAfter?: number;
 }
 
 export interface AssignmentPropertyUpdate {
@@ -154,6 +171,8 @@ export interface AssignmentPropertyUpdate {
   canvasDueDate?: string | null;
   effectiveDueDate?: string | null;
   overrideDueDate?: string | null;
+  canvasMissingSince?: string | null;
+  canvasMissingCount?: number | null;
   rawDescription?: string;
   descriptionHash?: string;
   removed?: boolean;
@@ -171,7 +190,9 @@ export interface SyncPlan {
   coursesToUpdate: CourseUpdate[];
   assignmentsToCreate: AssignmentCreate[];
   assignmentsToUpdate: AssignmentUpdate[];
-  assignmentsToRemove: AssignmentRecord[];
+  assignmentsMissingEvidenceToUpdate: AssignmentMissingEvidenceUpdate[];
+  assignmentsToRemove: AssignmentRemoval[];
+  missingCandidatesObserved: number;
   unchanged: number;
   skipped: number;
   warnings: PlanWarning[];
@@ -190,6 +211,7 @@ export type SyncOperationKind =
   | "assignment-property-update"
   | "assignment-description-update"
   | "assignment-description-hash-update"
+  | "assignment-missing-evidence-update"
   | "assignment-remove";
 
 export interface SyncOperation {
@@ -238,6 +260,9 @@ export interface RunCounts {
   updated: number;
   coursesUpdated: number;
   removed: number;
+  missingObserved: number;
+  missingAdvanced: number;
+  missingCleared: number;
   unchanged: number;
   skipped: number;
   warningCount: number;

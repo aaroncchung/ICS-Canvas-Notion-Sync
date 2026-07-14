@@ -14,6 +14,7 @@ import {
   pageProperties,
   readCheckbox,
   readDate,
+  readNumber,
   readRelation,
   readRichText,
   readSelect,
@@ -26,6 +27,7 @@ import {
   text,
   title,
   url,
+  number,
 } from "./property-helpers.js";
 
 export const DESCRIPTION_EXCERPT_LENGTH = 1900;
@@ -51,6 +53,8 @@ export async function readAssignments(
     const canvasDueDate = readDate(properties, "Canvas Due Date");
     const effectiveDueDate = readDate(properties, "Effective Due Date");
     const overrideDueDate = readDate(properties, "Override Due Date");
+    const canvasMissingSince = readDate(properties, "Canvas Missing Since");
+    const canvasMissingCount = readNumber(properties, "Canvas Missing Count");
     const storedDescription = readRichText(properties, "Raw Description");
     const descriptionHash = readRichText(properties, "Canvas Description Hash");
     const personalStatus = readStatus(properties, "Personal Status");
@@ -68,6 +72,8 @@ export async function readAssignments(
       ...(canvasDueDate ? { canvasDueDate } : {}),
       ...(effectiveDueDate ? { effectiveDueDate } : {}),
       ...(overrideDueDate ? { overrideDueDate } : {}),
+      ...(canvasMissingSince ? { canvasMissingSince } : {}),
+      ...(canvasMissingCount !== undefined ? { canvasMissingCount } : {}),
       ...(storedDescription ? { descriptionExcerpt: storedDescription } : {}),
       ...(descriptionHash ? { descriptionHash } : {}),
       ...(personalStatus ? { personalStatus } : {}),
@@ -154,6 +160,12 @@ export function buildUpdateProperties(update: AssignmentPropertyUpdate): Record<
   }
   if (update.overrideDueDate !== undefined) {
     properties["Override Due Date"] = date(update.overrideDueDate);
+  }
+  if (update.canvasMissingSince !== undefined) {
+    properties["Canvas Missing Since"] = date(update.canvasMissingSince);
+  }
+  if (update.canvasMissingCount !== undefined) {
+    properties["Canvas Missing Count"] = number(update.canvasMissingCount);
   }
   if (update.rawDescription !== undefined) {
     properties["Raw Description"] = text(update.rawDescription);

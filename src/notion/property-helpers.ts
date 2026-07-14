@@ -50,6 +50,11 @@ export function readCheckbox(properties: Record<string, unknown>, name: string):
   return property(properties, name).checkbox === true;
 }
 
+export function readNumber(properties: Record<string, unknown>, name: string): number | undefined {
+  const value = property(properties, name).number;
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
 export function readSelect(properties: Record<string, unknown>, name: string): string | undefined {
   const value = object(property(properties, name).select)?.name;
   return typeof value === "string" ? value : undefined;
@@ -85,4 +90,6 @@ export const checkbox = (value: boolean): Record<string, unknown> => ({ checkbox
 export const relation = (pageIdValue: string): Record<string, unknown> => ({
   relation: [{ id: pageIdValue }],
 });
-export const number = (value: number): Record<string, unknown> => ({ number: value });
+export const number = (value?: number | null): Record<string, unknown> => ({
+  number: value ?? null,
+});

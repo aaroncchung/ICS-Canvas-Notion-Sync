@@ -9,6 +9,8 @@ const ASSIGNMENTS: Expected = {
   "Effective Due Date": "date",
   "Canvas Due Date": "date",
   "Override Due Date": "date",
+  "Canvas Missing Since": "date",
+  "Canvas Missing Count": "number",
   "Personal Status": "status",
   Priority: "select",
   "Assignment Type": "select",

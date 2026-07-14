@@ -2,7 +2,11 @@ export function datesEqual(left?: string, right?: string): boolean {
   if (!left || !right) return left === right;
   const leftDateOnly = /^\d{4}-\d{2}-\d{2}$/.test(left);
   const rightDateOnly = /^\d{4}-\d{2}-\d{2}$/.test(right);
-  if (leftDateOnly || rightDateOnly) return leftDateOnly && rightDateOnly && left === right;
+  if (leftDateOnly || rightDateOnly) {
+    const leftDay = leftDateOnly ? left : left.match(/^\d{4}-\d{2}-\d{2}/)?.[0];
+    const rightDay = rightDateOnly ? right : right.match(/^\d{4}-\d{2}-\d{2}/)?.[0];
+    return leftDay !== undefined && leftDay === rightDay;
+  }
   const leftMs = Date.parse(left);
   const rightMs = Date.parse(right);
   if (Number.isNaN(leftMs) || Number.isNaN(rightMs)) return left === right;
@@ -23,7 +27,9 @@ export function resolveDates(
   let override = current.overrideDueDate;
   const previousExpected = current.overrideDueDate ?? current.canvasDueDate;
 
-  if (
+  if (!previousExpected && current.effectiveDueDate) {
+    override = current.effectiveDueDate;
+  } else if (
     current.effectiveDueDate &&
     current.canvasDueDate &&
     datesEqual(current.effectiveDueDate, current.canvasDueDate)

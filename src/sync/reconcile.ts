@@ -13,6 +13,7 @@ import {
 import type {
   AppliedSyncOperation,
   AssignmentExecutionState,
+  AssignmentRemoval,
   FailedSyncOperation,
   RunCounts,
   SyncExecutionResult,
@@ -36,6 +37,12 @@ function operationError(error: unknown): string {
 }
 
 export function plannedOperations(plan: SyncPlan): SyncOperation[] {
+  const explicitRemovals = plan.assignmentsToRemove.filter(
+    (assignment) => assignment.reason === "explicit-cancellation",
+  );
+  const absenceRemovals = plan.assignmentsToRemove.filter(
+    (assignment) => assignment.reason === "persistent-absence",
+  );
   return [
     ...plan.coursesToCreate.map((course) => ({
       kind: "course-create" as const,
@@ -62,8 +69,20 @@ export function plannedOperations(plan: SyncPlan): SyncOperation[] {
         ? [{ kind: "assignment-description-hash-update" as const, target: assignment.pageId }]
         : []),
     ]),
-    ...plan.assignmentsToRemove.map((assignment) => ({
-      kind: "assignment-remove" as const,
+    ...explicitRemovals.map((assignment) => ({
+      kind: assignment.markRemoved
+        ? ("assignment-remove" as const)
+        : ("assignment-missing-evidence-update" as const),
+      target: assignment.pageId,
+    })),
+    ...plan.assignmentsMissingEvidenceToUpdate.map((assignment) => ({
+      kind: "assignment-missing-evidence-update" as const,
+      target: assignment.pageId,
+    })),
+    ...absenceRemovals.map((assignment) => ({
+      kind: assignment.markRemoved
+        ? ("assignment-remove" as const)
+        : ("assignment-missing-evidence-update" as const),
       target: assignment.pageId,
     })),
   ];
@@ -250,6 +269,7 @@ export async function applyPlan(
         recordPartial,
       );
       completed.push(propertyOperation.kind);
+      if (update.missingEvidenceCleared) counts.missingCleared += 1;
     }
     if (update.verifyDescription) {
       const descriptionOperation = operations[operationIndex]!;
@@ -278,15 +298,46 @@ export async function applyPlan(
     counts.updated += 1;
   }
 
-  for (const assignment of plan.assignmentsToRemove) {
+  async function applyRemoval(assignment: AssignmentRemoval): Promise<void> {
     const operation = operations[operationIndex]!;
     await applyStep(operation, () =>
       updateAssignment(gateway, assignment.pageId, {
         removed: true,
         canvasState: "Removed",
+        ...(assignment.clearMissingEvidence
+          ? { canvasMissingSince: null, canvasMissingCount: null }
+          : {}),
+        ...(assignment.canvasMissingCountAfter !== undefined
+          ? { canvasMissingCount: assignment.canvasMissingCountAfter }
+          : {}),
       }),
     );
-    counts.removed += 1;
+    if (assignment.markRemoved) counts.removed += 1;
+    if (assignment.clearMissingEvidence) counts.missingCleared += 1;
+    if (assignment.canvasMissingCountAfter !== undefined) counts.missingAdvanced += 1;
+  }
+
+  for (const assignment of plan.assignmentsToRemove.filter(
+    (item) => item.reason === "explicit-cancellation",
+  )) {
+    await applyRemoval(assignment);
+  }
+
+  for (const update of plan.assignmentsMissingEvidenceToUpdate) {
+    const operation = operations[operationIndex]!;
+    await applyStep(operation, () =>
+      updateAssignment(gateway, update.pageId, {
+        canvasMissingSince: update.canvasMissingSince,
+        canvasMissingCount: update.canvasMissingCount,
+      }),
+    );
+    counts.missingAdvanced += 1;
+  }
+
+  for (const assignment of plan.assignmentsToRemove.filter(
+    (item) => item.reason === "persistent-absence",
+  )) {
+    await applyRemoval(assignment);
   }
   return execution;
 }

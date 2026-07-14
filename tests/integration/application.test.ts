@@ -56,6 +56,9 @@ function counts(): RunCounts {
     updated: 0,
     coursesUpdated: 0,
     removed: 0,
+    missingObserved: 0,
+    missingAdvanced: 0,
+    missingCleared: 0,
     unchanged: 0,
     skipped: 0,
     warningCount: 0,
@@ -163,6 +166,55 @@ describe("application modes and failure handling", () => {
     });
     expect(result.status).toBe("Dry Run");
     expect(result.counts.created).toBe(1);
+    expect(gateway.writes).toEqual([]);
+  });
+
+  it("dry-run proposes a scheduled missing-evidence transition without writes", async () => {
+    const gateway = new FakeGateway();
+    gateway.assignments.push({
+      id: "assignment-missing",
+      properties: {
+        Assignment: { title: [{ plain_text: "Existing" }] },
+        Course: { relation: [{ id: "course" }] },
+        "Canvas UID": { rich_text: [{ plain_text: "uid-missing" }] },
+        "Canvas Due Date": { date: { start: "2026-07-20T20:00:00Z" } },
+        "Imported From": { select: { name: "Canvas ICS" } },
+        "Removed from Canvas": { checkbox: false },
+        "Canvas State": { select: { name: "Active" } },
+      },
+    });
+    gateway.courses.push({
+      id: "course",
+      properties: {
+        Course: { title: [{ plain_text: "EE 10" }] },
+        "Canvas Course ID": { rich_text: [{ plain_text: "123" }] },
+      },
+    });
+    const present = {
+      uid: "uid-present",
+      title: "Present",
+      courseName: "EE 10",
+      canvasCourseId: "123",
+      inferredType: "Homework" as const,
+    };
+    const proposedFeed: AssignmentFeed = {
+      assignments: [present],
+      cancelledAssignments: [],
+      diagnostics: {
+        ...emptyFeed.diagnostics,
+        totalEvents: 1,
+        sourceUids: [present.uid],
+        normalizedAssignmentUids: [present.uid],
+      },
+    };
+    const result = await run(config({ mode: "dry-run", trigger: "scheduled" }), {
+      gateway,
+      provider: new FakeProvider(proposedFeed),
+    });
+    expect(result.plan?.assignmentsMissingEvidenceToUpdate).toHaveLength(1);
+    expect(result.counts.missingObserved).toBe(1);
+    expect(result.counts.missingAdvanced).toBe(1);
+    expect(result.counts.removed).toBe(0);
     expect(gateway.writes).toEqual([]);
   });
 
@@ -407,6 +459,7 @@ describe("application modes and failure handling", () => {
           properties: { title: "Changed" },
           verifyDescription: false,
           descriptionHash: managedDescriptionHash(undefined),
+          missingEvidenceCleared: false,
         },
       ],
       assignmentsToRemove: [
@@ -416,8 +469,13 @@ describe("application modes and failure handling", () => {
           title: "Removed",
           coursePageIds: [],
           removed: false,
+          reason: "persistent-absence",
+          markRemoved: true,
+          clearMissingEvidence: false,
         },
       ],
+      assignmentsMissingEvidenceToUpdate: [],
+      missingCandidatesObserved: 0,
       unchanged: 0,
       skipped: 0,
       warnings: [],
@@ -435,6 +493,9 @@ describe("application modes and failure handling", () => {
       updated: 0,
       coursesUpdated: 0,
       removed: 0,
+      missingObserved: 0,
+      missingAdvanced: 0,
+      missingCleared: 0,
       unchanged: 0,
       skipped: 0,
       warningCount: 0,
@@ -455,6 +516,8 @@ describe("application modes and failure handling", () => {
       assignmentsToCreate: [],
       assignmentsToUpdate: [],
       assignmentsToRemove: [],
+      assignmentsMissingEvidenceToUpdate: [],
+      missingCandidatesObserved: 0,
       unchanged: 0,
       skipped: 0,
       warnings: [],
@@ -489,10 +552,17 @@ describe("application modes and failure handling", () => {
           priority: "High",
           assignmentType: "Exam",
           overrideDueDate: "2026-07-20T20:00:00.000Z",
+          canvasMissingSince: "2026-07-12T00:00:00Z",
+          canvasMissingCount: 1,
           removed: false,
           canvasState: "Active",
+          reason: "explicit-cancellation",
+          markRemoved: true,
+          clearMissingEvidence: true,
         },
       ],
+      assignmentsMissingEvidenceToUpdate: [],
+      missingCandidatesObserved: 0,
       unchanged: 0,
       skipped: 0,
       warnings: [],
@@ -510,6 +580,9 @@ describe("application modes and failure handling", () => {
       updated: 0,
       coursesUpdated: 0,
       removed: 0,
+      missingObserved: 0,
+      missingAdvanced: 0,
+      missingCleared: 0,
       unchanged: 0,
       skipped: 0,
       warningCount: 0,
@@ -518,6 +591,8 @@ describe("application modes and failure handling", () => {
     const properties = gateway.writes[0]?.value as Record<string, unknown>;
     expect(properties).toHaveProperty("Removed from Canvas");
     expect(properties).toHaveProperty("Canvas State");
+    expect(properties).toHaveProperty("Canvas Missing Since", { date: null });
+    expect(properties).toHaveProperty("Canvas Missing Count", { number: null });
     expect(properties).not.toHaveProperty("Personal Status");
     expect(properties).not.toHaveProperty("Priority");
     expect(properties).not.toHaveProperty("Assignment Type");
@@ -708,6 +783,8 @@ describe("template stabilization and recoverable initialization", () => {
       assignmentsToCreate: [assignmentCreate()],
       assignmentsToUpdate: [],
       assignmentsToRemove: [],
+      assignmentsMissingEvidenceToUpdate: [],
+      missingCandidatesObserved: 0,
       unchanged: 0,
       skipped: 0,
       warnings: [],
@@ -743,6 +820,8 @@ describe("template stabilization and recoverable initialization", () => {
       assignmentsToCreate: [assignmentCreate()],
       assignmentsToUpdate: [],
       assignmentsToRemove: [],
+      assignmentsMissingEvidenceToUpdate: [],
+      missingCandidatesObserved: 0,
       unchanged: 0,
       skipped: 0,
       warnings: [],
@@ -766,9 +845,12 @@ describe("template stabilization and recoverable initialization", () => {
           properties: {},
           verifyDescription: true,
           descriptionHash: managedDescriptionHash("Recovered description"),
+          missingEvidenceCleared: false,
         },
       ],
       assignmentsToRemove: [],
+      assignmentsMissingEvidenceToUpdate: [],
+      missingCandidatesObserved: 0,
       unchanged: 0,
       skipped: 0,
       warnings: [],
@@ -816,9 +898,12 @@ describe("managed descriptions", () => {
           properties: {},
           verifyDescription: true,
           descriptionHash: managedDescriptionHash(markdown),
+          missingEvidenceCleared: false,
         },
       ],
       assignmentsToRemove: [],
+      assignmentsMissingEvidenceToUpdate: [],
+      missingCandidatesObserved: 0,
       unchanged: 0,
       skipped: 0,
       warnings: [],
@@ -995,6 +1080,45 @@ describe("ambiguity-safe block deletion", () => {
 });
 
 describe("partial execution and Sync Log recovery", () => {
+  it("reports which missing-evidence writes persisted before a partial failure", async () => {
+    const gateway = new StatefulFakeGateway();
+    gateway.updateFailures.push({ id: "assignment-b", status: 400, applied: false });
+    const plan: SyncPlan = {
+      coursesToCreate: [],
+      coursesToUpdate: [],
+      assignmentsToCreate: [],
+      assignmentsToUpdate: [],
+      assignmentsMissingEvidenceToUpdate: ["assignment-a", "assignment-b"].map((pageId) => ({
+        pageId,
+        canvasMissingSince: "2026-07-13T12:00:00Z",
+        canvasMissingCount: 1,
+        transition: "observed" as const,
+      })),
+      assignmentsToRemove: [],
+      missingCandidatesObserved: 2,
+      unchanged: 0,
+      skipped: 0,
+      warnings: [],
+    };
+    const appliedCounts = counts();
+    let failure: ApplyPlanError | undefined;
+    try {
+      await applyPlan(gateway, config(), plan, appliedCounts);
+    } catch (error) {
+      if (error instanceof ApplyPlanError) failure = error;
+      else throw error;
+    }
+    expect(appliedCounts.missingAdvanced).toBe(1);
+    expect(failure?.execution.appliedOperations).toContainEqual({
+      kind: "assignment-missing-evidence-update",
+      target: "assignment-a",
+    });
+    expect(failure?.execution.failedOperation).toMatchObject({
+      kind: "assignment-missing-evidence-update",
+      target: "assignment-b",
+    });
+  });
+
   it("records only applied updates and leaves removals not attempted after failure", async () => {
     const gateway = new StatefulFakeGateway();
     gateway.updateFailures.push({ id: "assignment-b", status: 400, applied: false });
@@ -1013,6 +1137,7 @@ describe("partial execution and Sync Log recovery", () => {
         properties: { title: "Changed" },
         verifyDescription: false,
         descriptionHash: managedDescriptionHash(undefined),
+        missingEvidenceCleared: false,
       })),
       assignmentsToRemove: [
         {
@@ -1021,8 +1146,13 @@ describe("partial execution and Sync Log recovery", () => {
           title: "Removed",
           coursePageIds: [],
           removed: false,
+          reason: "persistent-absence",
+          markRemoved: true,
+          clearMissingEvidence: false,
         },
       ],
+      assignmentsMissingEvidenceToUpdate: [],
+      missingCandidatesObserved: 0,
       unchanged: 0,
       skipped: 0,
       warnings: [],
@@ -1094,6 +1224,8 @@ describe("partial execution and Sync Log recovery", () => {
       ],
       assignmentsToUpdate: [],
       assignmentsToRemove: [],
+      assignmentsMissingEvidenceToUpdate: [],
+      missingCandidatesObserved: 0,
       unchanged: 0,
       skipped: 0,
       warnings: [],
@@ -1158,9 +1290,12 @@ describe("partial execution and Sync Log recovery", () => {
           properties: { title: "Changed" },
           verifyDescription: true,
           descriptionHash: managedDescriptionHash("new"),
+          missingEvidenceCleared: false,
         },
       ],
       assignmentsToRemove: [],
+      assignmentsMissingEvidenceToUpdate: [],
+      missingCandidatesObserved: 0,
       unchanged: 0,
       skipped: 0,
       warnings: [],

@@ -3,6 +3,8 @@ import { resolve } from "node:path";
 import { z } from "zod";
 import { ASSIGNMENT_TYPES, type AssignmentType, type RunMode, type Trigger } from "./types.js";
 
+export const DEFAULT_MISSING_EVIDENCE_MINIMUM_HOURS = 6;
+
 const envSchema = z.object({
   CANVAS_ICS_URL: z
     .string()
@@ -13,6 +15,10 @@ const envSchema = z.object({
   NOTION_COURSES_DATA_SOURCE_ID: z.string().min(1),
   NOTION_SYNC_LOG_DATA_SOURCE_ID: z.string().min(1),
   NOTION_TIMEZONE: z.string().default("America/Los_Angeles"),
+  CANVAS_MISSING_EVIDENCE_MINIMUM_HOURS: z.coerce
+    .number()
+    .min(DEFAULT_MISSING_EVIDENCE_MINIMUM_HOURS)
+    .default(DEFAULT_MISSING_EVIDENCE_MINIMUM_HOURS),
   GITHUB_SERVER_URL: z.string().url().optional(),
   GITHUB_REPOSITORY: z.string().optional(),
   GITHUB_RUN_ID: z.string().optional(),

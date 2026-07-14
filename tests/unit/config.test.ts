@@ -1,11 +1,29 @@
 import { describe, expect, it } from "vitest";
 import {
+  loadConfig,
   parseAssignmentTypeRules,
   parseCourseAliases,
   parseJsonConfiguration,
 } from "../../src/config.js";
 
+const environment = {
+  CANVAS_ICS_URL: "https://canvas.example.edu/feed.ics",
+  NOTION_TOKEN: "secret_test-token",
+  NOTION_ASSIGNMENTS_DATA_SOURCE_ID: "assignments",
+  NOTION_COURSES_DATA_SOURCE_ID: "courses",
+  NOTION_SYNC_LOG_DATA_SOURCE_ID: "log",
+};
+
 describe("optional JSON configuration", () => {
+  it("defaults missing-evidence removal to six hours and rejects shorter intervals", async () => {
+    await expect(loadConfig([], environment)).resolves.toMatchObject({
+      CANVAS_MISSING_EVIDENCE_MINIMUM_HOURS: 6,
+    });
+    await expect(
+      loadConfig([], { ...environment, CANVAS_MISSING_EVIDENCE_MINIMUM_HOURS: "5" }),
+    ).rejects.toThrow("Invalid environment configuration");
+  });
+
   it("rejects malformed JSON with the configuration filename", () => {
     expect(() => parseJsonConfiguration("{", "config/course-aliases.json")).toThrow(
       "config/course-aliases.json: malformed JSON",

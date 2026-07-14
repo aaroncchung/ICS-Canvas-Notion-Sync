@@ -49,6 +49,7 @@ jobs:
           NOTION_COURSES_DATA_SOURCE_ID: ${{ vars.NOTION_COURSES_DATA_SOURCE_ID }}
           NOTION_SYNC_LOG_DATA_SOURCE_ID: ${{ vars.NOTION_SYNC_LOG_DATA_SOURCE_ID }}
           NOTION_TIMEZONE: ${{ vars.NOTION_TIMEZONE || 'America/Los_Angeles' }}
+          CANVAS_MISSING_EVIDENCE_MINIMUM_HOURS: ${{ vars.CANVAS_MISSING_EVIDENCE_MINIMUM_HOURS || '6' }}
           RUN_MODE: ${{ github.event_name == 'schedule' && 'sync' || inputs.mode }}
           RUN_TRIGGER: ${{ github.event_name == 'schedule' && 'scheduled' || 'manual' }}
           DISABLE_REMOVALS: ${{ inputs.disable_removals || false }}

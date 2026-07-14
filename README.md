@@ -41,7 +41,7 @@ The Notion API version is explicitly pinned to `2026-03-11`.
 Follow the exact checklist in [docs/notion-setup.md](docs/notion-setup.md). In summary:
 
 - Rename `Due` → `Effective Due Date`, `Canvas Key` → `Canvas UID`, and `Sync Updated At` → `Last Synced` in Assignments.
-- Add `Canvas Due Date`, `Override Due Date`, `Imported From`, `Removed from Canvas`, `Raw Description`, and `Canvas Description Hash`.
+- Add `Canvas Due Date`, `Override Due Date`, `Canvas Missing Since`, `Canvas Missing Count`, `Imported From`, `Removed from Canvas`, `Raw Description`, and `Canvas Description Hash`.
 - Create the Canvas Sync Log data source with the documented fields and options.
 - Share Assignments, Courses, the default assignment template, and Canvas Sync Log with the integration.
 - Make the assignment template the data source's default. New pages use Notion's current default-template API, which applies the template asynchronously; the sync waits before adding its managed description.
@@ -66,9 +66,10 @@ NOTION_ASSIGNMENTS_DATA_SOURCE_ID
 NOTION_COURSES_DATA_SOURCE_ID
 NOTION_SYNC_LOG_DATA_SOURCE_ID
 NOTION_TIMEZONE
+CANVAS_MISSING_EVIDENCE_MINIMUM_HOURS
 ```
 
-`NOTION_TIMEZONE` defaults to `America/Los_Angeles` in the GitHub workflow. The known starting IDs are:
+`NOTION_TIMEZONE` defaults to `America/Los_Angeles` in the GitHub workflow. `CANVAS_MISSING_EVIDENCE_MINIMUM_HOURS` defaults to `6` and rejects values below six hours. The known starting IDs are:
 
 ```text
 Assignments: 118ccb50-6027-4ccb-ba19-c0b6ac292ab7
@@ -166,7 +167,8 @@ On creation, Personal Status is `Not started`, Priority is blank, and Assignment
 - A different Effective Due Date is captured in Override Due Date.
 - An override continues to win over later Canvas changes.
 - Moving Effective Due Date back to the current Canvas Due Date clears the override and resumes following Canvas.
-- Equivalent timezone serializations compare by instant, avoiding false overrides.
+- If Canvas previously had no due date, a populated Effective Due Date is captured as the manual override and preserved when Canvas later adds or changes its date.
+- Equivalent timestamps compare by instant, and equivalent date-only/timestamp calendar dates do not create false overrides.
 
 An explicit “no due date” override is not supported because an empty writable date cannot be distinguished unambiguously from missing source data.
 
@@ -180,7 +182,9 @@ Extension authors should note that normalized assignments no longer carry unused
 
 ### Removal safety
 
-Assignments are never deleted. An absent imported assignment can be marked `Removed from Canvas = true` and `Canvas State = Removed` only after a complete, nonempty, nontruncated feed under 1,000 events, successful active writes, an absent raw `VEVENT` UID, an in-window stored due date (approximately 30 days back through 366 days ahead), and enabled removal detection. Raw UIDs remain present even when their event is malformed, suspicious, cancelled, or quarantined as a duplicate. Existing pages involved in possible-duplicate or ambiguity warnings are also protected from removal for that run. An unidentifiable assignment-like event suppresses removals rather than risking a false removal. A reappearing active UID is reactivated without changing status, priority, notes, type, override, or page content.
+Assignments are never deleted. A safe scheduled run records a first in-window absence in `Canvas Missing Since` and `Canvas Missing Count` without marking the assignment removed. Later safe scheduled runs advance the count; removal requires at least two safe scheduled absences, a count of at least two, and the configured minimum interval since the first observation. A second run before that interval only advances evidence. Manual live runs report candidates but never advance the count. Dry-run follows its declared trigger and shows proposed transitions without writes.
+
+Absence evidence advances only after a complete, nonempty, nontruncated feed under 1,000 events, an absent raw `VEVENT` UID, an in-window stored due date (approximately 30 days back through 366 days ahead), and all existing duplicate, ambiguity, and removal suppressors. Unsafe feeds leave prior evidence unchanged and report why it was not advanced. A present active UID clears its own evidence and reactivates a removed assignment while preserving status, priority, notes, type, override, and page content. A deterministic `STATUS:CANCELLED` match may remove immediately and clears stale missing evidence because cancellation is stronger than inferred absence.
 
 ## Security and troubleshooting
 

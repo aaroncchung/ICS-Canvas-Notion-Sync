@@ -7,6 +7,7 @@ import type {
   PlanWarning,
   RunMetrics,
   SyncPlan,
+  Trigger,
 } from "../types.js";
 import { descriptionExcerpt } from "../notion/assignments.js";
 import { managedDescriptionHash } from "../notion/descriptions.js";
@@ -83,13 +84,17 @@ export function buildPlan(
   disableRemovals: boolean,
   now = new Date(),
   metrics?: RunMetrics,
+  trigger: Trigger = "scheduled",
+  minimumMissingIntervalMs?: number,
 ): SyncPlan {
   const plan: SyncPlan = {
     coursesToCreate: [],
     coursesToUpdate: [],
     assignmentsToCreate: [],
     assignmentsToUpdate: [],
+    assignmentsMissingEvidenceToUpdate: [],
     assignmentsToRemove: [],
+    missingCandidatesObserved: 0,
     unchanged: 0,
     skipped: 0,
     warnings: feedWarnings(feed),
@@ -104,7 +109,7 @@ export function buildPlan(
   const plannedCourseUpdates = new Map<string, SyncPlan["coursesToUpdate"][number]>();
   const conflictedCoursePageIds = new Set<string>();
   const protectedPageIds = new Set<string>();
-  const cancelledRemovals = new Map<string, AssignmentRecord>();
+  const removalsByPageId = new Map<string, SyncPlan["assignmentsToRemove"][number]>();
 
   for (const source of feed.cancelledAssignments) {
     const uidMatches = byUid.get(source.uid) ?? [];
@@ -123,10 +128,21 @@ export function buildPlan(
     if (existing) {
       if (disableRemovals) {
         plan.skipped += 1;
-      } else if (existing.removed && existing.canvasState === "Removed") {
+      } else if (
+        existing.removed &&
+        existing.canvasState === "Removed" &&
+        !existing.canvasMissingSince &&
+        existing.canvasMissingCount === undefined
+      ) {
         plan.unchanged += 1;
       } else {
-        cancelledRemovals.set(existing.pageId, existing);
+        removalsByPageId.set(existing.pageId, {
+          ...existing,
+          reason: "explicit-cancellation",
+          markRemoved: !existing.removed || existing.canvasState !== "Removed",
+          clearMissingEvidence:
+            Boolean(existing.canvasMissingSince) || existing.canvasMissingCount !== undefined,
+        });
       }
       continue;
     }
@@ -310,6 +326,12 @@ export function buildPlan(
       properties.removed = false;
       properties.canvasState = "Active";
     }
+    const missingEvidenceCleared =
+      Boolean(existing.canvasMissingSince) || existing.canvasMissingCount !== undefined;
+    if (missingEvidenceCleared) {
+      properties.canvasMissingSince = null;
+      properties.canvasMissingCount = null;
+    }
     if (Object.keys(properties).length || verifyDescription) {
       plan.assignmentsToUpdate.push({
         pageId: existing.pageId,
@@ -318,6 +340,7 @@ export function buildPlan(
         properties,
         verifyDescription,
         descriptionHash,
+        missingEvidenceCleared,
       });
     } else {
       plan.unchanged += 1;
@@ -341,9 +364,44 @@ export function buildPlan(
     );
   }
 
-  const removal = detectRemovals(feed, existingAssignments, disableRemovals, protectedPageIds, now);
-  for (const assignment of removal.removals) cancelledRemovals.set(assignment.pageId, assignment);
-  plan.assignmentsToRemove = [...cancelledRemovals.values()];
+  const pagesWithPlannedUpdates = new Set(
+    plan.assignmentsToUpdate.map((assignment) => assignment.pageId),
+  );
+  for (const source of feed.assignments) {
+    const matches = byUid.get(source.uid) ?? [];
+    const existing = matches.length === 1 ? matches[0] : undefined;
+    if (
+      !existing ||
+      pagesWithPlannedUpdates.has(existing.pageId) ||
+      (!existing.canvasMissingSince && existing.canvasMissingCount === undefined)
+    ) {
+      continue;
+    }
+    plan.assignmentsToUpdate.push({
+      pageId: existing.pageId,
+      source,
+      courseKey: `page:${existing.coursePageIds[0] ?? ""}`,
+      properties: { canvasMissingSince: null, canvasMissingCount: null },
+      verifyDescription: false,
+      descriptionHash:
+        existing.descriptionHash ?? managedDescriptionHash(source.descriptionMarkdown),
+      missingEvidenceCleared: true,
+    });
+  }
+
+  const removal = detectRemovals(
+    feed,
+    existingAssignments,
+    disableRemovals,
+    protectedPageIds,
+    trigger,
+    now,
+    minimumMissingIntervalMs,
+  );
+  for (const assignment of removal.removals) removalsByPageId.set(assignment.pageId, assignment);
+  plan.assignmentsMissingEvidenceToUpdate = removal.missingEvidenceUpdates;
+  plan.assignmentsToRemove = [...removalsByPageId.values()];
+  plan.missingCandidatesObserved = removal.newlyObserved;
   plan.coursesToUpdate = [...plannedCourseUpdates.values()];
   plan.warnings.push(...removal.warnings);
   return plan;

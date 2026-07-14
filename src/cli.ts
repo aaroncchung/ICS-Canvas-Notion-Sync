@@ -32,6 +32,9 @@ function emptyCounts(): RunCounts {
     updated: 0,
     coursesUpdated: 0,
     removed: 0,
+    missingObserved: 0,
+    missingAdvanced: 0,
+    missingCleared: 0,
     unchanged: 0,
     skipped: 0,
     warningCount: 0,
@@ -66,6 +69,9 @@ export function buildJobSummary(config: AppConfig, result: RunResult): string {
     `- ${proposed}Assignments created: ${result.counts.created}`,
     `- ${proposed}Assignments updated: ${result.counts.updated}`,
     `- ${proposed}Assignments marked removed: ${result.counts.removed}`,
+    `- Newly observed missing candidates: ${result.counts.missingObserved}`,
+    `- ${proposed}Missing evidence advanced: ${result.counts.missingAdvanced}`,
+    `- ${proposed}Missing evidence cleared: ${result.counts.missingCleared}`,
     `- ${proposed}Courses created: ${courseCreates}`,
     `- ${proposed}Courses enriched: ${result.counts.coursesUpdated}`,
     `- Course conflicts: ${result.metrics.coursesConflicted}`,
@@ -189,6 +195,8 @@ export async function run(
         config.disableRemovals,
         new Date(),
         metrics,
+        config.trigger,
+        config.CANVAS_MISSING_EVIDENCE_MINIMUM_HOURS * 60 * 60 * 1000,
       );
       for (const warning of plan.warnings.filter(
         (item) => item.code === "course-metadata-conflict",
@@ -201,11 +209,23 @@ export async function run(
       counts.unchanged = plan.unchanged;
       counts.skipped = plan.skipped;
       counts.warningCount = plan.warnings.length;
+      counts.missingObserved = plan.missingCandidatesObserved;
       if (config.mode === "dry-run") {
         counts.created = plan.assignmentsToCreate.length;
         counts.updated = plan.assignmentsToUpdate.length;
         counts.coursesUpdated = plan.coursesToUpdate.length;
-        counts.removed = plan.assignmentsToRemove.length;
+        counts.removed = plan.assignmentsToRemove.filter(
+          (assignment) => assignment.markRemoved,
+        ).length;
+        counts.missingAdvanced =
+          plan.assignmentsMissingEvidenceToUpdate.length +
+          plan.assignmentsToRemove.filter(
+            (assignment) => assignment.canvasMissingCountAfter !== undefined,
+          ).length;
+        counts.missingCleared =
+          plan.assignmentsToUpdate.filter((assignment) => assignment.missingEvidenceCleared)
+            .length +
+          plan.assignmentsToRemove.filter((assignment) => assignment.clearMissingEvidence).length;
       }
       result = {
         status:

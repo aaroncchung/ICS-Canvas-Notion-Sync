@@ -4,11 +4,13 @@ import { createAssignment } from "../../src/notion/assignments.js";
 import { managedDescriptionHash } from "../../src/notion/descriptions.js";
 import { createRunMetrics } from "../../src/notion/client.js";
 import { buildPlan } from "../../src/sync/plan.js";
+import { MINIMUM_MISSING_EVIDENCE_INTERVAL_MS } from "../../src/sync/removal-detector.js";
 import type {
   AssignmentFeed,
   AssignmentRecord,
   CourseRecord,
   ExternalAssignment,
+  Trigger,
 } from "../../src/types.js";
 import { FakeGateway, rules } from "../helpers.js";
 
@@ -42,6 +44,12 @@ function source(overrides: Partial<ExternalAssignment> = {}): ExternalAssignment
     inferredType: "Homework",
     ...overrides,
   };
+}
+
+function sourceWithoutDueDate(): ExternalAssignment {
+  const value = source();
+  delete value.dueAt;
+  return value;
 }
 
 function record(overrides: Partial<AssignmentRecord> = {}): AssignmentRecord {
@@ -104,8 +112,10 @@ function planFeed(
   existing: AssignmentRecord[] = [record()],
   courses: CourseRecord[] = [course],
   aliases: Record<string, string> = {},
+  trigger: Trigger = "scheduled",
+  now = new Date("2026-07-13T12:00:00Z"),
 ) {
-  return buildPlan(value, existing, courses, aliases, false, new Date("2026-07-13T12:00:00Z"));
+  return buildPlan(value, existing, courses, aliases, false, now, undefined, trigger);
 }
 
 describe("plan-first reconciliation", () => {
@@ -320,7 +330,60 @@ describe("plan-first reconciliation", () => {
     expect(update?.properties.overrideDueDate).toBeNull();
   });
 
-  it("33 marks an absent in-window assignment removed", () => {
+  it("captures a manual Effective Due Date when Canvas has no due date", () => {
+    const current = record({ effectiveDueDate: "2026-07-25" });
+    delete current.canvasDueDate;
+    const update = plan([sourceWithoutDueDate()], [current]).assignmentsToUpdate[0];
+    expect(update?.properties.overrideDueDate).toBe("2026-07-25");
+    expect(update?.properties.effectiveDueDate).toBeUndefined();
+  });
+
+  it("keeps a no-Canvas-date override when Canvas later adds or changes a due date", () => {
+    const current = record({
+      effectiveDueDate: "2026-07-25",
+      overrideDueDate: "2026-07-25",
+    });
+    delete current.canvasDueDate;
+    const first = plan([source({ dueAt: "2026-07-20" })], [current]).assignmentsToUpdate[0];
+    expect(first?.properties.effectiveDueDate).toBeUndefined();
+    expect(first?.properties.overrideDueDate).toBeUndefined();
+
+    const changed = plan(
+      [source({ dueAt: "2026-07-22" })],
+      [{ ...current, canvasDueDate: "2026-07-20" }],
+    ).assignmentsToUpdate[0];
+    expect(changed?.properties.effectiveDueDate).toBeUndefined();
+    expect(changed?.properties.overrideDueDate).toBeUndefined();
+  });
+
+  it("recaptures a cleared override while Effective Due Date still differs from Canvas", () => {
+    const update = plan(
+      [source({ dueAt: "2026-07-20" })],
+      [
+        record({
+          canvasDueDate: "2026-07-20",
+          effectiveDueDate: "2026-07-25",
+        }),
+      ],
+    ).assignmentsToUpdate[0];
+    expect(update?.properties.overrideDueDate).toBe("2026-07-25");
+  });
+
+  it("leaves all blank dates blank and normalizes equivalent date-only values", () => {
+    const current = record();
+    delete current.canvasDueDate;
+    delete current.effectiveDueDate;
+    const blank = plan([sourceWithoutDueDate()], [current]);
+    expect(blank.assignmentsToUpdate).toHaveLength(0);
+
+    const normalized = plan(
+      [source({ dueAt: "2026-07-20T20:00:00.000Z" })],
+      [record({ canvasDueDate: "2026-07-20", effectiveDueDate: "2026-07-20" })],
+    );
+    expect(normalized.assignmentsToUpdate).toHaveLength(0);
+  });
+
+  it("33 treats a first absent in-window assignment as a candidate", () => {
     const other = source({
       uid: "uid-other",
       title: "Different assignment",
@@ -328,7 +391,16 @@ describe("plan-first reconciliation", () => {
       canvasUrl: "https://canvas.example.edu/courses/123/assignments/999",
       dueAt: "2026-08-01T20:00:00.000Z",
     });
-    expect(plan([other], [record()]).assignmentsToRemove).toHaveLength(1);
+    const result = plan([other], [record()]);
+    expect(result.assignmentsToRemove).toHaveLength(0);
+    expect(result.assignmentsMissingEvidenceToUpdate).toEqual([
+      {
+        pageId: "assignment-page",
+        canvasMissingSince: "2026-07-13T12:00:00.000Z",
+        canvasMissingCount: 1,
+        transition: "observed",
+      },
+    ]);
   });
 
   it("protects a raw assignment UID that could not be normalized", () => {
@@ -348,6 +420,20 @@ describe("plan-first reconciliation", () => {
     );
     const value = parseIcs(calendar(`${duplicate}\n${duplicate}`), rules);
     expect(planFeed(value).assignmentsToRemove).toHaveLength(0);
+  });
+
+  it("does not advance unrelated absence evidence when source UID data is duplicated", () => {
+    const duplicate = event(
+      "UID:uid-other\nDTSTART:20260720T200000Z\nSUMMARY:Other [EE 10]\nURL:https://canvas.example.edu/courses/123/assignments/999",
+    );
+    const value = parseIcs(calendar(`${duplicate}\n${duplicate}`), rules);
+    const result = planFeed(value, [
+      record({ canvasMissingSince: "2026-07-12T00:00:00Z", canvasMissingCount: 1 }),
+    ]);
+    expect(result.assignmentsMissingEvidenceToUpdate).toHaveLength(0);
+    expect(result.warnings.some((warning) => warning.code === "removals-unsafe-duplicate")).toBe(
+      true,
+    );
   });
 
   it("does not match title and date across different Canvas courses", () => {
@@ -423,7 +509,12 @@ describe("plan-first reconciliation", () => {
   });
 
   it("marks a cancelled existing assignment removed while retaining Notion-owned values", () => {
-    const existing = record({ priority: "High", assignmentType: "Quiz" });
+    const existing = record({
+      priority: "High",
+      assignmentType: "Quiz",
+      canvasMissingSince: "2026-07-12T00:00:00Z",
+      canvasMissingCount: 1,
+    });
     const value = feed([], 1, {
       cancelledAssignments: [source()],
       diagnostics: {
@@ -444,6 +535,8 @@ describe("plan-first reconciliation", () => {
       personalStatus: "Done",
       priority: "High",
       assignmentType: "Quiz",
+      reason: "explicit-cancellation",
+      clearMissingEvidence: true,
     });
   });
 
@@ -485,7 +578,7 @@ describe("plan-first reconciliation", () => {
     ).toBe(true);
   });
 
-  it("still removes a genuinely absent assignment when ordinary events accompany a valid one", () => {
+  it("observes an absent assignment when ordinary events accompany a valid one", () => {
     const existing = [record(), record({ pageId: "assignment-absent", uid: "uid-absent" })];
     const value = feed([source()], 2, {
       diagnostics: {
@@ -500,7 +593,9 @@ describe("plan-first reconciliation", () => {
         ],
       },
     });
-    expect(planFeed(value, existing).assignmentsToRemove.map((item) => item.pageId)).toEqual([
+    const result = planFeed(value, existing);
+    expect(result.assignmentsToRemove).toHaveLength(0);
+    expect(result.assignmentsMissingEvidenceToUpdate.map((item) => item.pageId)).toEqual([
       "assignment-absent",
     ]);
   });
@@ -526,9 +621,119 @@ describe("plan-first reconciliation", () => {
   });
 
   it("34 reactivates a reappearing removed assignment", () => {
-    const update = plan([source()], [record({ removed: true, canvasState: "Removed" })])
-      .assignmentsToUpdate[0];
+    const update = plan(
+      [source()],
+      [
+        record({
+          removed: true,
+          canvasState: "Removed",
+          canvasMissingSince: "2026-07-12T00:00:00Z",
+          canvasMissingCount: 2,
+        }),
+      ],
+    ).assignmentsToUpdate[0];
     expect(update?.properties).toMatchObject({ removed: false, canvasState: "Active" });
+    expect(update?.properties.canvasMissingSince).toBeNull();
+    expect(update?.properties.canvasMissingCount).toBeNull();
+  });
+
+  it("clears missing evidence when an active assignment reappears", () => {
+    const update = plan(
+      [source()],
+      [
+        record({
+          canvasMissingSince: "2026-07-12T00:00:00Z",
+          canvasMissingCount: 1,
+        }),
+      ],
+    ).assignmentsToUpdate[0];
+    expect(update?.missingEvidenceCleared).toBe(true);
+    expect(update?.properties.canvasMissingSince).toBeNull();
+    expect(update?.properties.canvasMissingCount).toBeNull();
+    expect(update?.properties).not.toHaveProperty("personalStatus");
+    expect(update?.properties).not.toHaveProperty("priority");
+    expect(update?.properties).not.toHaveProperty("assignmentType");
+  });
+
+  it("requires both repeated scheduled evidence and the minimum interval", () => {
+    const other = source({
+      uid: "other",
+      title: "Other",
+      canvasAssignmentId: "999",
+      canvasUrl: "https://canvas.example.edu/courses/123/assignments/999",
+    });
+    const beforeInterval = planFeed(feed([other]), [
+      record({
+        canvasMissingSince: "2026-07-13T10:00:00Z",
+        canvasMissingCount: 1,
+      }),
+    ]);
+    expect(beforeInterval.assignmentsToRemove).toHaveLength(0);
+    expect(beforeInterval.assignmentsMissingEvidenceToUpdate[0]?.canvasMissingCount).toBe(2);
+
+    const qualifyingNow = new Date(
+      Date.parse("2026-07-13T10:00:00Z") + MINIMUM_MISSING_EVIDENCE_INTERVAL_MS,
+    );
+    const qualifying = planFeed(
+      feed([other]),
+      [
+        record({
+          canvasMissingSince: "2026-07-13T10:00:00Z",
+          canvasMissingCount: 1,
+        }),
+      ],
+      [course],
+      {},
+      "scheduled",
+      qualifyingNow,
+    );
+    expect(qualifying.assignmentsToRemove[0]).toMatchObject({
+      reason: "persistent-absence",
+      canvasMissingCountAfter: 2,
+    });
+  });
+
+  it("manual runs observe absence without advancing persistent evidence", () => {
+    const result = planFeed(
+      feed([
+        source({
+          uid: "other",
+          title: "Other",
+          canvasAssignmentId: "999",
+          canvasUrl: "https://canvas.example.edu/courses/123/assignments/999",
+        }),
+      ]),
+      [record({ canvasMissingSince: "2026-07-12T00:00:00Z", canvasMissingCount: 1 })],
+      [course],
+      {},
+      "manual",
+    );
+    expect(result.assignmentsMissingEvidenceToUpdate).toHaveLength(0);
+    expect(result.assignmentsToRemove).toHaveLength(0);
+    expect(result.warnings.some((warning) => warning.code === "missing-candidates-manual")).toBe(
+      true,
+    );
+  });
+
+  it("unsafe feeds neither advance nor clear prior evidence for absent assignments", () => {
+    const unsafe = feed([source({ uid: "other", title: "Other" })], 1000);
+    const result = planFeed(unsafe, [
+      record({ canvasMissingSince: "2026-07-12T00:00:00Z", canvasMissingCount: 1 }),
+    ]);
+    expect(result.assignmentsMissingEvidenceToUpdate).toHaveLength(0);
+    expect(result.assignmentsToRemove).toHaveLength(0);
+    expect(result.assignmentsToUpdate).toHaveLength(0);
+  });
+
+  it("an unsafe feed still clears evidence for its positively present active UID", () => {
+    const result = planFeed(feed([source()], 1000), [
+      record({ canvasMissingSince: "2026-07-12T00:00:00Z", canvasMissingCount: 1 }),
+    ]);
+    expect(result.assignmentsMissingEvidenceToUpdate).toHaveLength(0);
+    expect(result.assignmentsToUpdate[0]?.properties).toMatchObject({
+      canvasMissingSince: null,
+      canvasMissingCount: null,
+    });
   });
 
   it("35 suppresses removal on an unexpectedly empty feed", () => {
@@ -575,7 +780,14 @@ describe("plan-first reconciliation", () => {
           dueAt: "2026-08-01T20:00:00.000Z",
         }),
       ],
-      [record({ priority: "High", assignmentType: "Quiz" })],
+      [
+        record({
+          priority: "High",
+          assignmentType: "Quiz",
+          canvasMissingSince: "2026-07-13T00:00:00Z",
+          canvasMissingCount: 1,
+        }),
+      ],
     ).assignmentsToRemove[0];
     expect(removed).toMatchObject({
       personalStatus: "Done",

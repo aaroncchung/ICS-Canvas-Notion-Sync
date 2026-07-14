@@ -57,6 +57,12 @@ function resultBlocks(result: RunResult): Array<Record<string, unknown>> {
       ]
     : [];
   return [
+    ...section("Removal evidence", [
+      `Newly observed missing candidates: ${result.counts.missingObserved}`,
+      `Missing evidence advanced: ${result.counts.missingAdvanced}`,
+      `Missing evidence cleared: ${result.counts.missingCleared}`,
+      `Assignments marked removed: ${result.counts.removed}`,
+    ]),
     ...section("Planned operations", planned),
     ...section("Applied operations", applied),
     ...section("Partial operations", partial),

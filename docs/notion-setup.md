@@ -20,6 +20,8 @@ Add:
 
 - `Canvas Due Date` — Date
 - `Override Due Date` — Date
+- `Canvas Missing Since` — Date
+- `Canvas Missing Count` — Number
 - `Imported From` — Select, with option `Canvas ICS`
 - `Removed from Canvas` — Checkbox
 - `Raw Description` — Rich text
@@ -34,6 +36,8 @@ Confirm all required properties:
 | Effective Due Date      | Date      | —                                                                         |
 | Canvas Due Date         | Date      | —                                                                         |
 | Override Due Date       | Date      | —                                                                         |
+| Canvas Missing Since    | Date      | —                                                                         |
+| Canvas Missing Count    | Number    | —                                                                         |
 | Personal Status         | Status    | `Not started`, `In progress`, `Done`                                      |
 | Priority                | Select    | User-managed options                                                      |
 | Assignment Type         | Select    | `Homework`, `Lab`, `Quiz`, `Exam`, `Paper`, `Project`, `Reading`, `Other` |
@@ -48,6 +52,8 @@ Confirm all required properties:
 | Notes                   | Rich text | —                                                                         |
 
 Leave older API-oriented properties in place. The ICS sync ignores `Canvas Assignment ID`, `Canvas Course ID`, `Canvas Submitted`, `Canvas Updated At`, `Available From`, `Available Until`, `Points Possible`, `Submission Types`, and `Submitted At`.
+
+For an existing installation, manually add the two missing-evidence properties with the exact names and types above before upgrading. Leave both blank on existing assignments; the first qualifying scheduled absence initializes them safely. The application validates these properties but never creates, renames, converts, or backfills schema fields automatically.
 
 ## 3. Check Courses
 
@@ -122,6 +128,7 @@ Add variables:
 - `NOTION_COURSES_DATA_SOURCE_ID` (known starting value `e2c63549-089a-4461-9f19-52cd0626e386`)
 - `NOTION_SYNC_LOG_DATA_SOURCE_ID` (the ID created above)
 - `NOTION_TIMEZONE` (recommended `America/Los_Angeles`)
+- `CANVAS_MISSING_EVIDENCE_MINIMUM_HOURS` (optional; defaults to `6`, minimum `6`)
 - `HEALTH_ACTIVATION_GRACE_HOURS` (optional; defaults to `14` hours)
 
 Do not put secret values in variables, workflow inputs, issue text, or repository files.
@@ -138,4 +145,4 @@ From **Actions → Canvas–Notion sync → Run workflow**:
 
 Scheduled syncs then run every four hours. The health workflow creates the `sync-failure` label automatically when first needed. It ignores manual runs and suppresses no-success alerts during the initial workflow-activation grace period. Recovery is reported and closed through the durable marked issue; notification delivery remains a GitHub setting, not application email.
 
-Validate and GitHub summaries separate ordinary ignored events, suspicious events, malformed events, duplicate UIDs, cancelled assignments, and quarantined UID counts. Quarantined values are never displayed. Course metadata enrichment is proposed in dry-run and fills only blank Canvas Course ID, Canvas URL, and Sync Updated At fields; a conflicting nonblank ID or URL blocks the affected assignment until corrected.
+Validate and GitHub summaries separate ordinary ignored events, suspicious events, malformed events, duplicate UIDs, cancelled assignments, and quarantined UID counts. Sync results also separate newly observed missing candidates, evidence advanced, evidence cleared, and assignments actually marked removed. Manual live runs observe but do not advance missing evidence; scheduled live runs persist qualifying transitions; dry-run proposes the transitions for its selected trigger without writing. Quarantined values are never displayed. Course metadata enrichment is proposed in dry-run and fills only blank Canvas Course ID, Canvas URL, and Sync Updated At fields; a conflicting nonblank ID or URL blocks the affected assignment until corrected.

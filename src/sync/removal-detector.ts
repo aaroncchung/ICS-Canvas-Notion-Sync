@@ -1,6 +1,14 @@
-import type { AssignmentFeed, AssignmentRecord, PlanWarning } from "../types.js";
+import type {
+  AssignmentFeed,
+  AssignmentMissingEvidenceUpdate,
+  AssignmentRecord,
+  AssignmentRemoval,
+  PlanWarning,
+  Trigger,
+} from "../types.js";
 
 const DAY = 86_400_000;
+export const MINIMUM_MISSING_EVIDENCE_INTERVAL_MS = 6 * 60 * 60 * 1000;
 
 export function hasAssignmentSignals(feed: AssignmentFeed): boolean {
   return (
@@ -12,16 +20,31 @@ export function hasAssignmentSignals(feed: AssignmentFeed): boolean {
   );
 }
 
-export function absenceRemovalSafe(feed: AssignmentFeed): boolean {
-  const unidentifiableAssignmentLikeEvent = feed.diagnostics.events.some(
+function hasUnidentifiableAssignmentLikeEvent(feed: AssignmentFeed): boolean {
+  return feed.diagnostics.events.some(
     (event) => (event.kind === "malformed" || event.kind === "suspicious") && !event.uid,
   );
+}
+
+function hasDuplicateSourceData(feed: AssignmentFeed): boolean {
+  return feed.diagnostics.events.some((event) => event.kind === "duplicate");
+}
+
+export function absenceRemovalSafe(feed: AssignmentFeed): boolean {
   return (
     feed.diagnostics.complete &&
-    !unidentifiableAssignmentLikeEvent &&
+    !hasUnidentifiableAssignmentLikeEvent(feed) &&
+    !hasDuplicateSourceData(feed) &&
     feed.diagnostics.totalEvents < 1000 &&
     hasAssignmentSignals(feed)
   );
+}
+
+export interface RemovalEvidenceResult {
+  removals: AssignmentRemoval[];
+  missingEvidenceUpdates: AssignmentMissingEvidenceUpdate[];
+  newlyObserved: number;
+  warnings: PlanWarning[];
 }
 
 export function detectRemovals(
@@ -29,49 +52,106 @@ export function detectRemovals(
   existing: AssignmentRecord[],
   disableRemovals: boolean,
   protectedPageIds: ReadonlySet<string>,
+  trigger: Trigger,
   now = new Date(),
-): { removals: AssignmentRecord[]; warnings: PlanWarning[] } {
-  const warnings: PlanWarning[] = [];
-  if (disableRemovals) return { removals: [], warnings };
-  const unidentifiableAssignmentLikeEvent = feed.diagnostics.events.some(
-    (event) => (event.kind === "malformed" || event.kind === "suspicious") && !event.uid,
-  );
-  if (!feed.diagnostics.complete || unidentifiableAssignmentLikeEvent) {
-    warnings.push({
+  minimumMissingIntervalMs = MINIMUM_MISSING_EVIDENCE_INTERVAL_MS,
+): RemovalEvidenceResult {
+  const result: RemovalEvidenceResult = {
+    removals: [],
+    missingEvidenceUpdates: [],
+    newlyObserved: 0,
+    warnings: [],
+  };
+  if (disableRemovals) return result;
+
+  if (!feed.diagnostics.complete || hasUnidentifiableAssignmentLikeEvent(feed)) {
+    result.warnings.push({
       code: "removals-unsafe-parse",
-      message: "Removal detection skipped after parse warnings",
+      message: "Missing evidence was not advanced after unsafe feed diagnostics",
+    });
+  }
+  if (hasDuplicateSourceData(feed)) {
+    result.warnings.push({
+      code: "removals-unsafe-duplicate",
+      message: "Missing evidence was not advanced because source UID data was duplicated",
     });
   }
   if (feed.diagnostics.totalEvents >= 1000) {
-    warnings.push({
+    result.warnings.push({
       code: "removals-feed-limit",
-      message: "Removal detection skipped for a feed with 1,000 or more items",
+      message: "Missing evidence was not advanced for a feed with 1,000 or more items",
     });
   }
   if (existing.some((assignment) => !assignment.removed) && !hasAssignmentSignals(feed)) {
-    warnings.push({
+    result.warnings.push({
       code: "unexpected-no-assignment-signals",
-      message: "Removal detection skipped because the feed contained no assignment signals",
+      message: "Missing evidence was not advanced because the feed had no assignment signals",
     });
   }
-  if (warnings.length) return { removals: [], warnings };
+  if (result.warnings.length) return result;
+
   const present = new Set([
     ...feed.diagnostics.sourceUids,
     ...feed.diagnostics.normalizedAssignmentUids,
     ...feed.diagnostics.quarantinedUids,
   ]);
-  const earliest = now.getTime() - 30 * DAY;
-  const latest = now.getTime() + 366 * DAY;
-  const removals = existing.filter((assignment) => {
+  const nowMs = now.getTime();
+  const earliest = nowMs - 30 * DAY;
+  const latest = nowMs + 366 * DAY;
+  const candidates = existing.filter((assignment) => {
     if (
       assignment.removed ||
       present.has(assignment.uid) ||
       protectedPageIds.has(assignment.pageId) ||
       !assignment.canvasDueDate
-    )
+    ) {
       return false;
+    }
     const due = Date.parse(assignment.canvasDueDate);
     return !Number.isNaN(due) && due >= earliest && due <= latest;
   });
-  return { removals, warnings };
+
+  for (const assignment of candidates) {
+    const sinceMs = assignment.canvasMissingSince
+      ? Date.parse(assignment.canvasMissingSince)
+      : Number.NaN;
+    const previousCount = Math.max(0, Math.floor(assignment.canvasMissingCount ?? 0));
+    const hasPersistedEvidence = previousCount > 0 && !Number.isNaN(sinceMs);
+    if (!hasPersistedEvidence) result.newlyObserved += 1;
+
+    if (trigger === "manual") continue;
+
+    const canvasMissingSince = hasPersistedEvidence
+      ? assignment.canvasMissingSince!
+      : now.toISOString();
+    const canvasMissingCount = hasPersistedEvidence ? previousCount + 1 : 1;
+    const intervalSatisfied = hasPersistedEvidence && nowMs - sinceMs >= minimumMissingIntervalMs;
+    if (canvasMissingCount >= 2 && intervalSatisfied) {
+      result.removals.push({
+        ...assignment,
+        reason: "persistent-absence",
+        markRemoved: true,
+        clearMissingEvidence: false,
+        canvasMissingCountAfter: canvasMissingCount,
+      });
+    } else {
+      result.missingEvidenceUpdates.push({
+        pageId: assignment.pageId,
+        canvasMissingSince,
+        canvasMissingCount,
+        transition: hasPersistedEvidence ? "advanced" : "observed",
+      });
+    }
+  }
+
+  if (candidates.length) {
+    result.warnings.push({
+      code: trigger === "manual" ? "missing-candidates-manual" : "missing-candidates-observed",
+      message:
+        trigger === "manual"
+          ? `${candidates.length} removal candidate(s) were observed; manual runs do not advance missing evidence`
+          : `${candidates.length} removal candidate(s) were processed using persistent missing evidence`,
+    });
+  }
+  return result;
 }
