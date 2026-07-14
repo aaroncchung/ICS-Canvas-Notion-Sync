@@ -1,8 +1,23 @@
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { describe, expect, it } from "vitest";
-import { buildJobSummary, workflowAnnotations } from "../../src/cli.js";
+import { buildJobSummary, run, workflowAnnotations } from "../../src/cli.js";
 import { createRunMetrics } from "../../src/notion/client.js";
-import type { RunResult } from "../../src/types.js";
-import { config } from "../helpers.js";
+import type { AssignmentFeed, RunResult } from "../../src/types.js";
+import { config, FakeGateway, FakeProvider } from "../helpers.js";
+
+const emptyFeed: AssignmentFeed = {
+  assignments: [],
+  cancelledAssignments: [],
+  diagnostics: {
+    totalEvents: 0,
+    sourceUids: [],
+    normalizedAssignmentUids: [],
+    quarantinedUids: [],
+    events: [],
+    complete: true,
+  },
+};
 
 function result(status: RunResult["status"]): RunResult {
   return {
@@ -62,8 +77,8 @@ describe("GitHub Actions observability", () => {
     const summary = buildJobSummary(config({ mode: "dry-run", trigger: "manual" }), value);
     expect(summary).toContain("Mode: dry-run");
     expect(summary).toContain("Trigger: manual");
-    expect(summary).toContain("Proposed Assignments created: 2");
-    expect(summary).toContain("Proposed Courses created: 1");
+    expect(summary).toContain("Proposed Assignment pages: 2");
+    expect(summary).toContain("Proposed Course pages: 1");
     expect(summary).toContain("Removal inference safe: no");
   });
 
@@ -86,5 +101,80 @@ describe("GitHub Actions observability", () => {
     const successful = result("Success");
     successful.counts.ignoredEvents = 5;
     expect(workflowAnnotations(config({ GITHUB_ACTIONS: "true" }), successful)).toEqual([]);
+  });
+
+  it("reports confirmed, recovered, and logical assignment and course totals", () => {
+    const value = result("Success");
+    value.metrics.assignmentPagesCreated = 2;
+    value.metrics.assignmentPagesRecovered = 1;
+    value.metrics.coursesCreated = 1;
+    value.metrics.coursesRecovered = 2;
+    const summary = buildJobSummary(config(), value);
+    expect(summary).toContain("Assignment pages added: 3");
+    expect(summary).toContain("Assignment pages created: 2");
+    expect(summary).toContain("Assignment pages recovered: 1");
+    expect(summary).toContain("Course pages added: 3");
+    expect(summary).toContain("Course pages created: 1");
+    expect(summary).toContain("Course pages recovered: 2");
+  });
+
+  it("keeps a successful sync successful when the summary parent path is missing", async () => {
+    const value = await run(
+      config({ GITHUB_STEP_SUMMARY: join(tmpdir(), `missing-${Date.now()}`, "summary.md") }),
+      { gateway: new FakeGateway(), provider: new FakeProvider(emptyFeed) },
+    );
+    expect(value.status).toBe("Success");
+  });
+
+  it("keeps the run result when summary writing is permission denied", async () => {
+    const denied = Object.assign(new Error("permission denied"), { code: "EACCES" });
+    const value = await run(config({ mode: "validate", GITHUB_STEP_SUMMARY: "summary.md" }), {
+      gateway: new FakeGateway(),
+      provider: new FakeProvider(emptyFeed),
+      summaryAppender: () => Promise.reject(denied),
+    });
+    expect(value.status).toBe("Success");
+    expect(value.errors).toEqual([]);
+  });
+
+  it("does not fail a successful sync after an append failure", async () => {
+    const value = await run(config({ GITHUB_STEP_SUMMARY: "summary.md" }), {
+      gateway: new FakeGateway(),
+      provider: new FakeProvider(emptyFeed),
+      summaryAppender: () => Promise.reject(new Error("append failed")),
+    });
+    expect(value.status).toBe("Success");
+  });
+
+  it("preserves a failed sync after an append failure", async () => {
+    const value = await run(config({ GITHUB_STEP_SUMMARY: "summary.md" }), {
+      gateway: new FakeGateway(),
+      provider: new FakeProvider({
+        ...emptyFeed,
+        diagnostics: { ...emptyFeed.diagnostics, complete: false },
+      }),
+      summaryAppender: () => Promise.reject(new Error("append failed")),
+    });
+    expect(value.status).toBe("Failed");
+    expect(value.errors[0]).toContain("incomplete feed diagnostics");
+  });
+
+  it("normally appends the generated summary", async () => {
+    let appended = "";
+    const value = await run(
+      config({ mode: "validate", GITHUB_STEP_SUMMARY: join(tmpdir(), "summary.md") }),
+      {
+        gateway: new FakeGateway(),
+        provider: new FakeProvider(emptyFeed),
+        summaryAppender: (_path, data, encoding) => {
+          expect(encoding).toBe("utf8");
+          appended = data;
+          return Promise.resolve();
+        },
+      },
+    );
+    expect(value.status).toBe("Success");
+    expect(appended).toContain("## Canvas");
+    expect(appended).toContain("Status: Success");
   });
 });

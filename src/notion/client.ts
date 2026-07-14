@@ -1,10 +1,10 @@
 import { Client } from "@notionhq/client";
 import type { Logger } from "pino";
 import type { RunMetrics } from "../types.js";
+import { classifyNotionFailure } from "./failure.js";
+export { AmbiguousNotionWriteError } from "./failure.js";
 
 export const NOTION_API_VERSION = "2026-03-11";
-const TRANSIENT_STATUSES = new Set([429, 500, 502, 503, 504]);
-const AMBIGUOUS_STATUSES = new Set([500, 502, 503, 504]);
 
 export type NotionOperation =
   | "read"
@@ -13,13 +13,6 @@ export type NotionOperation =
   | "block-append"
   | "delete"
   | "sync-log-create";
-
-export class AmbiguousNotionWriteError extends Error {
-  public constructor(message: string) {
-    super(message);
-    this.name = "AmbiguousNotionWriteError";
-  }
-}
 
 export interface NotionGateway {
   readonly metrics?: RunMetrics;
@@ -54,6 +47,10 @@ export function createRunMetrics(): RunMetrics {
     assignmentBodyReads: 0,
     descriptionReplacements: 0,
     descriptionUpdatesAvoided: 0,
+    descriptionIntegrityAuditsRun: 0,
+    descriptionIntegrityAuditsPassed: 0,
+    descriptionIntegrityRepairs: 0,
+    descriptionBodyReadsAvoided: 0,
     coursesCreated: 0,
     coursesRecovered: 0,
     coursesEnriched: 0,
@@ -64,15 +61,12 @@ export function createRunMetrics(): RunMetrics {
 }
 
 export function errorStatus(error: unknown): number | undefined {
-  if (!error || typeof error !== "object") return;
-  const status = (error as { status?: unknown }).status;
-  return typeof status === "number" ? status : undefined;
+  const classification = classifyNotionFailure(error);
+  return classification.kind === "definite-response" ? classification.status : undefined;
 }
 
 export function isAmbiguousWriteError(error: unknown): boolean {
-  return (
-    error instanceof AmbiguousNotionWriteError || AMBIGUOUS_STATUSES.has(errorStatus(error) ?? 0)
-  );
+  return classifyNotionFailure(error).ambiguousWrite;
 }
 
 function classifyOperation(error: unknown, operation: NotionOperation): unknown {
@@ -113,9 +107,11 @@ export async function withRetry<T>(
     try {
       return await operation();
     } catch (error) {
-      const status = errorStatus(error) ?? 0;
+      const failure = classifyNotionFailure(error);
       const retryable =
-        TRANSIENT_STATUSES.has(status) && (status === 429 || retriesAmbiguousFailures);
+        failure.kind === "definite-response"
+          ? failure.retryable && (failure.status === 429 || retriesAmbiguousFailures)
+          : failure.kind === "transport" && failure.retryableRead && retriesAmbiguousFailures;
       if (attempt === attempts - 1 || !retryable) {
         throw classifyOperation(error, operationType);
       }

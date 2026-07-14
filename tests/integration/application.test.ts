@@ -641,9 +641,9 @@ describe("application modes and failure handling", () => {
 });
 
 describe("ambiguous create recovery", () => {
-  it("recovers an applied assignment create after a 503 without creating again", async () => {
+  it("recovers an applied assignment create after a statusless transport failure", async () => {
     const gateway = new StatefulFakeGateway();
-    gateway.createFailures.push({ id: "assignments", status: 503, applied: true });
+    gateway.createFailures.push({ id: "assignments", code: "ECONNRESET", applied: true });
     const result = await createAssignment(
       gateway,
       "assignments",
@@ -657,9 +657,9 @@ describe("ambiguous create recovery", () => {
     expect(gateway.writes.filter((write) => write.kind === "create")).toHaveLength(1);
   });
 
-  it("leaves an unobserved assignment create ambiguous with one bounded attempt", async () => {
+  it("does not create again when statusless assignment recovery finds no page", async () => {
     const gateway = new StatefulFakeGateway();
-    gateway.createFailures.push({ id: "assignments", status: 503, applied: false });
+    gateway.createFailures.push({ id: "assignments", code: "ETIMEDOUT", applied: false });
     await expect(
       createAssignment(
         gateway,
@@ -673,9 +673,9 @@ describe("ambiguous create recovery", () => {
     expect(gateway.writes.filter((write) => write.kind === "create")).toHaveLength(1);
   });
 
-  it("recovers an applied course create by Canvas Course ID", async () => {
+  it("recovers a statusless course create by Canvas Course ID", async () => {
     const gateway = new StatefulFakeGateway();
-    gateway.createFailures.push({ id: "courses", status: 503, applied: true });
+    gateway.createFailures.push({ id: "courses", code: "UND_ERR_SOCKET", applied: true });
     const result = await createCourse(gateway, "courses", {
       key: "id:123",
       title: "EE 10",
@@ -685,6 +685,111 @@ describe("ambiguous create recovery", () => {
     expect(result.recovered).toBe(true);
     expect(gateway.metrics.coursesRecovered).toBe(1);
     expect(gateway.writes.filter((write) => write.kind === "create")).toHaveLength(1);
+  });
+
+  it("keeps confirmed and recovered create metrics disjoint", async () => {
+    const gateway = new StatefulFakeGateway();
+    await createAssignment(
+      gateway,
+      "assignments",
+      assignmentCreate("uid-normal"),
+      "course",
+      "America/Los_Angeles",
+    );
+    gateway.createFailures.push({ id: "assignments", code: "ECONNRESET", applied: true });
+    await createAssignment(
+      gateway,
+      "assignments",
+      assignmentCreate("uid-recovered"),
+      "course",
+      "America/Los_Angeles",
+    );
+    await createCourse(gateway, "courses", { key: "id:1", title: "Course 1", canvasCourseId: "1" });
+    gateway.createFailures.push({ id: "courses", code: "ETIMEDOUT", applied: true });
+    await createCourse(gateway, "courses", { key: "id:2", title: "Course 2", canvasCourseId: "2" });
+    expect(gateway.metrics).toMatchObject({
+      assignmentPagesCreated: 1,
+      assignmentPagesRecovered: 1,
+      coursesCreated: 1,
+      coursesRecovered: 1,
+    });
+    expect(gateway.metrics.assignmentPagesCreated + gateway.metrics.assignmentPagesRecovered).toBe(
+      2,
+    );
+    expect(gateway.metrics.coursesCreated + gateway.metrics.coursesRecovered).toBe(2);
+  });
+
+  it("counts physical recovery polls without changing logical create metrics", async () => {
+    class CountingRecoveryGateway extends StatefulFakeGateway {
+      public override async createPage(
+        id: string,
+        properties: Record<string, unknown>,
+      ): Promise<string> {
+        this.metrics.notionRequests += 1;
+        this.metrics.requestsByOperation["page-create"] =
+          (this.metrics.requestsByOperation["page-create"] ?? 0) + 1;
+        return super.createPage(id, properties);
+      }
+
+      public override async queryDataSource(
+        id: string,
+        filter?: Record<string, unknown>,
+      ): Promise<Array<Record<string, unknown>>> {
+        this.metrics.notionRequests += 1;
+        this.metrics.requestsByOperation.read = (this.metrics.requestsByOperation.read ?? 0) + 1;
+        return super.queryDataSource(id, filter);
+      }
+    }
+    const gateway = new CountingRecoveryGateway();
+    gateway.createFailures.push({ id: "assignments", code: "ECONNRESET", applied: true });
+    gateway.queryVisibilityMisses.set("assignments", 1);
+    await createAssignment(
+      gateway,
+      "assignments",
+      assignmentCreate(),
+      "course",
+      "America/Los_Angeles",
+      { attempts: 2, delayMs: 0, sleep: () => Promise.resolve() },
+    );
+    expect(gateway.metrics.notionRequests).toBe(3);
+    expect(gateway.metrics.requestsByOperation).toEqual({ "page-create": 1, read: 2 });
+    expect(gateway.metrics.assignmentPagesCreated).toBe(0);
+    expect(gateway.metrics.assignmentPagesRecovered).toBe(1);
+  });
+
+  it("does not increment the live confirmed-create count for a recovered assignment", async () => {
+    class RecoveredAssignmentGateway extends StatefulFakeGateway {
+      public override async listBlocks(pageId: string): Promise<Array<Record<string, unknown>>> {
+        const blocks = await super.listBlocks(pageId);
+        return pageId === "assignments-1" && blocks.length === 0
+          ? [templateBlock("template")]
+          : blocks;
+      }
+    }
+    const gateway = new RecoveredAssignmentGateway();
+    gateway.createFailures.push({ id: "assignments", code: "ECONNRESET", applied: true });
+    const appliedCounts = counts();
+    await applyPlan(
+      gateway,
+      config(),
+      {
+        coursesToCreate: [],
+        coursesToUpdate: [],
+        assignmentsToCreate: [assignmentCreate()],
+        assignmentsToUpdate: [],
+        assignmentsToRemove: [],
+        assignmentsMissingEvidenceToUpdate: [],
+        missingCandidatesObserved: 0,
+        unchanged: 0,
+        skipped: 0,
+        warnings: [],
+      },
+      appliedCounts,
+      { templateWait: { attempts: 2, delayMs: 0, sleep: () => Promise.resolve() } },
+    );
+    expect(appliedCounts.created).toBe(0);
+    expect(gateway.metrics.assignmentPagesCreated).toBe(0);
+    expect(gateway.metrics.assignmentPagesRecovered).toBe(1);
   });
 
   it("recovers an assignment that becomes visible on a later observation poll", async () => {
@@ -918,6 +1023,7 @@ describe("managed descriptions", () => {
       "Canvas Description Hash": {
         rich_text: [{ plain_text: managedDescriptionHash("Old description") }],
       },
+      "Canvas Description Verified At": { date: { start: "2026-07-01T00:00:00.000Z" } },
       Course: { relation: [{ id: "course" }] },
       "Canvas State": { select: { name: "Active" } },
       "Removed from Canvas": { checkbox: false },
@@ -964,6 +1070,22 @@ describe("managed descriptions", () => {
     expect(JSON.stringify(gateway.writes)).toContain(managedDescriptionHash("Old description"));
   });
 
+  it("repairs a missing canonical toggle and preserves user-owned template blocks", async () => {
+    const gateway = new StatefulFakeGateway();
+    gateway.seedBlock("page", {
+      id: "user",
+      type: "heading_2",
+      heading_2: { rich_text: [{ plain_text: "Notes" }] },
+    });
+    await applyPlan(gateway, config(), descriptionPlan("New description"), counts());
+    const blocks = await gateway.listBlocks("page");
+    expect(blocks.some((block) => block.id === "user")).toBe(true);
+    expect(blocks.filter((block) => blockText(block) === MANAGED_DESCRIPTION_TITLE)).toHaveLength(
+      1,
+    );
+    expect(gateway.metrics.descriptionIntegrityRepairs).toBe(1);
+  });
+
   it("replaces a mismatched body before committing its hash", async () => {
     const gateway = descriptionGateway();
     await applyPlan(gateway, config(), descriptionPlan("New description"), counts());
@@ -976,17 +1098,116 @@ describe("managed descriptions", () => {
     const gateway = descriptionGateway();
     gateway.appendFailures.push({ id: "page", status: 503, applied: false });
     const plan = descriptionPlan("New description");
-    await expect(applyPlan(gateway, config(), plan, counts())).rejects.toThrow();
+    let failed: ApplyPlanError | undefined;
+    try {
+      await applyPlan(gateway, config(), plan, counts());
+    } catch (error) {
+      if (error instanceof ApplyPlanError) failed = error;
+    }
+    expect(failed?.execution.partialAssignments[0]).toMatchObject({
+      pageId: "page",
+      state: "requires-repair",
+      failedSubstep: { kind: "assignment-description-update" },
+    });
     expect(
       gateway.writes.some(
         (write) =>
           write.kind === "update" &&
-          JSON.stringify(write.value).includes("Canvas Description Hash"),
+          (JSON.stringify(write.value).includes("Canvas Description Hash") ||
+            JSON.stringify(write.value).includes("Canvas Description Verified At")),
       ),
     ).toBe(false);
     await applyPlan(gateway, config(), plan, counts());
     expect(await readManagedDescription(gateway, "page")).toBe("New description");
     expect(JSON.stringify(gateway.writes)).toContain(managedDescriptionHash("New description"));
+  });
+
+  it("reduces duplicate canonical toggles to one without replacing a valid body", async () => {
+    const gateway = descriptionGateway();
+    gateway.seedBlock("page", toggle("duplicate", MANAGED_DESCRIPTION_TITLE));
+    gateway.seedBlock("duplicate", {
+      id: "duplicate-child",
+      type: "paragraph",
+      paragraph: { rich_text: [{ plain_text: "Old description" }] },
+    });
+    await applyPlan(gateway, config(), descriptionPlan("Old description"), counts());
+    const blocks = await gateway.listBlocks("page");
+    expect(blocks.filter((block) => blockText(block) === MANAGED_DESCRIPTION_TITLE)).toHaveLength(
+      1,
+    );
+    expect(gateway.metrics.descriptionIntegrityRepairs).toBe(1);
+    expect(gateway.metrics.descriptionReplacements).toBe(0);
+  });
+
+  it("cleans a pending replacement toggle before advancing verification metadata", async () => {
+    const gateway = descriptionGateway();
+    gateway.seedBlock("page", toggle("pending", PENDING_MANAGED_DESCRIPTION_TITLE));
+    await applyPlan(gateway, config(), descriptionPlan("Old description"), counts());
+    expect(
+      (await gateway.listBlocks("page")).filter(
+        (block) => blockText(block) === PENDING_MANAGED_DESCRIPTION_TITLE,
+      ),
+    ).toHaveLength(0);
+    expect(gateway.metrics.descriptionIntegrityRepairs).toBe(1);
+  });
+
+  it("updates only the verification timestamp when a due audit finds a valid body", async () => {
+    const gateway = descriptionGateway();
+    const plan = descriptionPlan("Old description");
+    plan.assignmentsToUpdate[0]!.descriptionHashNeedsUpdate = false;
+    await applyPlan(gateway, config(), plan, counts(), {
+      now: new Date("2026-07-13T12:00:00.000Z"),
+    });
+    const metadataWrite = gateway.writes.find(
+      (write) =>
+        write.kind === "update" &&
+        JSON.stringify(write.value).includes("Canvas Description Verified At"),
+    );
+    expect(metadataWrite).toBeDefined();
+    expect(JSON.stringify(metadataWrite?.value)).not.toContain("Canvas Description Hash");
+    expect(JSON.stringify(metadataWrite?.value)).not.toContain("Last Synced");
+    expect(gateway.metrics.descriptionIntegrityAuditsRun).toBe(1);
+    expect(gateway.metrics.descriptionIntegrityAuditsPassed).toBe(1);
+    expect(gateway.metrics.descriptionIntegrityRepairs).toBe(0);
+    expect(gateway.metrics.descriptionReplacements).toBe(0);
+  });
+
+  it("writes a new page hash and verification timestamp only after body verification", async () => {
+    const gateway = new StatefulFakeGateway();
+    gateway.seedBlock("assignments-1", {
+      id: "template",
+      type: "heading_2",
+      heading_2: { rich_text: [{ plain_text: "Notes" }] },
+    });
+    const createPlan: SyncPlan = {
+      coursesToCreate: [],
+      coursesToUpdate: [],
+      assignmentsToCreate: [assignmentCreate()],
+      assignmentsToUpdate: [],
+      assignmentsToRemove: [],
+      assignmentsMissingEvidenceToUpdate: [],
+      missingCandidatesObserved: 0,
+      unchanged: 0,
+      skipped: 0,
+      warnings: [],
+    };
+    await applyPlan(gateway, config(), createPlan, counts(), {
+      now: new Date("2026-07-13T12:00:00.000Z"),
+      templateWait: { attempts: 2, delayMs: 0, sleep: () => Promise.resolve() },
+    });
+    const metadataIndex = gateway.writes.findIndex(
+      (write) =>
+        write.kind === "update" &&
+        JSON.stringify(write.value).includes("Canvas Description Verified At"),
+    );
+    const verificationIndex = gateway.writes.findIndex((write) => write.kind === "update-block");
+    expect(metadataIndex).toBeGreaterThan(verificationIndex);
+    expect(JSON.stringify(gateway.writes[metadataIndex]?.value)).toContain(
+      "Canvas Description Hash",
+    );
+    expect(JSON.stringify(gateway.writes[metadataIndex]?.value)).toContain(
+      "Canvas Description Verified At",
+    );
   });
 
   it("preserves the old managed section when replacement creation fails", async () => {
@@ -998,9 +1219,9 @@ describe("managed descriptions", () => {
     expect((await gateway.listBlocks("page")).some((block) => block.id === "managed")).toBe(true);
   });
 
-  it("reconciles an ambiguous toggle append without duplicate permanent sections", async () => {
+  it("reconciles a statusless marker append without duplicate permanent sections", async () => {
     const gateway = descriptionGateway();
-    gateway.appendFailures.push({ id: "page", status: 503, applied: true });
+    gateway.appendFailures.push({ id: "page", code: "ECONNRESET", applied: true });
     await replaceManagedDescription(gateway, "page", "New description");
     const blocks = await gateway.listBlocks("page");
     expect(blocks.filter((block) => blockText(block) === MANAGED_DESCRIPTION_TITLE)).toHaveLength(
@@ -1009,6 +1230,24 @@ describe("managed descriptions", () => {
     expect(
       blocks.filter((block) => blockText(block) === PENDING_MANAGED_DESCRIPTION_TITLE),
     ).toHaveLength(0);
+  });
+
+  it("resumes a statusless child append from its verified prefix", async () => {
+    const gateway = descriptionGateway();
+    gateway.seedBlock("page", toggle("pending", PENDING_MANAGED_DESCRIPTION_TITLE));
+    gateway.appendFailures.push({
+      id: "pending",
+      code: "UND_ERR_SOCKET",
+      applied: true,
+      appliedCount: 1,
+    });
+    await replaceManagedDescription(gateway, "page", "New description");
+    expect(await readManagedDescription(gateway, "page")).toBe("New description");
+    expect(
+      (await gateway.listBlocks("page")).filter(
+        (block) => blockText(block) === MANAGED_DESCRIPTION_TITLE,
+      ),
+    ).toHaveLength(1);
   });
 
   it("successfully replaces exactly one managed toggle and preserves user content", async () => {
@@ -1024,19 +1263,19 @@ describe("managed descriptions", () => {
 });
 
 describe("ambiguity-safe block deletion", () => {
-  it("accepts an ambiguous delete when observation shows the block is absent", async () => {
+  it("accepts a statusless delete when observation shows the block is absent", async () => {
     const gateway = new StatefulFakeGateway();
     gateway.seedBlock("page", templateBlock("target"));
-    gateway.deleteFailures.push({ id: "target", status: 503, applied: true });
+    gateway.deleteFailures.push({ id: "target", code: "ECONNRESET", applied: true });
     await deleteBlockReconciled(gateway, "page", "target");
     expect(await gateway.listBlocks("page")).toHaveLength(0);
     expect(gateway.writes.filter((write) => write.kind === "delete")).toHaveLength(1);
   });
 
-  it("performs one justified follow-up delete when the block remains", async () => {
+  it("performs one justified follow-up after a statusless unapplied delete", async () => {
     const gateway = new StatefulFakeGateway();
     gateway.seedBlock("page", templateBlock("target"));
-    gateway.deleteFailures.push({ id: "target", status: 503, applied: false });
+    gateway.deleteFailures.push({ id: "target", code: "ETIMEDOUT", applied: false });
     await deleteBlockReconciled(gateway, "page", "target");
     expect(await gateway.listBlocks("page")).toHaveLength(0);
     expect(gateway.writes.filter((write) => write.kind === "delete")).toHaveLength(2);
@@ -1393,9 +1632,9 @@ describe("partial execution and Sync Log recovery", () => {
     );
   });
 
-  it("recovers ambiguous Sync Log creation and never creates a duplicate", async () => {
+  it("recovers statusless Sync Log creation and never creates a duplicate", async () => {
     const gateway = new StatefulFakeGateway();
-    gateway.createFailures.push({ id: "log", status: 503, applied: true });
+    gateway.createFailures.push({ id: "log", code: "ECONNRESET", applied: true });
     const result: RunResult = {
       status: "Failed",
       counts: counts(),

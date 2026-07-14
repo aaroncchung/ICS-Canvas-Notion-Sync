@@ -57,6 +57,7 @@ export async function readAssignments(
     const canvasMissingCount = readNumber(properties, "Canvas Missing Count");
     const storedDescription = readRichText(properties, "Raw Description");
     const descriptionHash = readRichText(properties, "Canvas Description Hash");
+    const descriptionVerifiedAt = readDate(properties, "Canvas Description Verified At");
     const personalStatus = readStatus(properties, "Personal Status");
     const priority = readSelect(properties, "Priority");
     const assignmentType = readSelect(properties, "Assignment Type");
@@ -76,6 +77,7 @@ export async function readAssignments(
       ...(canvasMissingCount !== undefined ? { canvasMissingCount } : {}),
       ...(storedDescription ? { descriptionExcerpt: storedDescription } : {}),
       ...(descriptionHash ? { descriptionHash } : {}),
+      ...(descriptionVerifiedAt ? { descriptionVerifiedAt } : {}),
       ...(personalStatus ? { personalStatus } : {}),
       ...(priority ? { priority } : {}),
       ...(assignmentType ? { assignmentType } : {}),
@@ -173,9 +175,14 @@ export function buildUpdateProperties(update: AssignmentPropertyUpdate): Record<
   if (update.descriptionHash !== undefined) {
     properties["Canvas Description Hash"] = text(update.descriptionHash);
   }
+  if (update.descriptionVerifiedAt !== undefined) {
+    properties["Canvas Description Verified At"] = date(update.descriptionVerifiedAt);
+  }
   if (update.removed !== undefined) properties["Removed from Canvas"] = checkbox(update.removed);
   if (update.canvasState !== undefined) properties["Canvas State"] = select(update.canvasState);
-  if (Object.keys(properties).length) properties["Last Synced"] = date(new Date().toISOString());
+  if (Object.keys(properties).some((name) => name !== "Canvas Description Verified At")) {
+    properties["Last Synced"] = date(new Date().toISOString());
+  }
   return properties;
 }
 

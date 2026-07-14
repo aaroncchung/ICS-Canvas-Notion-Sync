@@ -63,6 +63,7 @@ function record(overrides: Partial<AssignmentRecord> = {}): AssignmentRecord {
     effectiveDueDate: "2026-07-20T20:00:00.000Z",
     descriptionExcerpt: "Original description",
     descriptionHash: managedDescriptionHash("Original description"),
+    descriptionVerifiedAt: "2026-07-01T00:00:00.000Z",
     personalStatus: "Done",
     removed: false,
     canvasState: "Active",
@@ -139,6 +140,18 @@ describe("plan-first reconciliation", () => {
     );
     expect(result.assignmentsToUpdate).toEqual([]);
     expect(metrics.descriptionUpdatesAvoided).toBe(1);
+    expect(metrics.descriptionBodyReadsAvoided).toBe(1);
+  });
+
+  it("schedules an integrity audit when a matching hash has stale verification", () => {
+    const result = plan(
+      [source()],
+      [record({ descriptionVerifiedAt: "2026-05-01T00:00:00.000Z" })],
+    );
+    expect(result.assignmentsToUpdate[0]).toMatchObject({
+      verifyDescription: true,
+      descriptionHashNeedsUpdate: false,
+    });
   });
 
   it("does not retain dead source or parsing fields", () => {
@@ -246,10 +259,30 @@ describe("plan-first reconciliation", () => {
         pageId: "course-page",
         canvasCourseId: "123",
         canvasUrl: "https://canvas.example.edu/courses/123",
+        syncUpdatedAt: "2026-07-13T12:00:00.000Z",
       }),
     ]);
     expect(result.assignmentsToCreate).toHaveLength(1);
     expect(result.assignmentsToUpdate).toHaveLength(0);
+  });
+
+  it("refreshes Sync Updated At whenever course metadata is actually enriched", () => {
+    const result = plan(
+      [source()],
+      [],
+      [
+        {
+          pageId: "course-page",
+          title: "EE 10",
+          canvasCourseId: "123",
+          syncUpdatedAt: "2026-06-01T00:00:00.000Z",
+        },
+      ],
+    );
+    expect(result.coursesToUpdate[0]).toMatchObject({
+      canvasUrl: "https://canvas.example.edu/courses/123",
+      syncUpdatedAt: "2026-07-13T12:00:00.000Z",
+    });
   });
 
   it("does not enrich course metadata that already agrees", () => {

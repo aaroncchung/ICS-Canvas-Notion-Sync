@@ -44,6 +44,25 @@ function run(id: number, conclusion = "failure", event = "schedule"): WorkflowRu
   };
 }
 
+function runAt(
+  id: number,
+  conclusion: string,
+  timestamp: string,
+  event = "schedule",
+  runAttempt = 1,
+): WorkflowRun {
+  return {
+    ...run(1, conclusion, event),
+    id,
+    run_attempt: runAttempt,
+    created_at: timestamp,
+    run_started_at: timestamp,
+    updated_at: timestamp,
+    completed_at: timestamp,
+    html_url: `https://github.test/runs/${id}`,
+  };
+}
+
 function requestUrl(input: string | URL | Request): string {
   if (typeof input === "string") return input;
   return input instanceof URL ? input.href : input.url;
@@ -59,11 +78,6 @@ class FakeClient implements GitHubHealthClient {
 
   public async listWorkflowRuns(): Promise<WorkflowRun[]> {
     return Promise.resolve(this.runs);
-  }
-  public async getWorkflowRun(runId: number): Promise<WorkflowRun> {
-    const found = this.runs.find((item) => item.id === runId);
-    if (!found) throw new Error("run not found");
-    return Promise.resolve(found);
   }
   public async listMatchingIssues(): Promise<HealthIssue[]> {
     return Promise.resolve(this.issues);
@@ -169,6 +183,24 @@ describe("GitHub health issue integration", () => {
     expect(client.calls).not.toContain("update-issue:1");
   });
 
+  it("advances only the latest-failure boundary during an open incident", async () => {
+    const client = new FakeClient();
+    client.labelExists = true;
+    client.issues = [unhealthyIssue()];
+    client.runs = [
+      runAt(11, "failure", "2026-07-13T11:50:00Z"),
+      runAt(1, "failure", "2026-07-13T11:00:00Z"),
+      runAt(2, "failure", "2026-07-13T10:00:00Z"),
+    ];
+    await monitorScheduledHealth(client, { now });
+    expect(client.issues[0]?.body).toContain(
+      "canvas-notion-health-incident-start:v1:2026-07-13T09:00:00Z",
+    );
+    expect(client.issues[0]?.body).toContain(
+      "canvas-notion-health-latest-failure:v1:11:2026-07-13T11:50:00Z",
+    );
+  });
+
   it("reopens the same durable issue for a later unhealthy episode", async () => {
     const client = new FakeClient();
     client.labelExists = true;
@@ -204,6 +236,82 @@ describe("GitHub health issue integration", () => {
     await monitorScheduledHealth(client, { now });
     expect(client.calls).not.toContain("comment:1");
     expect(client.calls).toContain("close:1");
+  });
+
+  it("keeps an incident open when the only recent success predates its failures", async () => {
+    const client = new FakeClient();
+    client.issues = [unhealthyIssue()];
+    client.runs = [
+      runAt(4, "neutral", "2026-07-13T11:30:00Z"),
+      runAt(1, "failure", "2026-07-13T11:00:00Z"),
+      runAt(2, "failure", "2026-07-13T10:00:00Z"),
+      runAt(3, "failure", "2026-07-13T09:00:00Z"),
+      runAt(5, "success", "2026-07-13T08:00:00Z"),
+    ];
+    await monitorScheduledHealth(client, { now });
+    expect(client.issues[0]?.state).toBe("open");
+    expect(client.calls).not.toContain("comment:1");
+    expect(client.calls).not.toContain("close:1");
+  });
+
+  it("does not recover on a success with the same timestamp as the latest failure", async () => {
+    const client = new FakeClient();
+    client.issues = [unhealthyIssue()];
+    client.runs = [runAt(10, "success", "2026-07-13T11:00:00Z")];
+    await monitorScheduledHealth(client, { now });
+    expect(client.issues[0]?.state).toBe("open");
+  });
+
+  it("allows a later successful rerun attempt to recover the incident", async () => {
+    const client = new FakeClient();
+    client.issues = [unhealthyIssue()];
+    client.runs = [runAt(1, "success", "2026-07-13T11:30:00Z", "schedule", 2)];
+    await monitorScheduledHealth(client, { now });
+    expect(client.issues[0]?.state).toBe("closed");
+  });
+
+  it("creates a new incident boundary when reopening the durable issue", async () => {
+    const client = new FakeClient();
+    const oldIssue = { ...unhealthyIssue(), state: "closed" as const };
+    const oldBody = oldIssue.body;
+    client.issues = [oldIssue];
+    client.runs = [
+      runAt(11, "failure", "2026-07-13T11:50:00Z"),
+      runAt(12, "failure", "2026-07-13T11:40:00Z"),
+      runAt(13, "failure", "2026-07-13T11:30:00Z"),
+    ];
+    await monitorScheduledHealth(client, { now });
+    expect(client.issues[0]?.state).toBe("open");
+    expect(client.issues[0]?.body).not.toBe(oldBody);
+    expect(client.issues[0]?.body).toContain(
+      "canvas-notion-health-incident-start:v1:2026-07-13T11:30:00Z",
+    );
+  });
+
+  it("migrates a legacy issue conservatively from its newest displayed failure", async () => {
+    const client = new FakeClient();
+    const legacy = unhealthyIssue();
+    legacy.body =
+      legacy.body
+        ?.split("\n")
+        .filter((line) => !line.includes("health-incident-") && !line.includes("latest-failure"))
+        .join("\n") ?? null;
+    client.issues = [legacy];
+    client.runs = [runAt(20, "success", "2026-07-13T10:30:00Z")];
+    await monitorScheduledHealth(client, { now });
+    expect(client.issues[0]?.state).toBe("open");
+    client.runs = [runAt(21, "success", "2026-07-13T11:30:00Z")];
+    await monitorScheduledHealth(client, { now });
+    expect(client.issues[0]?.state).toBe("closed");
+  });
+
+  it("never uses a manual success to recover scheduled health", async () => {
+    const client = new FakeClient();
+    client.issues = [unhealthyIssue()];
+    client.runs = [runAt(20, "success", "2026-07-13T11:30:00Z", "workflow_dispatch")];
+    client.activation = { ...activated, activatedAt: "2026-07-13T11:00:00Z" };
+    await monitorScheduledHealth(client, { now });
+    expect(client.issues[0]?.state).toBe("open");
   });
 
   it("repeated healthy checks do not comment or close again", async () => {
@@ -252,6 +360,17 @@ describe("fetch-backed GitHub client", () => {
     const issues = await client.listMatchingIssues(HEALTH_ISSUE_LABEL);
     expect(issues).toHaveLength(101);
     expect(requests.some((request) => request.includes("page=2"))).toBe(true);
+  });
+
+  it("filters pull requests returned by the issues endpoint", async () => {
+    const pullRequest = { ...unhealthyIssue(1), pull_request: { url: "https://github.test/pr/1" } };
+    const issue = unhealthyIssue(2);
+    const client = new FetchGitHubHealthClient({
+      token: "secret-token",
+      repository: "o/r",
+      fetch: () => Promise.resolve(Response.json([pullRequest, issue])),
+    });
+    await expect(client.listMatchingIssues(HEALTH_ISSUE_LABEL)).resolves.toEqual([issue]);
   });
 
   it("returns sanitized actionable errors without exposing the token or response body", async () => {
@@ -310,7 +429,7 @@ describe("fetch-backed GitHub client", () => {
     expect(calls).toBe(1);
   });
 
-  it("supports workflow activation and individual run metadata reads", async () => {
+  it("supports workflow activation metadata reads", async () => {
     const fetch = (input: string | URL | Request): Promise<Response> => {
       const url = requestUrl(input);
       if (url.endsWith("/actions/workflows/sync.yml")) {
@@ -322,12 +441,11 @@ describe("fetch-backed GitHub client", () => {
           }),
         );
       }
-      return Promise.resolve(Response.json(run(42)));
+      return Promise.resolve(Response.json({}));
     };
     const client = new FetchGitHubHealthClient({ token: "secret-token", repository: "o/r", fetch });
     await expect(client.getWorkflowActivationMetadata("sync.yml")).resolves.toMatchObject({
       activatedAt: "2026-07-02T00:00:00Z",
     });
-    await expect(client.getWorkflowRun(42)).resolves.toMatchObject({ id: 42 });
   });
 });

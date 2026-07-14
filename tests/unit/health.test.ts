@@ -132,6 +132,15 @@ describe("scheduled health assessment", () => {
     expect(result.reasonCodes).toContain("no_success_after_activation_grace");
   });
 
+  it("reports a disabled workflow immediately with its own reason", () => {
+    const result = assessScheduledHealth(
+      [],
+      { ...activation("2026-07-13T11:59:00Z"), state: "disabled_manually" },
+      now,
+    );
+    expect(result.reasonCodes).toEqual(["workflow_disabled"]);
+  });
+
   it("allows a recent queued or in-progress scheduled run to defer an absence alert", () => {
     for (const status of ["queued", "in_progress"]) {
       const result = assessScheduledHealth(

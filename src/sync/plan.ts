@@ -10,7 +10,7 @@ import type {
   Trigger,
 } from "../types.js";
 import { descriptionExcerpt } from "../notion/assignments.js";
-import { managedDescriptionHash } from "../notion/descriptions.js";
+import { descriptionIntegrityAuditDue, managedDescriptionHash } from "../notion/descriptions.js";
 import { matchCourse } from "./course-matcher.js";
 import { datesEqual, resolveDates } from "./date-resolution.js";
 import { possibleDuplicate } from "./duplicate-detector.js";
@@ -147,7 +147,7 @@ export function buildPlan(
       continue;
     }
 
-    const match = matchCourse(source, courses, aliases);
+    const match = matchCourse(source, courses, aliases, now.toISOString());
     const duplicates = possibleDuplicate(
       source,
       existingAssignments,
@@ -183,7 +183,7 @@ export function buildPlan(
       });
       continue;
     }
-    const match = matchCourse(source, courses, aliases);
+    const match = matchCourse(source, courses, aliases, now.toISOString());
     if (uidMatches.length === 0) {
       const duplicates = possibleDuplicate(
         source,
@@ -318,8 +318,14 @@ export function buildPlan(
     const excerpt = descriptionExcerpt(source);
     const excerptChanged = (existing.descriptionExcerpt ?? "") !== excerpt;
     const descriptionHash = managedDescriptionHash(source.descriptionMarkdown);
-    const verifyDescription = existing.descriptionHash !== descriptionHash;
-    if (!verifyDescription && metrics) metrics.descriptionUpdatesAvoided += 1;
+    const descriptionHashNeedsUpdate = existing.descriptionHash !== descriptionHash;
+    const verifyDescription =
+      descriptionHashNeedsUpdate ||
+      descriptionIntegrityAuditDue(existing.descriptionVerifiedAt, now);
+    if (!verifyDescription && metrics) {
+      metrics.descriptionUpdatesAvoided += 1;
+      metrics.descriptionBodyReadsAvoided += 1;
+    }
     if (excerptChanged) properties.rawDescription = excerpt;
     const needsReactivation = existing.removed || existing.canvasState !== "Active";
     if (needsReactivation) {
@@ -340,6 +346,7 @@ export function buildPlan(
         properties,
         verifyDescription,
         descriptionHash,
+        descriptionHashNeedsUpdate,
         missingEvidenceCleared,
       });
     } else {
@@ -385,6 +392,7 @@ export function buildPlan(
       verifyDescription: false,
       descriptionHash:
         existing.descriptionHash ?? managedDescriptionHash(source.descriptionMarkdown),
+      descriptionHashNeedsUpdate: false,
       missingEvidenceCleared: true,
     });
   }

@@ -57,6 +57,21 @@ function resultBlocks(result: RunResult): Array<Record<string, unknown>> {
       ]
     : [];
   return [
+    ...section("Create metrics", [
+      `Assignment pages added: ${result.metrics.assignmentPagesCreated + result.metrics.assignmentPagesRecovered}`,
+      `Assignment pages created: ${result.metrics.assignmentPagesCreated}`,
+      `Assignment pages recovered: ${result.metrics.assignmentPagesRecovered}`,
+      `Course pages added: ${result.metrics.coursesCreated + result.metrics.coursesRecovered}`,
+      `Course pages created: ${result.metrics.coursesCreated}`,
+      `Course pages recovered: ${result.metrics.coursesRecovered}`,
+    ]),
+    ...section("Description integrity", [
+      `Audits run: ${result.metrics.descriptionIntegrityAuditsRun}`,
+      `Audits passed without repair: ${result.metrics.descriptionIntegrityAuditsPassed}`,
+      `Repairs performed: ${result.metrics.descriptionIntegrityRepairs}`,
+      `Managed-section replacements: ${result.metrics.descriptionReplacements}`,
+      `Body reads avoided: ${result.metrics.descriptionBodyReadsAvoided}`,
+    ]),
     ...section("Removal evidence", [
       `Newly observed missing candidates: ${result.counts.missingObserved}`,
       `Missing evidence advanced: ${result.counts.missingAdvanced}`,

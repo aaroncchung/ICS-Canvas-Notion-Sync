@@ -106,12 +106,16 @@ async function childSignatures(gateway: NotionGateway, blockId: string): Promise
   return (await gateway.listBlocks(blockId)).map(signature);
 }
 
+export interface ManagedSectionReconciliation {
+  replaced: boolean;
+}
+
 export async function reconcileManagedSection(
   gateway: NotionGateway,
   pageId: string,
   titles: { managed: string; pending: string },
   expectedBlocks: Array<Record<string, unknown>>,
-): Promise<void> {
+): Promise<ManagedSectionReconciliation> {
   const expected = expectedBlocks.map(signature);
   let blocks = await gateway.listBlocks(pageId);
   let canonical = blocks.filter((block) => isToggle(block, titles.managed));
@@ -122,7 +126,7 @@ export async function reconcileManagedSection(
     if (JSON.stringify(await childSignatures(gateway, id)) === JSON.stringify(expected)) {
       await deleteBlocks(gateway, pageId, canonical, id);
       await deleteBlocks(gateway, pageId, pending);
-      return;
+      return { replaced: false };
     }
   }
 
@@ -195,4 +199,5 @@ export async function reconcileManagedSection(
   await deleteBlocks(gateway, pageId, canonical, replacementId);
   pending = (await gateway.listBlocks(pageId)).filter((block) => isToggle(block, titles.pending));
   await deleteBlocks(gateway, pageId, pending);
+  return { replaced: true };
 }

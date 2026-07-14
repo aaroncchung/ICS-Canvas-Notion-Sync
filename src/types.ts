@@ -112,6 +112,7 @@ export interface AssignmentRecord {
   canvasMissingCount?: number;
   descriptionExcerpt?: string;
   descriptionHash?: string;
+  descriptionVerifiedAt?: string;
   personalStatus?: string;
   priority?: string;
   assignmentType?: string;
@@ -147,6 +148,7 @@ export interface AssignmentUpdate {
   properties: AssignmentPropertyUpdate;
   verifyDescription: boolean;
   descriptionHash: string;
+  descriptionHashNeedsUpdate?: boolean;
   missingEvidenceCleared: boolean;
 }
 
@@ -175,6 +177,7 @@ export interface AssignmentPropertyUpdate {
   canvasMissingCount?: number | null;
   rawDescription?: string;
   descriptionHash?: string;
+  descriptionVerifiedAt?: string;
   removed?: boolean;
   canvasState?: "Active" | "Removed";
 }
@@ -277,6 +280,10 @@ export interface RunMetrics {
   assignmentBodyReads: number;
   descriptionReplacements: number;
   descriptionUpdatesAvoided: number;
+  descriptionIntegrityAuditsRun: number;
+  descriptionIntegrityAuditsPassed: number;
+  descriptionIntegrityRepairs: number;
+  descriptionBodyReadsAvoided: number;
   coursesCreated: number;
   coursesRecovered: number;
   coursesEnriched: number;

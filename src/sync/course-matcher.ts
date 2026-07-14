@@ -71,7 +71,7 @@ function matchedCourse(
   }
   if (sourceUrl && !course.url) update.canvasUrl = sourceUrl;
   const enrichesCanvasMetadata = Boolean(update.canvasCourseId || update.canvasUrl);
-  if (enrichesCanvasMetadata && !course.syncUpdatedAt) update.syncUpdatedAt = now;
+  if (enrichesCanvasMetadata) update.syncUpdatedAt = now;
   return Object.keys(update).length > 1
     ? { kind: "matched", course, method, update }
     : { kind: "matched", course, method };

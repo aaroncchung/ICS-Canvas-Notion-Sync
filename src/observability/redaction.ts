@@ -1,3 +1,5 @@
+import { classifyNotionFailure, type NotionFailureClassification } from "../notion/failure.js";
+
 const TOKEN_PATTERN = /\b(?:secret|ntn|oauth|sk)[_-][A-Za-z0-9_-]{8,}\b/gi;
 const AUTH_PATTERN = /(?:authorization\s*[:=]\s*|bearer\s+)[^\s,}\]]+/gi;
 const URL_PATTERN = /https?:\/\/[^\s"'<>]+/gi;
@@ -7,6 +9,7 @@ const DESCRIPTION_PATTERN = /\b(?:raw\s+)?description\s*[:=]\s*[^\r\n]*/gi;
 export interface SanitizedDiagnostic {
   name: string;
   message: string;
+  failureClass?: NotionFailureClassification["kind"];
   stack?: string;
   status?: number;
   code?: string;
@@ -57,11 +60,16 @@ function extract(
     name: redactText(name, secrets).slice(0, 120),
     message: redactText(rawMessage, secrets).slice(0, 800),
   };
+  const classification = classifyNotionFailure(error);
+  diagnostic.failureClass = classification.kind;
   const stack = stringProperty(error, "stack");
   if (stack) diagnostic.stack = redactText(stack, secrets).slice(0, 2500);
-  const status = property(error, "status") ?? property(error, "statusCode");
-  if (typeof status === "number") diagnostic.status = status;
+  if (classification.kind === "definite-response") diagnostic.status = classification.status;
+  if (classification.kind === "transport" && classification.code) {
+    diagnostic.code = classification.code;
+  }
   for (const key of ["code", "operation"] as const) {
+    if (key === "code" && diagnostic.code) continue;
     const candidate = property(error, key);
     const value =
       typeof candidate === "number"
@@ -113,5 +121,9 @@ export function safeDiagnostic(error: unknown, secrets: string[] = []): Sanitize
 export function safeError(error: unknown, secrets: string[] = []): string {
   const diagnostic = safeDiagnostic(error, secrets);
   const status = diagnostic.status ? ` (status ${diagnostic.status})` : "";
-  return `${diagnostic.name}: ${diagnostic.message}${status}`.slice(0, 1200);
+  const code = diagnostic.code ? ` (${diagnostic.code})` : "";
+  return `${diagnostic.failureClass}: ${diagnostic.name}: ${diagnostic.message}${status}${code}`.slice(
+    0,
+    1200,
+  );
 }

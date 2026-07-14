@@ -21,6 +21,9 @@ export interface HealthIssue {
   body: string | null;
   state: "open" | "closed";
   labels: Array<string | { name?: string }>;
+  pull_request?: { url?: string };
+  created_at?: string;
+  updated_at?: string;
 }
 
 export interface IssueComment {
@@ -36,7 +39,6 @@ export interface WorkflowActivationMetadata {
 
 export interface GitHubHealthClient {
   listWorkflowRuns(workflowFile: string): Promise<WorkflowRun[]>;
-  getWorkflowRun(runId: number): Promise<WorkflowRun>;
   listMatchingIssues(label: string): Promise<HealthIssue[]>;
   listIssueComments(issueNumber: number): Promise<IssueComment[]>;
   getLabel(name: string): Promise<{ name: string } | undefined>;
@@ -171,17 +173,13 @@ export class FetchGitHubHealthClient implements GitHubHealthClient {
     return response.workflow_runs;
   }
 
-  public getWorkflowRun(runId: number): Promise<WorkflowRun> {
-    return this.request(`/actions/runs/${runId}`);
-  }
-
   public async listMatchingIssues(label: string): Promise<HealthIssue[]> {
     const issues: HealthIssue[] = [];
     for (let page = 1; page <= 10; page += 1) {
       const result = await this.request<HealthIssue[]>(
         `/issues?state=all&labels=${encodeURIComponent(label)}&per_page=100&page=${page}`,
       );
-      issues.push(...result);
+      issues.push(...result.filter((issue) => !issue.pull_request));
       if (result.length < 100) return issues;
     }
     return issues;

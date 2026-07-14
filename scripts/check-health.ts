@@ -18,11 +18,14 @@ export const ACTIVE_RUN_GRACE_HOURS = 2;
 const WORKFLOW_FILE = "sync.yml";
 const RECOVERY_MARKER_PREFIX = "<!-- canvas-notion-health-recovery:v1:";
 const EPISODE_MARKER_PATTERN = /<!-- canvas-notion-health-episode:v1:([a-f0-9]{16}) -->/;
+const INCIDENT_START_MARKER_PATTERN = /<!-- canvas-notion-health-incident-start:v1:(.+?) -->/;
+const LATEST_FAILURE_MARKER_PATTERN = /<!-- canvas-notion-health-latest-failure:v1:(\d+):(.+?) -->/;
 
 export type HealthReasonCode =
   | "three_consecutive_unhealthy"
   | "no_success_12h"
-  | "no_success_after_activation_grace";
+  | "no_success_after_activation_grace"
+  | "workflow_disabled";
 
 export type ConclusionClass =
   | "success"
@@ -39,7 +42,14 @@ export interface HealthAssessment {
   activation: WorkflowActivationMetadata;
   withinActivationGrace: boolean;
   deferredForActiveRun: boolean;
-  recoveryEligible: boolean;
+  latestScheduledSuccess?: WorkflowRun;
+  latestQualifyingFailure?: WorkflowRun;
+}
+
+export interface HealthIncidentBoundary {
+  startedAt: string;
+  latestFailureRunId?: number;
+  latestFailureCompletedAt?: string;
 }
 
 export interface HealthMonitorOptions {
@@ -73,6 +83,10 @@ function timestamp(run: WorkflowRun): number {
   return Date.parse(run.completed_at ?? run.updated_at ?? run.run_started_at ?? run.created_at);
 }
 
+function completedAt(run: WorkflowRun): string {
+  return run.completed_at ?? run.updated_at;
+}
+
 function sortedScheduledRuns(runs: WorkflowRun[]): WorkflowRun[] {
   return runs
     .filter((run) => run.event === "schedule")
@@ -102,6 +116,9 @@ export function assessScheduledHealth(
   const scheduledRuns = sortedScheduledRuns(runs);
   const completed = scheduledRuns.filter((run) => run.status === "completed");
   const latestSuccess = completed.find((run) => classifyConclusion(run) === "success");
+  const latestQualifyingFailure = completed.find(
+    (run) => classifyConclusion(run) === "unhealthy-completion",
+  );
   const latestSuccessAge = latestSuccess ? now.getTime() - timestamp(latestSuccess) : undefined;
   const withinActivationGrace =
     now.getTime() - Date.parse(activation.activatedAt) < activationGraceHours * 60 * 60 * 1000;
@@ -109,32 +126,43 @@ export function assessScheduledHealth(
   const reasonCodes: HealthReasonCode[] = [];
   const reasons: string[] = [];
 
-  if (hasThreeConsecutiveFailures(scheduledRuns)) {
+  if (activation.state !== "active") {
+    reasonCodes.push("workflow_disabled");
+    reasons.push(
+      `The scheduled sync workflow is not active (GitHub workflow state: ${activation.state}).`,
+    );
+  }
+
+  if (activation.state === "active" && hasThreeConsecutiveFailures(scheduledRuns)) {
     reasonCodes.push("three_consecutive_unhealthy");
     reasons.push("The three most recent completed scheduled runs were qualifying failures.");
   }
 
   let deferredForActiveRun = false;
-  if (latestSuccess) {
-    const age = latestSuccessAge ?? Number.POSITIVE_INFINITY;
-    const watchdog = SUCCESS_WATCHDOG_HOURS * 60 * 60 * 1000;
-    const scheduleGrace = SCHEDULE_DELAY_GRACE_MINUTES * 60 * 1000;
-    if (age > watchdog) {
-      if (activeRun || age <= watchdog + scheduleGrace) {
+  if (activation.state === "active") {
+    if (latestSuccess) {
+      const age = latestSuccessAge ?? Number.POSITIVE_INFINITY;
+      const watchdog = SUCCESS_WATCHDOG_HOURS * 60 * 60 * 1000;
+      const scheduleGrace = SCHEDULE_DELAY_GRACE_MINUTES * 60 * 1000;
+      if (age > watchdog) {
+        if (activeRun || age <= watchdog + scheduleGrace) {
+          deferredForActiveRun = true;
+        } else {
+          reasonCodes.push("no_success_12h");
+          reasons.push(
+            "No scheduled run has succeeded within the 12-hour watchdog and scheduler grace window.",
+          );
+        }
+      }
+    } else if (!withinActivationGrace) {
+      if (activeRun) {
         deferredForActiveRun = true;
       } else {
-        reasonCodes.push("no_success_12h");
+        reasonCodes.push("no_success_after_activation_grace");
         reasons.push(
-          "No scheduled run has succeeded within the 12-hour watchdog and scheduler grace window.",
+          "No scheduled run succeeded before the initial activation grace period ended.",
         );
       }
-    }
-  } else if (!withinActivationGrace) {
-    if (activeRun) {
-      deferredForActiveRun = true;
-    } else {
-      reasonCodes.push("no_success_after_activation_grace");
-      reasons.push("No scheduled run succeeded before the initial activation grace period ended.");
     }
   }
 
@@ -147,18 +175,89 @@ export function assessScheduledHealth(
     activation,
     withinActivationGrace,
     deferredForActiveRun,
-    recoveryEligible:
-      latestSuccessAge !== undefined && latestSuccessAge <= SUCCESS_WATCHDOG_HOURS * 60 * 60 * 1000,
+    ...(latestSuccess ? { latestScheduledSuccess: latestSuccess } : {}),
+    ...(latestQualifyingFailure ? { latestQualifyingFailure } : {}),
   };
 }
 
-function episodeId(assessment: HealthAssessment): string {
+function incidentFromAssessment(assessment: HealthAssessment): HealthIncidentBoundary {
+  const failures = assessment.scheduledRuns.filter(
+    (run) => classifyConclusion(run) === "unhealthy-completion",
+  );
+  const latestFailure = failures[0];
+  const triggeringFailures = assessment.reasonCodes.includes("three_consecutive_unhealthy")
+    ? failures.slice(0, 3)
+    : latestFailure
+      ? [latestFailure]
+      : [];
+  const startedAt = triggeringFailures.length
+    ? completedAt(triggeringFailures[triggeringFailures.length - 1]!)
+    : assessment.activation.activatedAt;
+  return {
+    startedAt,
+    ...(latestFailure
+      ? {
+          latestFailureRunId: latestFailure.id,
+          latestFailureCompletedAt: completedAt(latestFailure),
+        }
+      : {}),
+  };
+}
+
+export function parseHealthIncident(body: string | null): HealthIncidentBoundary | undefined {
+  if (!body) return;
+  const start = body.match(INCIDENT_START_MARKER_PATTERN)?.[1];
+  if (!start || !Number.isFinite(Date.parse(start))) return;
+  const failure = body.match(LATEST_FAILURE_MARKER_PATTERN);
+  return {
+    startedAt: start,
+    ...(failure && Number.isFinite(Date.parse(failure[2]!))
+      ? {
+          latestFailureRunId: Number(failure[1]),
+          latestFailureCompletedAt: failure[2],
+        }
+      : {}),
+  };
+}
+
+function legacyIncident(issue: HealthIssue): HealthIncidentBoundary | undefined {
+  if (!issue.body) return;
+  const pattern =
+    /Status \/ conclusion: completed \/ (failure|timed_out|action_required|startup_failure|cancelled)[\s\S]*?- Completed: ([^\r\n]+)/g;
+  const failures = [...issue.body.matchAll(pattern)]
+    .map((match) => match[2]!.trim())
+    .filter((value) => Number.isFinite(Date.parse(value)))
+    .sort((left, right) => Date.parse(right) - Date.parse(left));
+  const boundary = failures[0] ?? issue.updated_at ?? issue.created_at;
+  return boundary
+    ? { startedAt: boundary, ...(failures[0] ? { latestFailureCompletedAt: failures[0] } : {}) }
+    : undefined;
+}
+
+function advanceIncident(
+  incident: HealthIncidentBoundary,
+  assessment: HealthAssessment,
+): HealthIncidentBoundary {
+  const failure = assessment.latestQualifyingFailure;
+  if (
+    !failure ||
+    (incident.latestFailureCompletedAt &&
+      timestamp(failure) <= Date.parse(incident.latestFailureCompletedAt))
+  ) {
+    return incident;
+  }
+  return {
+    ...incident,
+    latestFailureRunId: failure.id,
+    latestFailureCompletedAt: completedAt(failure),
+  };
+}
+
+function episodeId(incident: HealthIncidentBoundary): string {
   const source = [
-    ...assessment.reasonCodes,
-    ...assessment.relevantRuns.map(
-      (run) => `${run.id}:${run.run_attempt}:${run.status}:${run.conclusion}`,
-    ),
-    assessment.activation.activatedAt,
+    incident.startedAt,
+    incident.latestFailureRunId ?? "none",
+    incident.latestFailureCompletedAt ?? "none",
   ].join("|");
   return createHash("sha256").update(source).digest("hex").slice(0, 16);
 }
@@ -167,8 +266,11 @@ function value(value: string | number | null | undefined): string {
   return value === null || value === undefined || value === "" ? "n/a" : String(value);
 }
 
-export function renderHealthIssue(assessment: HealthAssessment): string {
-  const episode = episodeId(assessment);
+export function renderHealthIssue(
+  assessment: HealthAssessment,
+  incident: HealthIncidentBoundary = incidentFromAssessment(assessment),
+): string {
+  const episode = episodeId(incident);
   const cause =
     assessment.reasonCodes.length > 1
       ? `Multiple conditions (${assessment.reasonCodes.join(", ")})`
@@ -176,6 +278,12 @@ export function renderHealthIssue(assessment: HealthAssessment): string {
   const lines = [
     HEALTH_MARKER,
     `<!-- canvas-notion-health-episode:v1:${episode} -->`,
+    `<!-- canvas-notion-health-incident-start:v1:${incident.startedAt} -->`,
+    ...(incident.latestFailureRunId !== undefined && incident.latestFailureCompletedAt
+      ? [
+          `<!-- canvas-notion-health-latest-failure:v1:${incident.latestFailureRunId}:${incident.latestFailureCompletedAt} -->`,
+        ]
+      : []),
     "## Scheduled sync health alert",
     "",
     `**Alert cause:** ${value(cause)}`,
@@ -211,7 +319,7 @@ export function renderHealthIssue(assessment: HealthAssessment): string {
 
 function matchingIssue(issues: HealthIssue[]): HealthIssue | undefined {
   return issues
-    .filter((issue) => issue.title === HEALTH_ISSUE_TITLE)
+    .filter((issue) => !issue.pull_request && issue.title === HEALTH_ISSUE_TITLE)
     .sort((left, right) => {
       const markerDifference =
         Number(Boolean(right.body?.includes(HEALTH_MARKER))) -
@@ -234,6 +342,28 @@ function recoveryMarker(issue: HealthIssue): string {
   return `${RECOVERY_MARKER_PREFIX}${episode} -->`;
 }
 
+function successRecoversIncident(
+  assessment: HealthAssessment,
+  incident: HealthIncidentBoundary | undefined,
+): boolean {
+  const success = assessment.latestScheduledSuccess;
+  if (!success || !incident) return false;
+  const successAt = timestamp(success);
+  const observedLatestFailureAt = assessment.latestQualifyingFailure
+    ? timestamp(assessment.latestQualifyingFailure)
+    : Number.NEGATIVE_INFINITY;
+  const recordedLatestFailureAt = incident.latestFailureCompletedAt
+    ? Date.parse(incident.latestFailureCompletedAt)
+    : Number.NEGATIVE_INFINITY;
+  return (
+    success.status === "completed" &&
+    success.event === "schedule" &&
+    classifyConclusion(success) === "success" &&
+    successAt > Date.parse(incident.startedAt) &&
+    successAt > Math.max(observedLatestFailureAt, recordedLatestFailureAt)
+  );
+}
+
 export async function monitorScheduledHealth(
   client: GitHubHealthClient,
   options: HealthMonitorOptions = {},
@@ -254,7 +384,11 @@ export async function monitorScheduledHealth(
 
   if (assessment.unhealthy) {
     await ensureLabel(client);
-    const body = renderHealthIssue(assessment);
+    const priorIncident = issue?.state === "open" ? parseHealthIncident(issue.body) : undefined;
+    const incident = priorIncident
+      ? advanceIncident(priorIncident, assessment)
+      : incidentFromAssessment(assessment);
+    const body = renderHealthIssue(assessment, incident);
     if (!issue) {
       await client.createIssue({
         title: HEALTH_ISSUE_TITLE,
@@ -267,7 +401,9 @@ export async function monitorScheduledHealth(
         ...(issue.state === "closed" ? { state: "open" as const } : {}),
       });
     }
-  } else if (issue?.state === "open" && assessment.recoveryEligible) {
+  } else if (issue?.state === "open") {
+    const incident = parseHealthIncident(issue.body) ?? legacyIncident(issue);
+    if (!successRecoversIncident(assessment, incident)) return assessment;
     const marker = recoveryMarker(issue);
     const comments = await client.listIssueComments(issue.number);
     if (!comments.some((comment) => comment.body?.includes(marker))) {

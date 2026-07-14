@@ -1,5 +1,6 @@
 import { appendFile } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
+import type { Logger } from "pino";
 import { loadConfig, type AppConfig } from "./config.js";
 import { CanvasIcsProvider } from "./canvas/provider.js";
 import { readAssignments } from "./notion/assignments.js";
@@ -16,7 +17,10 @@ import type { AssignmentProvider, RunCounts, RunResult } from "./types.js";
 export interface RunDependencies {
   gateway?: NotionGateway;
   provider?: AssignmentProvider;
+  summaryAppender?: SummaryAppender;
 }
+
+export type SummaryAppender = (path: string, data: string, encoding: "utf8") => Promise<void>;
 
 function emptyCounts(): RunCounts {
   return {
@@ -42,12 +46,11 @@ function emptyCounts(): RunCounts {
 }
 
 export function buildJobSummary(config: AppConfig, result: RunResult): string {
-  const proposed = config.mode === "dry-run" ? "Proposed " : "";
   const secrets = [config.CANVAS_ICS_URL, config.NOTION_TOKEN];
-  const courseCreates =
-    config.mode === "dry-run"
-      ? (result.plan?.coursesToCreate.length ?? 0)
-      : result.metrics.coursesCreated;
+  const dryRun = config.mode === "dry-run";
+  const assignmentPagesAdded =
+    result.metrics.assignmentPagesCreated + result.metrics.assignmentPagesRecovered;
+  const coursePagesAdded = result.metrics.coursesCreated + result.metrics.coursesRecovered;
   const removalEnabled = !config.disableRemovals;
   const removalSafe = result.feedDiagnostics?.absenceRemovalSafe ?? false;
   const lines = [
@@ -66,14 +69,34 @@ export function buildJobSummary(config: AppConfig, result: RunResult): string {
     `- Quarantined UIDs: ${result.counts.quarantinedUids} (values redacted)`,
     `- Removal inference enabled: ${removalEnabled ? "yes" : "no"}`,
     `- Removal inference safe: ${removalEnabled && removalSafe ? "yes" : "no"}`,
-    `- ${proposed}Assignments created: ${result.counts.created}`,
-    `- ${proposed}Assignments updated: ${result.counts.updated}`,
-    `- ${proposed}Assignments marked removed: ${result.counts.removed}`,
+    ...(dryRun
+      ? [
+          `- Proposed Assignment pages: ${result.counts.created}`,
+          `- Proposed Assignments updated: ${result.counts.updated}`,
+          `- Proposed Assignments marked removed: ${result.counts.removed}`,
+          `- Proposed description integrity audits: ${result.plan?.assignmentsToUpdate.filter((assignment) => assignment.verifyDescription).length ?? 0}`,
+        ]
+      : [
+          `- Assignment pages added: ${assignmentPagesAdded}`,
+          `- Assignment pages created: ${result.metrics.assignmentPagesCreated}`,
+          `- Assignment pages recovered: ${result.metrics.assignmentPagesRecovered}`,
+          `- Assignments updated: ${result.counts.updated}`,
+          `- Assignments marked removed: ${result.counts.removed}`,
+        ]),
     `- Newly observed missing candidates: ${result.counts.missingObserved}`,
-    `- ${proposed}Missing evidence advanced: ${result.counts.missingAdvanced}`,
-    `- ${proposed}Missing evidence cleared: ${result.counts.missingCleared}`,
-    `- ${proposed}Courses created: ${courseCreates}`,
-    `- ${proposed}Courses enriched: ${result.counts.coursesUpdated}`,
+    `- ${dryRun ? "Proposed " : ""}Missing evidence advanced: ${result.counts.missingAdvanced}`,
+    `- ${dryRun ? "Proposed " : ""}Missing evidence cleared: ${result.counts.missingCleared}`,
+    ...(dryRun
+      ? [
+          `- Proposed Course pages: ${result.plan?.coursesToCreate.length ?? 0}`,
+          `- Proposed Courses enriched: ${result.counts.coursesUpdated}`,
+        ]
+      : [
+          `- Course pages added: ${coursePagesAdded}`,
+          `- Course pages created: ${result.metrics.coursesCreated}`,
+          `- Course pages recovered: ${result.metrics.coursesRecovered}`,
+          `- Courses enriched: ${result.counts.coursesUpdated}`,
+        ]),
     `- Course conflicts: ${result.metrics.coursesConflicted}`,
     `- Unchanged: ${result.counts.unchanged}`,
     `- Skipped: ${result.counts.skipped}`,
@@ -83,6 +106,10 @@ export function buildJobSummary(config: AppConfig, result: RunResult): string {
     `- Notion property-update retries: ${result.metrics.propertyUpdateRetries}`,
     `- Assignment body reads: ${result.metrics.assignmentBodyReads}`,
     `- Description updates avoided: ${result.metrics.descriptionUpdatesAvoided}`,
+    `- Description integrity audits: ${result.metrics.descriptionIntegrityAuditsRun}`,
+    `- Description audits passed without repair: ${result.metrics.descriptionIntegrityAuditsPassed}`,
+    `- Description integrity repairs: ${result.metrics.descriptionIntegrityRepairs}`,
+    `- Description body reads avoided: ${result.metrics.descriptionBodyReadsAvoided}`,
     ...(result.errors.length
       ? [
           "",
@@ -97,9 +124,22 @@ export function buildJobSummary(config: AppConfig, result: RunResult): string {
   return lines.join("\n");
 }
 
-async function writeSummary(config: AppConfig, result: RunResult): Promise<void> {
-  if (config.GITHUB_STEP_SUMMARY) {
-    await appendFile(config.GITHUB_STEP_SUMMARY, buildJobSummary(config, result), "utf8");
+export async function writeJobSummaryBestEffort(
+  config: AppConfig,
+  result: RunResult,
+  logger: Logger,
+  appender: SummaryAppender = appendFile,
+): Promise<boolean> {
+  if (!config.GITHUB_STEP_SUMMARY) return true;
+  try {
+    await appender(config.GITHUB_STEP_SUMMARY, buildJobSummary(config, result), "utf8");
+    return true;
+  } catch (error) {
+    logger.warn(
+      { diagnostic: safeDiagnostic(error, [config.CANVAS_ICS_URL, config.NOTION_TOKEN]) },
+      "Could not append GitHub job summary",
+    );
+    return false;
   }
 }
 
@@ -276,7 +316,7 @@ export async function run(
   for (const annotation of workflowAnnotations(config, result)) {
     process.stdout.write(`${annotation}\n`);
   }
-  await writeSummary(config, result);
+  await writeJobSummaryBestEffort(config, result, logger, dependencies.summaryAppender);
   return result;
 }
 

@@ -22,6 +22,7 @@ const ASSIGNMENTS: Expected = {
   "Removed from Canvas": "checkbox",
   "Raw Description": "rich_text",
   "Canvas Description Hash": "rich_text",
+  "Canvas Description Verified At": "date",
   Notes: "rich_text",
 };
 

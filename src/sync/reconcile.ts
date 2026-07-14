@@ -113,6 +113,7 @@ export function emptyExecutionResult(): SyncExecutionResult {
 
 export interface ApplyPlanOptions {
   templateWait?: TemplateWaitOptions;
+  now?: Date;
 }
 
 export async function applyPlan(
@@ -207,7 +208,7 @@ export async function applyPlan(
       (value) => ({ pageId: value.pageId, recovered: value.recovered }),
     );
     completed.push(pageOperation.kind);
-    counts.created += 1;
+    if (!created.recovered) counts.created += 1;
 
     const recordPartial = (failure: FailedSyncOperation) => {
       execution.partialAssignments.push(
@@ -237,6 +238,7 @@ export async function applyPlan(
       () =>
         updateAssignment(gateway, created.pageId, {
           descriptionHash: managedDescriptionHash(create.source.descriptionMarkdown),
+          descriptionVerifiedAt: (options.now ?? new Date()).toISOString(),
         }),
       undefined,
       recordPartial,
@@ -256,6 +258,11 @@ export async function applyPlan(
         );
       }
     };
+    const recordRepair = (failure: FailedSyncOperation) => {
+      execution.partialAssignments.push(
+        assignmentState(update.pageId, update.pageId, "update", completed, failure),
+      );
+    };
     const properties = { ...update.properties };
     if (properties.coursePageId) {
       properties.coursePageId = resolveCourseKey(properties.coursePageId, createdCourses);
@@ -273,11 +280,11 @@ export async function applyPlan(
     }
     if (update.verifyDescription) {
       const descriptionOperation = operations[operationIndex]!;
-      await applyStep(
+      const integrity = await applyStep(
         descriptionOperation,
         () => ensureManagedDescription(gateway, update.pageId, update.source.descriptionMarkdown),
         undefined,
-        recordPartial,
+        recordRepair,
       );
       completed.push(descriptionOperation.kind);
       const hashOperation = operations[operationIndex]!;
@@ -285,7 +292,10 @@ export async function applyPlan(
         hashOperation,
         () =>
           updateAssignment(gateway, update.pageId, {
-            descriptionHash: update.descriptionHash,
+            ...(update.descriptionHashNeedsUpdate !== false || integrity.repaired
+              ? { descriptionHash: update.descriptionHash }
+              : {}),
+            descriptionVerifiedAt: (options.now ?? new Date()).toISOString(),
           }),
         undefined,
         recordPartial,

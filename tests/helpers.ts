@@ -75,6 +75,7 @@ const assignmentSchema = schema({
   "Removed from Canvas": "checkbox",
   "Raw Description": "rich_text",
   "Canvas Description Hash": "rich_text",
+  "Canvas Description Verified At": "date",
   Notes: "rich_text",
 });
 
@@ -187,7 +188,22 @@ export class FakeGateway implements NotionGateway {
   }
 }
 
-type SimulatedFailure = { id: string; status: number; applied: boolean; appliedCount?: number };
+type SimulatedFailure = {
+  id: string;
+  status?: number;
+  code?: string;
+  name?: string;
+  applied: boolean;
+  appliedCount?: number;
+};
+
+function simulatedFailure(message: string, failure: SimulatedFailure): Error {
+  const error = new Error(message);
+  if (failure.status !== undefined) Object.assign(error, { status: failure.status });
+  if (failure.code) Object.assign(error, { code: failure.code });
+  if (failure.name) error.name = failure.name;
+  return error;
+}
 
 function richTextValue(value: unknown): string {
   if (!Array.isArray(value)) return "";
@@ -296,8 +312,7 @@ export class StatefulFakeGateway implements NotionGateway {
     const newPageId = `${id}-${++this.sequence}`;
     this.writes.push({ kind: "create", id, value: properties });
     if (!failure || failure.applied) this.seedPage(id, newPageId, properties);
-    if (failure)
-      throw Object.assign(new Error("simulated create failure"), { status: failure.status });
+    if (failure) throw simulatedFailure("simulated create failure", failure);
     return Promise.resolve(newPageId);
   }
 
@@ -311,8 +326,7 @@ export class StatefulFakeGateway implements NotionGateway {
         if (page) page.properties = { ...(page.properties as object), ...properties };
       }
     }
-    if (failure)
-      throw Object.assign(new Error("simulated update failure"), { status: failure.status });
+    if (failure) throw simulatedFailure("simulated update failure", failure);
     return Promise.resolve();
   }
 
@@ -347,8 +361,7 @@ export class StatefulFakeGateway implements NotionGateway {
       values.push(...appliedChildren.map((child, index) => materializeBlock(ids[index]!, child)));
       this.blocks.set(parentId, values);
     }
-    if (failure)
-      throw Object.assign(new Error("simulated append failure"), { status: failure.status });
+    if (failure) throw simulatedFailure("simulated append failure", failure);
     return Promise.resolve(ids);
   }
 
@@ -365,8 +378,7 @@ export class StatefulFakeGateway implements NotionGateway {
       }
       this.blocks.delete(blockId);
     }
-    if (failure)
-      throw Object.assign(new Error("simulated delete failure"), { status: failure.status });
+    if (failure) throw simulatedFailure("simulated delete failure", failure);
     return Promise.resolve();
   }
 }

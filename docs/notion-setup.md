@@ -26,34 +26,36 @@ Add:
 - `Removed from Canvas` — Checkbox
 - `Raw Description` — Rich text
 - `Canvas Description Hash` — Rich text
+- `Canvas Description Verified At` — Date
 
 Confirm all required properties:
 
-| Property                | Type      | Required options or target                                                |
-| ----------------------- | --------- | ------------------------------------------------------------------------- |
-| Assignment              | Title     | —                                                                         |
-| Course                  | Relation  | The configured Courses data source                                        |
-| Effective Due Date      | Date      | —                                                                         |
-| Canvas Due Date         | Date      | —                                                                         |
-| Override Due Date       | Date      | —                                                                         |
-| Canvas Missing Since    | Date      | —                                                                         |
-| Canvas Missing Count    | Number    | —                                                                         |
-| Personal Status         | Status    | `Not started`, `In progress`, `Done`                                      |
-| Priority                | Select    | User-managed options                                                      |
-| Assignment Type         | Select    | `Homework`, `Lab`, `Quiz`, `Exam`, `Paper`, `Project`, `Reading`, `Other` |
-| Canvas URL              | URL       | —                                                                         |
-| Canvas UID              | Rich text | —                                                                         |
-| Canvas State            | Select    | `Active`, `Removed`                                                       |
-| Imported From           | Select    | `Canvas ICS`                                                              |
-| Last Synced             | Date      | —                                                                         |
-| Removed from Canvas     | Checkbox  | —                                                                         |
-| Raw Description         | Rich text | —                                                                         |
-| Canvas Description Hash | Rich text | —                                                                         |
-| Notes                   | Rich text | —                                                                         |
+| Property                       | Type      | Required options or target                                                |
+| ------------------------------ | --------- | ------------------------------------------------------------------------- |
+| Assignment                     | Title     | —                                                                         |
+| Course                         | Relation  | The configured Courses data source                                        |
+| Effective Due Date             | Date      | —                                                                         |
+| Canvas Due Date                | Date      | —                                                                         |
+| Override Due Date              | Date      | —                                                                         |
+| Canvas Missing Since           | Date      | —                                                                         |
+| Canvas Missing Count           | Number    | —                                                                         |
+| Personal Status                | Status    | `Not started`, `In progress`, `Done`                                      |
+| Priority                       | Select    | User-managed options                                                      |
+| Assignment Type                | Select    | `Homework`, `Lab`, `Quiz`, `Exam`, `Paper`, `Project`, `Reading`, `Other` |
+| Canvas URL                     | URL       | —                                                                         |
+| Canvas UID                     | Rich text | —                                                                         |
+| Canvas State                   | Select    | `Active`, `Removed`                                                       |
+| Imported From                  | Select    | `Canvas ICS`                                                              |
+| Last Synced                    | Date      | —                                                                         |
+| Removed from Canvas            | Checkbox  | —                                                                         |
+| Raw Description                | Rich text | —                                                                         |
+| Canvas Description Hash        | Rich text | —                                                                         |
+| Canvas Description Verified At | Date      | —                                                                         |
+| Notes                          | Rich text | —                                                                         |
 
 Leave older API-oriented properties in place. The ICS sync ignores `Canvas Assignment ID`, `Canvas Course ID`, `Canvas Submitted`, `Canvas Updated At`, `Available From`, `Available Until`, `Points Possible`, `Submission Types`, and `Submitted At`.
 
-For an existing installation, manually add the two missing-evidence properties with the exact names and types above before upgrading. Leave both blank on existing assignments; the first qualifying scheduled absence initializes them safely. The application validates these properties but never creates, renames, converts, or backfills schema fields automatically.
+For an existing installation, manually add the two missing-evidence properties and `Canvas Description Verified At` with the exact names and types above before upgrading. Leave them blank on existing assignments. The first qualifying scheduled absence initializes missing evidence, and the next live sync audits each matching-hash description whose verification date is blank. The application validates these properties but never creates, renames, converts, or backfills schema fields automatically.
 
 ## 3. Check Courses
 
@@ -77,7 +79,7 @@ The sync does not overwrite Term, Instructor, Notes, Drive Folder, Color, or oth
 - Set that template as the Assignments data source's **default** template.
 - Share the template with the integration if it is not inherited automatically from the database connection.
 
-The sync applies the default through Notion's template API, waits for asynchronous template content, and then appends its own managed Canvas description toggle. It writes `Canvas Description Hash` only after that managed body is verified. Existing imported assignments receive a one-time migration read; matching bodies get only the hash, while mismatches are replaced safely before the hash is committed.
+The sync applies the default through Notion's template API, waits for asynchronous template content, and then reconciles its own managed Canvas description toggle. It writes `Canvas Description Hash` and `Canvas Description Verified At` together only after that managed body is verified. Matching hashes with verification dates no more than 30 days old avoid body reads; blank or older dates cause a periodic integrity audit. Dry-run reports that an audit is due without reading page bodies.
 
 ## 5. Create Canvas Sync Log
 
@@ -143,6 +145,6 @@ From **Actions → Canvas–Notion sync → Run workflow**:
 4. Confirm the new Sync Log page and a sample assignment's template, managed description, course relation, and due dates.
 5. Enable GitHub notifications for failed workflows, new repository issues, and updates to the `sync-failure` issue.
 
-Scheduled syncs then run every four hours. The health workflow creates the `sync-failure` label automatically when first needed. It ignores manual runs and suppresses no-success alerts during the initial workflow-activation grace period. Recovery is reported and closed through the durable marked issue; notification delivery remains a GitHub setting, not application email.
+Scheduled syncs then run every four hours. The health workflow creates the `sync-failure` label automatically when first needed. It ignores manual runs and suppresses no-success alerts during the initial workflow-activation grace period. A disabled workflow opens an immediate `workflow_disabled` incident. Recovery requires a completed scheduled success newer than the incident start and latest qualifying failure; notification delivery remains a GitHub setting, not application email.
 
-Validate and GitHub summaries separate ordinary ignored events, suspicious events, malformed events, duplicate UIDs, cancelled assignments, and quarantined UID counts. Sync results also separate newly observed missing candidates, evidence advanced, evidence cleared, and assignments actually marked removed. Manual live runs observe but do not advance missing evidence; scheduled live runs persist qualifying transitions; dry-run proposes the transitions for its selected trigger without writing. Quarantined values are never displayed. Course metadata enrichment is proposed in dry-run and fills only blank Canvas Course ID, Canvas URL, and Sync Updated At fields; a conflicting nonblank ID or URL blocks the affected assignment until corrected.
+Validate and GitHub summaries separate ordinary ignored events, suspicious events, malformed events, duplicate UIDs, cancelled assignments, and quarantined UID counts. Sync results also separate newly observed missing candidates, evidence advanced, evidence cleared, and assignments actually marked removed. Manual live runs observe but do not advance missing evidence; scheduled live runs persist qualifying transitions; dry-run proposes the transitions for its selected trigger without writing. Quarantined values are never displayed. Course metadata enrichment is proposed in dry-run and fills only blank Canvas Course ID and Canvas URL fields. Each successful enrichment sets `Sync Updated At` to the last sync-driven course metadata change; unchanged courses retain their timestamp. A conflicting nonblank ID or URL blocks the affected assignment until corrected.
