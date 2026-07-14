@@ -3,7 +3,7 @@ import { workflowUrl } from "../config.js";
 import { plannedOperations } from "../sync/reconcile.js";
 import type { RunResult, SyncOperation } from "../types.js";
 import { AmbiguousNotionWriteError, isAmbiguousWriteError, type NotionGateway } from "./client.js";
-import { reconcileManagedSection } from "./managed-section.js";
+import { createManagedSectionSnapshot, reconcileManagedSection } from "./managed-section.js";
 import { date, number, pageId, select, text, title, url } from "./property-helpers.js";
 import { pollForUniquePage, type VisibilityPollingOptions } from "./recovery.js";
 
@@ -175,10 +175,11 @@ export async function writeSyncLog(
     }
   }
 
-  await reconcileManagedSection(
+  const snapshot = await createManagedSectionSnapshot(
     gateway,
     logPageId,
     { managed: MANAGED_SYNC_LOG_TITLE, pending: PENDING_MANAGED_SYNC_LOG_TITLE },
     resultBlocks(result),
   );
+  await reconcileManagedSection(gateway, snapshot);
 }

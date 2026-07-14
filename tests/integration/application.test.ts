@@ -1064,6 +1064,9 @@ describe("managed descriptions", () => {
   it("migrates a missing hash with one read and no replacement when the body matches", async () => {
     const gateway = descriptionGateway();
     await applyPlan(gateway, config(), descriptionPlan("Old description"), counts());
+    expect(gateway.listBlocksCallCount("page")).toBe(1);
+    expect(gateway.listBlocksCallCount("managed")).toBe(1);
+    expect(gateway.totalListBlocksCalls()).toBe(2);
     expect(gateway.metrics.assignmentBodyReads).toBe(1);
     expect(gateway.metrics.descriptionReplacements).toBe(0);
     expect(gateway.writes.filter((write) => write.kind === "append")).toEqual([]);
@@ -1078,6 +1081,8 @@ describe("managed descriptions", () => {
       heading_2: { rich_text: [{ plain_text: "Notes" }] },
     });
     await applyPlan(gateway, config(), descriptionPlan("New description"), counts());
+    expect(gateway.listBlocksCallCount("page")).toBe(2);
+    expect(gateway.totalListBlocksCalls()).toBe(3);
     const blocks = await gateway.listBlocks("page");
     expect(blocks.some((block) => block.id === "user")).toBe(true);
     expect(blocks.filter((block) => blockText(block) === MANAGED_DESCRIPTION_TITLE)).toHaveLength(
@@ -1089,6 +1094,9 @@ describe("managed descriptions", () => {
   it("replaces a mismatched body before committing its hash", async () => {
     const gateway = descriptionGateway();
     await applyPlan(gateway, config(), descriptionPlan("New description"), counts());
+    expect(gateway.listBlocksCallCount("page")).toBe(2);
+    expect(gateway.listBlocksCallCount("managed")).toBe(1);
+    expect(gateway.totalListBlocksCalls()).toBe(4);
     expect(await readManagedDescription(gateway, "page")).toBe("New description");
     expect(gateway.metrics.descriptionReplacements).toBe(1);
     expect(JSON.stringify(gateway.writes)).toContain(managedDescriptionHash("New description"));
@@ -1131,6 +1139,9 @@ describe("managed descriptions", () => {
       paragraph: { rich_text: [{ plain_text: "Old description" }] },
     });
     await applyPlan(gateway, config(), descriptionPlan("Old description"), counts());
+    expect(gateway.listBlocksCallCount("page")).toBe(1);
+    expect(gateway.listBlocksCallCount("managed")).toBe(1);
+    expect(gateway.totalListBlocksCalls()).toBe(2);
     const blocks = await gateway.listBlocks("page");
     expect(blocks.filter((block) => blockText(block) === MANAGED_DESCRIPTION_TITLE)).toHaveLength(
       1,
@@ -1139,10 +1150,14 @@ describe("managed descriptions", () => {
     expect(gateway.metrics.descriptionReplacements).toBe(0);
   });
 
-  it("cleans a pending replacement toggle before advancing verification metadata", async () => {
+  it("cleans pending replacement toggles before advancing verification metadata", async () => {
     const gateway = descriptionGateway();
     gateway.seedBlock("page", toggle("pending", PENDING_MANAGED_DESCRIPTION_TITLE));
+    gateway.seedBlock("page", toggle("pending-duplicate", PENDING_MANAGED_DESCRIPTION_TITLE));
     await applyPlan(gateway, config(), descriptionPlan("Old description"), counts());
+    expect(gateway.listBlocksCallCount("page")).toBe(1);
+    expect(gateway.listBlocksCallCount("managed")).toBe(1);
+    expect(gateway.totalListBlocksCalls()).toBe(2);
     expect(
       (await gateway.listBlocks("page")).filter(
         (block) => blockText(block) === PENDING_MANAGED_DESCRIPTION_TITLE,
@@ -1223,6 +1238,9 @@ describe("managed descriptions", () => {
     const gateway = descriptionGateway();
     gateway.appendFailures.push({ id: "page", code: "ECONNRESET", applied: true });
     await replaceManagedDescription(gateway, "page", "New description");
+    expect(gateway.listBlocksCallCount("page")).toBe(3);
+    expect(gateway.listBlocksCallCount("managed")).toBe(1);
+    expect(gateway.totalListBlocksCalls()).toBe(6);
     const blocks = await gateway.listBlocks("page");
     expect(blocks.filter((block) => blockText(block) === MANAGED_DESCRIPTION_TITLE)).toHaveLength(
       1,
@@ -1242,6 +1260,10 @@ describe("managed descriptions", () => {
       appliedCount: 1,
     });
     await replaceManagedDescription(gateway, "page", "New description");
+    expect(gateway.listBlocksCallCount("page")).toBe(2);
+    expect(gateway.listBlocksCallCount("managed")).toBe(1);
+    expect(gateway.listBlocksCallCount("pending")).toBe(2);
+    expect(gateway.totalListBlocksCalls()).toBeLessThanOrEqual(5);
     expect(await readManagedDescription(gateway, "page")).toBe("New description");
     expect(
       (await gateway.listBlocks("page")).filter(
@@ -1568,7 +1590,9 @@ describe("partial execution and Sync Log recovery", () => {
     const complete = await gateway.listBlocks(markerId);
     gateway.blocks.set(markerId, complete.slice(0, Math.floor(complete.length / 2)));
 
+    const readsBeforeRepair = gateway.totalListBlocksCalls();
     await writeSyncLog(gateway, runConfig, "start", "finish-2", result(["first error"]));
+    expect(gateway.totalListBlocksCalls() - readsBeforeRepair).toBe(4);
     const repaired = await managedChildren(gateway, pageId);
     expect(repaired.map(blockText).filter((value) => value === "Errors")).toHaveLength(1);
     expect(

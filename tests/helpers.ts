@@ -113,6 +113,7 @@ export class FakeGateway implements NotionGateway {
   public assignments: Array<Record<string, unknown>> = [];
   public courses: Array<Record<string, unknown>> = [];
   public writes: Array<{ kind: string; id: string; value?: unknown }> = [];
+  public readonly listBlocksCalls = new Map<string, number>();
   public failOnAssignmentWrite = false;
   private sequence = 0;
   private readonly blocks = new Map<string, Array<Record<string, unknown>>>();
@@ -160,7 +161,16 @@ export class FakeGateway implements NotionGateway {
   }
 
   public async listBlocks(pageId: string): Promise<Array<Record<string, unknown>>> {
+    this.listBlocksCalls.set(pageId, (this.listBlocksCalls.get(pageId) ?? 0) + 1);
     return Promise.resolve(this.blocks.get(pageId) ?? []);
+  }
+
+  public listBlocksCallCount(parentId: string): number {
+    return this.listBlocksCalls.get(parentId) ?? 0;
+  }
+
+  public totalListBlocksCalls(): number {
+    return [...this.listBlocksCalls.values()].reduce((total, count) => total + count, 0);
   }
 
   public async appendBlocks(
@@ -253,6 +263,7 @@ export class StatefulFakeGateway implements NotionGateway {
   public readonly pages = new Map<string, Array<Record<string, unknown>>>();
   public readonly blocks = new Map<string, Array<Record<string, unknown>>>();
   public readonly writes: Array<{ kind: string; id: string; value?: unknown }> = [];
+  public readonly listBlocksCalls = new Map<string, number>();
   public readonly createFailures: SimulatedFailure[] = [];
   public readonly appendFailures: SimulatedFailure[] = [];
   public readonly updateFailures: SimulatedFailure[] = [];
@@ -344,7 +355,16 @@ export class StatefulFakeGateway implements NotionGateway {
   }
 
   public async listBlocks(pageId: string): Promise<Array<Record<string, unknown>>> {
+    this.listBlocksCalls.set(pageId, (this.listBlocksCalls.get(pageId) ?? 0) + 1);
     return Promise.resolve(this.blocks.get(pageId) ?? []);
+  }
+
+  public listBlocksCallCount(parentId: string): number {
+    return this.listBlocksCalls.get(parentId) ?? 0;
+  }
+
+  public totalListBlocksCalls(): number {
+    return [...this.listBlocksCalls.values()].reduce((total, count) => total + count, 0);
   }
 
   public async appendBlocks(

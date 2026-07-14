@@ -1,6 +1,11 @@
 import { createHash } from "node:crypto";
-import { AmbiguousNotionWriteError, type NotionGateway } from "./client.js";
-import { blockText, reconcileManagedSection } from "./managed-section.js";
+import type { NotionGateway } from "./client.js";
+import {
+  blockText,
+  createManagedSectionSnapshot,
+  reconcileManagedSection,
+  verifyManagedSection,
+} from "./managed-section.js";
 
 export const MANAGED_DESCRIPTION_TITLE = "Canvas Description — managed by sync";
 export const PENDING_MANAGED_DESCRIPTION_TITLE =
@@ -23,29 +28,6 @@ function descriptionBlocks(markdown: string): Array<Record<string, unknown>> {
     result.push(paragraph(markdown.slice(offset, offset + 1900)));
   }
   return result;
-}
-
-function blockSignature(block: Record<string, unknown>): string {
-  return JSON.stringify([typeof block.type === "string" ? block.type : "", blockText(block)]);
-}
-
-function isToggle(block: Record<string, unknown>, title: string): boolean {
-  return block.type === "toggle" && blockText(block) === title && typeof block.id === "string";
-}
-
-async function managedDescriptionIsValid(
-  gateway: NotionGateway,
-  pageId: string,
-  markdown: string | undefined,
-): Promise<boolean> {
-  const blocks = await gateway.listBlocks(pageId);
-  const canonical = blocks.filter((block) => isToggle(block, MANAGED_DESCRIPTION_TITLE));
-  const pending = blocks.filter((block) => isToggle(block, PENDING_MANAGED_DESCRIPTION_TITLE));
-  if (canonical.length !== 1 || pending.length !== 0) return false;
-  const canonicalId = canonical[0]!.id as string;
-  const actual = (await gateway.listBlocks(canonicalId)).map(blockSignature);
-  const expected = descriptionBlocks(markdown ?? "").map(blockSignature);
-  return JSON.stringify(actual) === JSON.stringify(expected);
 }
 
 export function descriptionIntegrityAuditDue(
@@ -89,20 +71,18 @@ export async function replaceManagedDescription(
     gateway.metrics.descriptionIntegrityAuditsRun += 1;
     gateway.metrics.assignmentBodyReads += 1;
   }
-  if (await managedDescriptionIsValid(gateway, pageId, markdown)) {
-    if (gateway.metrics) gateway.metrics.descriptionIntegrityAuditsPassed += 1;
-    return { repaired: false, replaced: false };
-  }
-
-  const result = await reconcileManagedSection(
+  const snapshot = await createManagedSectionSnapshot(
     gateway,
     pageId,
     { managed: MANAGED_DESCRIPTION_TITLE, pending: PENDING_MANAGED_DESCRIPTION_TITLE },
     descriptionBlocks(markdown ?? ""),
   );
-  if (!(await managedDescriptionIsValid(gateway, pageId, markdown))) {
-    throw new AmbiguousNotionWriteError("Managed description integrity verification failed");
+  if (await verifyManagedSection(gateway, snapshot)) {
+    if (gateway.metrics) gateway.metrics.descriptionIntegrityAuditsPassed += 1;
+    return { repaired: false, replaced: false };
   }
+
+  const result = await reconcileManagedSection(gateway, snapshot);
   if (gateway.metrics) {
     gateway.metrics.descriptionIntegrityRepairs += 1;
     if (result.replaced) gateway.metrics.descriptionReplacements += 1;
