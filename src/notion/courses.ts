@@ -1,4 +1,4 @@
-import type { CourseCreate, CourseRecord, RecoveredCreate } from "../types.js";
+import type { CourseCreate, CourseRecord, CourseUpdate, RecoveredCreate } from "../types.js";
 import { AmbiguousNotionWriteError, isAmbiguousWriteError, type NotionGateway } from "./client.js";
 import { normalizeCourse } from "../sync/course-matcher.js";
 import { pollForUniquePage, type VisibilityPollingOptions } from "./recovery.js";
@@ -6,6 +6,7 @@ import {
   checkbox,
   pageId,
   pageProperties,
+  readDate,
   readRichText,
   readTitle,
   readUrl,
@@ -25,12 +26,14 @@ export async function readCourses(
     const courseCode = readRichText(properties, "Course Code");
     const canvasCourseId = readRichText(properties, "Canvas Course ID");
     const courseUrl = readUrl(properties, "Canvas URL");
+    const syncUpdatedAt = readDate(properties, "Sync Updated At");
     return {
       pageId: pageId(page),
       title: readTitle(properties, "Course"),
       ...(courseCode ? { courseCode } : {}),
       ...(canvasCourseId ? { canvasCourseId } : {}),
       ...(courseUrl ? { url: courseUrl } : {}),
+      ...(syncUpdatedAt ? { syncUpdatedAt } : {}),
     };
   });
 }
@@ -50,7 +53,12 @@ export async function createCourse(
   if (course.canvasCourseId) properties["Canvas Course ID"] = text(course.canvasCourseId);
   if (course.canvasUrl) properties["Canvas URL"] = url(course.canvasUrl);
   try {
-    return { pageId: await gateway.createPage(dataSourceId, properties), recovered: false };
+    const created = {
+      pageId: await gateway.createPage(dataSourceId, properties),
+      recovered: false,
+    };
+    if (gateway.metrics) gateway.metrics.coursesCreated += 1;
+    return created;
   } catch (error) {
     if (!isAmbiguousWriteError(error)) throw error;
     const match = await pollForUniquePage(
@@ -77,11 +85,31 @@ export async function createCourse(
       (count) => `Course create is ambiguous: ${count} pages match its deterministic key`,
       recoveryOptions,
     );
-    if (match) return { pageId: courseRecord(match).pageId, recovered: true };
+    if (match) {
+      if (gateway.metrics) {
+        gateway.metrics.ambiguousWriteRecoveries += 1;
+        gateway.metrics.coursesRecovered += 1;
+      }
+      return { pageId: courseRecord(match).pageId, recovered: true };
+    }
     throw new AmbiguousNotionWriteError(
       "Course create is ambiguous: no matching page became visible; creation was not retried",
     );
   }
+}
+
+export async function updateCourse(gateway: NotionGateway, update: CourseUpdate): Promise<void> {
+  const properties: Record<string, unknown> = {};
+  if (update.canvasCourseId !== undefined) {
+    properties["Canvas Course ID"] = text(update.canvasCourseId);
+  }
+  if (update.canvasUrl !== undefined) properties["Canvas URL"] = url(update.canvasUrl);
+  if (update.syncUpdatedAt !== undefined) {
+    properties["Sync Updated At"] = date(update.syncUpdatedAt);
+  }
+  if (!Object.keys(properties).length) return;
+  await gateway.updatePage(update.pageId, properties);
+  if (gateway.metrics) gateway.metrics.coursesEnriched += 1;
 }
 
 function courseRecord(page: Record<string, unknown>): CourseRecord {

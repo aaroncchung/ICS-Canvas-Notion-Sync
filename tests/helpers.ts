@@ -1,6 +1,6 @@
 import type { AppConfig } from "../src/config.js";
 import type { AssignmentFeed, AssignmentProvider } from "../src/types.js";
-import type { NotionGateway } from "../src/notion/client.js";
+import { createRunMetrics, type NotionGateway } from "../src/notion/client.js";
 
 export const rules: AppConfig["assignmentTypeRules"] = [
   { type: "Quiz", patterns: ["quiz"] },
@@ -71,6 +71,7 @@ const assignmentSchema = schema({
   "Last Synced": "date",
   "Removed from Canvas": "checkbox",
   "Raw Description": "rich_text",
+  "Canvas Description Hash": "rich_text",
   Notes: "rich_text",
 });
 
@@ -104,6 +105,7 @@ const logSchema = schema({
 });
 
 export class FakeGateway implements NotionGateway {
+  public readonly metrics = createRunMetrics();
   public assignments: Array<Record<string, unknown>> = [];
   public courses: Array<Record<string, unknown>> = [];
   public writes: Array<{ kind: string; id: string; value?: unknown }> = [];
@@ -228,6 +230,7 @@ function materializeBlock(id: string, source: Record<string, unknown>): Record<s
 }
 
 export class StatefulFakeGateway implements NotionGateway {
+  public readonly metrics = createRunMetrics();
   public readonly pages = new Map<string, Array<Record<string, unknown>>>();
   public readonly blocks = new Map<string, Array<Record<string, unknown>>>();
   public readonly writes: Array<{ kind: string; id: string; value?: unknown }> = [];
@@ -366,9 +369,9 @@ export class StatefulFakeGateway implements NotionGateway {
 }
 
 export class FakeProvider implements AssignmentProvider {
-  public constructor(public lastFeed: AssignmentFeed) {}
+  public constructor(private readonly feed: AssignmentFeed) {}
   public fetchAssignments() {
-    return Promise.resolve(this.lastFeed.assignments);
+    return Promise.resolve(this.feed);
   }
 }
 

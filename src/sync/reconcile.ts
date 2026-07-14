@@ -1,8 +1,11 @@
 import type { AppConfig } from "../config.js";
+import { safeError } from "../observability/redaction.js";
 import { createAssignment, updateAssignment } from "../notion/assignments.js";
 import { errorStatus, isAmbiguousWriteError, type NotionGateway } from "../notion/client.js";
-import { createCourse } from "../notion/courses.js";
+import { createCourse, updateCourse } from "../notion/courses.js";
 import {
+  ensureManagedDescription,
+  managedDescriptionHash,
   replaceManagedDescription,
   waitForTemplate,
   type TemplateWaitOptions,
@@ -28,7 +31,7 @@ function resolveCourseKey(key: string, created: Map<string, string>): string {
 function operationError(error: unknown): string {
   const status = errorStatus(error);
   if (status) return `Notion request failed with status ${status}`;
-  if (error instanceof Error) return error.message.slice(0, 240);
+  if (error instanceof Error) return safeError(error).slice(0, 240);
   return "Notion operation failed";
 }
 
@@ -38,17 +41,25 @@ export function plannedOperations(plan: SyncPlan): SyncOperation[] {
       kind: "course-create" as const,
       target: course.key,
     })),
+    ...plan.coursesToUpdate.map((course) => ({
+      kind: "course-update" as const,
+      target: course.pageId,
+    })),
     ...plan.assignmentsToCreate.flatMap((assignment) => [
       { kind: "assignment-page-create" as const, target: assignment.source.uid },
       { kind: "assignment-template-wait" as const, target: assignment.source.uid },
       { kind: "assignment-description-update" as const, target: assignment.source.uid },
+      { kind: "assignment-description-hash-update" as const, target: assignment.source.uid },
     ]),
     ...plan.assignmentsToUpdate.flatMap((assignment) => [
       ...(Object.keys(assignment.properties).length
         ? [{ kind: "assignment-property-update" as const, target: assignment.pageId }]
         : []),
-      ...(assignment.updateDescription
+      ...(assignment.verifyDescription
         ? [{ kind: "assignment-description-update" as const, target: assignment.pageId }]
+        : []),
+      ...(assignment.verifyDescription
+        ? [{ kind: "assignment-description-hash-update" as const, target: assignment.pageId }]
         : []),
     ]),
     ...plan.assignmentsToRemove.map((assignment) => ({
@@ -59,12 +70,15 @@ export function plannedOperations(plan: SyncPlan): SyncOperation[] {
 }
 
 export class ApplyPlanError extends Error {
+  public readonly operation: SyncOperationKind | undefined;
+
   public constructor(
     public readonly execution: SyncExecutionResult,
     message: string,
   ) {
     super(message);
     this.name = "ApplyPlanError";
+    this.operation = execution.failedOperation?.kind;
   }
 }
 
@@ -149,6 +163,12 @@ export async function applyPlan(
     createdCourses.set(course.key, created.pageId);
   }
 
+  for (const course of plan.coursesToUpdate) {
+    const operation = operations[operationIndex]!;
+    await applyStep(operation, () => updateCourse(gateway, course));
+    counts.coursesUpdated += 1;
+  }
+
   // Active creates and updates deliberately finish before any removal writes.
   for (const create of plan.assignmentsToCreate) {
     const target = create.source.uid;
@@ -192,6 +212,17 @@ export async function applyPlan(
       recordPartial,
     );
     completed.push(descriptionOperation.kind);
+    const hashOperation = operations[operationIndex]!;
+    await applyStep(
+      hashOperation,
+      () =>
+        updateAssignment(gateway, created.pageId, {
+          descriptionHash: managedDescriptionHash(create.source.descriptionMarkdown),
+        }),
+      undefined,
+      recordPartial,
+    );
+    completed.push(hashOperation.kind);
     execution.assignmentsSynchronized.push(
       assignmentState(target, created.pageId, "create", completed),
     );
@@ -220,15 +251,26 @@ export async function applyPlan(
       );
       completed.push(propertyOperation.kind);
     }
-    if (update.updateDescription) {
+    if (update.verifyDescription) {
       const descriptionOperation = operations[operationIndex]!;
       await applyStep(
         descriptionOperation,
-        () => replaceManagedDescription(gateway, update.pageId, update.source.descriptionMarkdown),
+        () => ensureManagedDescription(gateway, update.pageId, update.source.descriptionMarkdown),
         undefined,
         recordPartial,
       );
       completed.push(descriptionOperation.kind);
+      const hashOperation = operations[operationIndex]!;
+      await applyStep(
+        hashOperation,
+        () =>
+          updateAssignment(gateway, update.pageId, {
+            descriptionHash: update.descriptionHash,
+          }),
+        undefined,
+        recordPartial,
+      );
+      completed.push(hashOperation.kind);
     }
     execution.assignmentsSynchronized.push(
       assignmentState(update.pageId, update.pageId, "update", completed),

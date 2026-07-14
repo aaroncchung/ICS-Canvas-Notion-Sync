@@ -149,6 +149,7 @@ export async function writeSyncLog(
         );
       }
       logPageId = pageId(recovered);
+      if (gateway.metrics) gateway.metrics.ambiguousWriteRecoveries += 1;
       await gateway.updatePage(logPageId, properties);
     }
   }

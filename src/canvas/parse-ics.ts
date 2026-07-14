@@ -26,22 +26,17 @@ function toEvent(value: unknown): RawCalendarEvent | undefined {
     (start && "dateOnly" in start && (start as Date & { dateOnly?: boolean }).dateOnly);
   const uid = asString(item.uid);
   const summary = asString(item.summary);
-  const end = asDate(item.end);
   const description = asString(item.description);
   const url = asString(item.url);
   const location = asString(item.location);
-  const lastmodified = asDate(item.lastmodified);
   const status = asString(item.status);
   return {
     ...(uid ? { uid } : {}),
     ...(summary ? { summary } : {}),
     ...(start ? { start } : {}),
-    ...(end ? { end } : {}),
     ...(description ? { description } : {}),
     ...(url ? { url } : {}),
     ...(location ? { location } : {}),
-    ...(lastmodified ? { lastmodified } : {}),
-    ...(typeof item.sequence === "number" ? { sequence: item.sequence } : {}),
     ...(status ? { status } : {}),
     ...(categories ? { categories } : {}),
     ...(dateOnly ? { datetype: "date" } : {}),
@@ -176,14 +171,12 @@ export function parseIcs(
     cancelledAssignments,
     diagnostics: {
       totalEvents: sourceEventCount,
-      assignmentsParsed: assignments.length,
       sourceUids: [...sourceUidCounts.keys()],
       normalizedAssignmentUids: [...assignments, ...cancelledAssignments].map(
         (assignment) => assignment.uid,
       ),
       quarantinedUids: [...quarantinedUids],
       events,
-      ignoredEventCount: events.filter((event) => event.kind === "ignored").length,
       complete: true,
     },
   };

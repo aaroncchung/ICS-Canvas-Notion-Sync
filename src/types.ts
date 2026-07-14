@@ -24,13 +24,11 @@ export interface ExternalAssignment {
   dueAt?: string;
   descriptionPlainText?: string;
   descriptionMarkdown?: string;
-  sourceUpdatedAt?: string;
   inferredType: AssignmentType;
-  rawClassificationEvidence: string[];
 }
 
 export interface AssignmentProvider {
-  fetchAssignments(): Promise<ExternalAssignment[]>;
+  fetchAssignments(): Promise<AssignmentFeed>;
 }
 
 export type FeedEventDiagnostic =
@@ -67,12 +65,10 @@ export type FeedEventDiagnostic =
 
 export interface FeedDiagnostics {
   totalEvents: number;
-  assignmentsParsed: number;
   sourceUids: string[];
   normalizedAssignmentUids: string[];
   quarantinedUids: string[];
   events: FeedEventDiagnostic[];
-  ignoredEventCount: number;
   complete: boolean;
 }
 
@@ -82,12 +78,25 @@ export interface AssignmentFeed {
   diagnostics: FeedDiagnostics;
 }
 
+export interface FeedDiagnosticSummary {
+  totalEvents: number;
+  activeAssignments: number;
+  cancelledAssignments: number;
+  ignoredEvents: number;
+  suspiciousEvents: number;
+  malformedEvents: number;
+  duplicateUids: number;
+  quarantinedUids: number;
+  absenceRemovalSafe: boolean;
+}
+
 export interface CourseRecord {
   pageId: string;
   title: string;
   courseCode?: string;
   canvasCourseId?: string;
   url?: string;
+  syncUpdatedAt?: string;
 }
 
 export interface AssignmentRecord {
@@ -100,7 +109,7 @@ export interface AssignmentRecord {
   effectiveDueDate?: string;
   overrideDueDate?: string;
   descriptionExcerpt?: string;
-  managedDescription?: string;
+  descriptionHash?: string;
   personalStatus?: string;
   priority?: string;
   assignmentType?: string;
@@ -117,6 +126,13 @@ export interface CourseCreate {
   canvasUrl?: string;
 }
 
+export interface CourseUpdate {
+  pageId: string;
+  canvasCourseId?: string;
+  canvasUrl?: string;
+  syncUpdatedAt?: string;
+}
+
 export interface AssignmentCreate {
   source: ExternalAssignment;
   courseKey: string;
@@ -127,8 +143,8 @@ export interface AssignmentUpdate {
   source: ExternalAssignment;
   courseKey: string;
   properties: AssignmentPropertyUpdate;
-  updateDescription: boolean;
-  reactivate: boolean;
+  verifyDescription: boolean;
+  descriptionHash: string;
 }
 
 export interface AssignmentPropertyUpdate {
@@ -139,6 +155,7 @@ export interface AssignmentPropertyUpdate {
   effectiveDueDate?: string | null;
   overrideDueDate?: string | null;
   rawDescription?: string;
+  descriptionHash?: string;
   removed?: boolean;
   canvasState?: "Active" | "Removed";
 }
@@ -151,6 +168,7 @@ export interface PlanWarning {
 
 export interface SyncPlan {
   coursesToCreate: CourseCreate[];
+  coursesToUpdate: CourseUpdate[];
   assignmentsToCreate: AssignmentCreate[];
   assignmentsToUpdate: AssignmentUpdate[];
   assignmentsToRemove: AssignmentRecord[];
@@ -166,10 +184,12 @@ export interface RecoveredCreate {
 
 export type SyncOperationKind =
   | "course-create"
+  | "course-update"
   | "assignment-page-create"
   | "assignment-template-wait"
   | "assignment-property-update"
   | "assignment-description-update"
+  | "assignment-description-hash-update"
   | "assignment-remove";
 
 export interface SyncOperation {
@@ -208,12 +228,36 @@ export interface SyncExecutionResult {
 export interface RunCounts {
   feedItems: number;
   assignmentsParsed: number;
+  cancelledAssignments: number;
+  ignoredEvents: number;
+  suspiciousEvents: number;
+  malformedEvents: number;
+  duplicateUids: number;
+  quarantinedUids: number;
   created: number;
   updated: number;
+  coursesUpdated: number;
   removed: number;
   unchanged: number;
   skipped: number;
   warningCount: number;
+}
+
+export interface RunMetrics {
+  notionRequests: number;
+  requestsByOperation: Record<string, number>;
+  readRetries: number;
+  propertyUpdateRetries: number;
+  ambiguousWriteRecoveries: number;
+  assignmentBodyReads: number;
+  descriptionReplacements: number;
+  descriptionUpdatesAvoided: number;
+  coursesCreated: number;
+  coursesRecovered: number;
+  coursesEnriched: number;
+  coursesConflicted: number;
+  assignmentPagesCreated: number;
+  assignmentPagesRecovered: number;
 }
 
 export interface RunResult {
@@ -221,6 +265,8 @@ export interface RunResult {
   counts: RunCounts;
   warnings: PlanWarning[];
   errors: string[];
+  feedDiagnostics?: FeedDiagnosticSummary;
+  metrics: RunMetrics;
   plan?: SyncPlan;
   execution?: SyncExecutionResult;
 }

@@ -1,5 +1,6 @@
 import { Client } from "@notionhq/client";
 import type { Logger } from "pino";
+import type { RunMetrics } from "../types.js";
 
 export const NOTION_API_VERSION = "2026-03-11";
 const TRANSIENT_STATUSES = new Set([429, 500, 502, 503, 504]);
@@ -21,6 +22,7 @@ export class AmbiguousNotionWriteError extends Error {
 }
 
 export interface NotionGateway {
+  readonly metrics?: RunMetrics;
   retrieveDataSource(id: string): Promise<Record<string, unknown>>;
   queryDataSource(
     id: string,
@@ -42,6 +44,25 @@ export interface NotionGateway {
   deleteBlock(blockId: string): Promise<void>;
 }
 
+export function createRunMetrics(): RunMetrics {
+  return {
+    notionRequests: 0,
+    requestsByOperation: {},
+    readRetries: 0,
+    propertyUpdateRetries: 0,
+    ambiguousWriteRecoveries: 0,
+    assignmentBodyReads: 0,
+    descriptionReplacements: 0,
+    descriptionUpdatesAvoided: 0,
+    coursesCreated: 0,
+    coursesRecovered: 0,
+    coursesEnriched: 0,
+    coursesConflicted: 0,
+    assignmentPagesCreated: 0,
+    assignmentPagesRecovered: 0,
+  };
+}
+
 export function errorStatus(error: unknown): number | undefined {
   if (!error || typeof error !== "object") return;
   const status = (error as { status?: unknown }).status;
@@ -54,6 +75,18 @@ export function isAmbiguousWriteError(error: unknown): boolean {
   );
 }
 
+function classifyOperation(error: unknown, operation: NotionOperation): unknown {
+  if (!error || (typeof error !== "object" && typeof error !== "function")) return error;
+  try {
+    if (!("operation" in error)) {
+      Object.defineProperty(error, "operation", { value: operation, configurable: true });
+    }
+  } catch {
+    // Some third-party error objects are non-extensible; the original error remains useful.
+  }
+  return error;
+}
+
 export async function withRetry<T>(
   operation: () => Promise<T>,
   options: {
@@ -61,6 +94,8 @@ export async function withRetry<T>(
     baseDelayMs?: number;
     sleep?: (ms: number) => Promise<void>;
     operation?: NotionOperation;
+    onRetry?: (operation: NotionOperation) => void;
+    metrics?: RunMetrics;
   } = {},
 ): Promise<T> {
   const attempts = options.attempts ?? 4;
@@ -70,13 +105,25 @@ export async function withRetry<T>(
   const operationType = options.operation ?? "read";
   const retriesAmbiguousFailures = ["read", "property-update"].includes(operationType);
   for (let attempt = 0; attempt < attempts; attempt += 1) {
+    if (options.metrics) {
+      options.metrics.notionRequests += 1;
+      options.metrics.requestsByOperation[operationType] =
+        (options.metrics.requestsByOperation[operationType] ?? 0) + 1;
+    }
     try {
       return await operation();
     } catch (error) {
       const status = errorStatus(error) ?? 0;
       const retryable =
         TRANSIENT_STATUSES.has(status) && (status === 429 || retriesAmbiguousFailures);
-      if (attempt === attempts - 1 || !retryable) throw error;
+      if (attempt === attempts - 1 || !retryable) {
+        throw classifyOperation(error, operationType);
+      }
+      if (operationType === "read" && options.metrics) options.metrics.readRetries += 1;
+      if (operationType === "property-update" && options.metrics) {
+        options.metrics.propertyUpdateRetries += 1;
+      }
+      options.onRetry?.(operationType);
       const jitter = Math.floor(Math.random() * baseDelayMs);
       await sleep(baseDelayMs * 2 ** attempt + jitter);
     }
@@ -91,6 +138,7 @@ export class OfficialNotionGateway implements NotionGateway {
   public constructor(
     token: string,
     private readonly logger: Logger,
+    public readonly metrics: RunMetrics = createRunMetrics(),
   ) {
     this.client = new Client({ auth: token, notionVersion: NOTION_API_VERSION });
   }
@@ -229,7 +277,10 @@ export class OfficialNotionGateway implements NotionGateway {
         }
         return operation();
       },
-      { operation: operationType },
+      {
+        operation: operationType,
+        metrics: this.metrics,
+      },
     );
   }
 }

@@ -7,12 +7,9 @@ export interface RawCalendarEvent {
   uid?: string;
   summary?: string;
   start?: Date;
-  end?: Date;
   description?: string;
   url?: string;
   location?: string;
-  lastmodified?: Date;
-  sequence?: number;
   status?: string;
   categories?: string[];
   datetype?: string;
@@ -122,8 +119,6 @@ export function normalizeAssignment(
     ...(due ? { dueAt: due } : {}),
     ...(description.plainText ? { descriptionPlainText: description.plainText } : {}),
     ...(description.markdown ? { descriptionMarkdown: description.markdown } : {}),
-    ...(event.lastmodified ? { sourceUpdatedAt: event.lastmodified.toISOString() } : {}),
     inferredType: inferAssignmentType(title, rules),
-    rawClassificationEvidence: classification.evidence,
   };
 }

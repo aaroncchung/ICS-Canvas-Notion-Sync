@@ -24,7 +24,7 @@ Personal Status, Priority, Notes, Override Due Date, and an assignment's manuall
 5. Courses and active assignments are written conservatively. Only after all active writes succeed can guarded removal markers be applied.
 6. Live runs write a detailed Canvas Sync Log page. Dry-run and validate modes make no data changes.
 
-The implementation uses the `AssignmentProvider` interface. `CanvasIcsProvider` is the initial provider; a future authenticated provider can return the same `ExternalAssignment` model without changing reconciliation.
+The implementation uses an `AssignmentProvider` whose `fetchAssignments()` method returns one `AssignmentFeed` containing active assignments, cancelled assignments, and structured diagnostics. `CanvasIcsProvider` is the initial provider; a future authenticated provider can return the same normalized feed without mutable side channels or reconciliation changes.
 
 ## Requirements
 
@@ -41,7 +41,7 @@ The Notion API version is explicitly pinned to `2026-03-11`.
 Follow the exact checklist in [docs/notion-setup.md](docs/notion-setup.md). In summary:
 
 - Rename `Due` → `Effective Due Date`, `Canvas Key` → `Canvas UID`, and `Sync Updated At` → `Last Synced` in Assignments.
-- Add `Canvas Due Date`, `Override Due Date`, `Imported From`, `Removed from Canvas`, and `Raw Description`.
+- Add `Canvas Due Date`, `Override Due Date`, `Imported From`, `Removed from Canvas`, `Raw Description`, and `Canvas Description Hash`.
 - Create the Canvas Sync Log data source with the documented fields and options.
 - Share Assignments, Courses, the default assignment template, and Canvas Sync Log with the integration.
 - Make the assignment template the data source's default. New pages use Notion's current default-template API, which applies the template asynchronously; the sync waits before adding its managed description.
@@ -90,6 +90,8 @@ Aliases are optional. Copy `config/course-aliases.example.json` to `config/cours
 
 The left side is the Canvas label; the right side is an existing Notion Course title or Course Code. An absent file means no aliases.
 
+Both optional JSON files are structurally validated. Alias keys and values must be bounded nonempty strings. `config/assignment-type-rules.json`, when present, must be a nonempty list of supported types with nonempty, bounded phrase lists and no normalized duplicate type/phrase pair. Assignment-type patterns are literal phrases, not regular expressions; matcher construction escapes them.
+
 ## Local commands
 
 ```bash
@@ -99,7 +101,7 @@ npm run sync -- --mode dry-run --trigger manual
 npm run sync -- --mode sync --trigger manual
 ```
 
-Add `--disable-removals` to a sync or dry-run command to suppress removal planning. Fatal configuration, feed, schema, or write errors return a nonzero exit code. Feed titles and descriptions are not printed during validate mode.
+Add `--disable-removals` to a sync or dry-run command to suppress removal planning. Fatal configuration, feed, schema, or write errors return a nonzero exit code. Validate reports active, cancelled, ordinary ignored, suspicious, malformed, duplicate, and quarantined counts plus removal safety without printing UIDs, titles, descriptions, or feed contents. Ordinary events and deterministically normalized cancellations do not cause warning status; unsafe assignment diagnostics do. `Skipped` now counts assignment reconciliation work withheld for safety, not ordinary events, quarantined diagnostics, and cancellations combined into one number.
 
 Development checks:
 
@@ -117,7 +119,7 @@ Tests use synthetic ICS and in-memory Notion doubles; they require no live crede
 
 ## GitHub Actions
 
-Add the two secrets and four variables under **Settings → Secrets and variables → Actions**. Then open **Actions → Canvas–Notion sync → Run workflow** and run in this order:
+Add the two secrets, four required variables, and optional health-grace variable under **Settings → Secrets and variables → Actions**. Then open **Actions → Canvas–Notion sync → Run workflow** and run in this order:
 
 1. `validate`
 2. `dry-run`
@@ -125,11 +127,19 @@ Add the two secrets and four variables under **Settings → Secrets and variable
 
 Scheduled runs execute at minute 17 every four hours. Manual runs can select any mode and disable removal detection. Concurrency prevents overlapping syncs.
 
-The health workflow checks only scheduled `sync.yml` runs. It opens or updates one `sync-failure` issue after three consecutive scheduled failures or twelve hours without a successful scheduled run. A later successful scheduled run receives a recovery comment and closes the issue. The issue includes only workflow metadata and links, never feed content or secrets.
+The health workflow checks only scheduled `sync.yml` runs; manual runs never improve or degrade scheduled health. Runs are sorted by their timestamps. `success` is healthy. Completed `failure`, `timed_out`, `action_required`, `startup_failure`, and scheduled `cancelled` runs are qualifying failures. `neutral`, `skipped`, and `stale` are not successes, do not count toward the three-failure threshold, and break a consecutive-failure sequence, but they still allow the no-success watchdog to fire. Queued and in-progress runs are not completed failures.
+
+Health alerts use two conditions: three consecutive qualifying scheduled failures, or no scheduled success within the 12-hour watchdog. The watchdog allows 60 minutes for GitHub scheduler delay, and a scheduled run that began within the previous two hours temporarily defers an absence alert. This keeps the health check at minute 47, 30 minutes after the four-hour sync at minute 17, without treating an ordinary running sync as failed. All comparisons use UTC timestamps.
+
+Before any scheduled success exists, the health workflow uses `.github/workflows/sync.yml` workflow metadata as its stable activation reference (`updated_at`, falling back to `created_at`). The default initial grace is 14 hours. Set the non-secret repository variable `HEALTH_ACTIVATION_GRACE_HOURS` to another positive hour value if needed. No-success alerts are suppressed during that grace; three actual qualifying failures can still alert. A recent queued or running first sync also defers the absence alert.
+
+One durable issue titled `Canvas–Notion sync is unhealthy` and labeled `sync-failure` is reused. Its body contains `<!-- canvas-notion-health:v1 -->` plus an episode marker. The checker updates the issue only when its generated body changes, reopens the same closed issue for a later unhealthy episode, adds one marker-backed recovery comment per episode, and closes it once on recovery. The issue includes only workflow name, run ID and attempt, event, status and conclusion, branch, commit SHA, creation/start/completion timestamps, run link, activation reference, and alert cause. It never includes feed or assignment content, Notion data, environment variables, raw logs, or authentication details.
+
+In GitHub Actions, fatal application failures produce sanitized `::error::` annotations and meaningful suspicious diagnostics produce a sanitized `::warning::`; ordinary ignored calendar events do not produce annotations. The job summary records mode and trigger, applied or proposed assignment and course counts, feed diagnostic counts, Notion request/retry metrics, removal-inference state, and a one-line failure summary without stacks. Normal logs retain sanitized diagnostic stacks. CI validates workflow syntax and expressions with pinned actionlint v1.7.12. GitHub-maintained actions are pinned to immutable commits, and npm caching uses `package-lock.json`.
 
 ### GitHub email notifications
 
-No SMTP or external mail service is used. In GitHub notification settings, enable email or web notifications for failed Actions workflows. Watch this repository for new issues and issue updates, and subscribe to the `Canvas–Notion sync is unhealthy` issue when it is created.
+No SMTP or external mail service is used. In GitHub notification settings, enable email or web notifications for failed Actions workflows. Watch this repository for new issues and issue updates, and subscribe to the `Canvas–Notion sync is unhealthy` issue when it is created. GitHub owns notification delivery.
 
 ## Reconciliation behavior
 
@@ -143,7 +153,9 @@ If multiple source `VEVENT`s have the same UID, every event with that UID is qua
 
 Ordinary calendar events are expected in Canvas feeds. Confidently non-assignment events increase the ignored-event count without producing warnings or changing a successful run to `Warning`. Assignment-like events that cannot be classified or normalized remain quarantined warnings.
 
-Courses match in this order: Canvas Course ID, exact title, exact code, normalized title/code, configured alias, then create. Ties at one confidence level are reported as ambiguous and skipped. A course with only an ID is named `Canvas Course <course-id>` until renamed.
+Courses match in this order: Canvas Course ID, exact title, exact code, normalized title/code, configured alias, then create. Ties at one confidence level are reported as ambiguous and skipped. A course with only an ID is named `Canvas Course <course-id>` until renamed. A source with no course ID, name, or code is skipped without creating a shared unknown course, and matching assignment pages remain protected from removal.
+
+When a non-ID match supplies missing Canvas Course ID or Canvas URL metadata, the plan backfills only blank course fields and a blank Sync Updated At. Existing nonblank values are never overwritten. Conflicting IDs or URLs block the affected assignment work, produce a redacted warning, and protect existing assignment pages from removal. Course enrichments have separate plan, execution, and count fields from assignment updates, including partial failures.
 
 On creation, Personal Status is `Not started`, Priority is blank, and Assignment Type is inferred using `config/assignment-type-rules.json`. On later runs, those three user-controlled fields are preserved.
 
@@ -160,9 +172,11 @@ An explicit “no due date” override is not supported because an empty writabl
 
 ### Descriptions
 
-Canvas HTML is sanitized, converted to readable Markdown, and stored completely in one toggle named `Canvas Description — managed by sync`. A replacement is built and verified under a temporary managed marker before the prior managed toggle is removed, so an interrupted write preserves the old description and a later run can safely finish or clean up the replacement. All template content and user-owned sections such as Plan, Notes, and Submission check remain untouched. `Raw Description` stores a bounded searchable plain-text excerpt.
+Canvas HTML is sanitized, converted to readable Markdown, and stored completely in one toggle named `Canvas Description — managed by sync`. `Canvas Description Hash` stores a versioned deterministic hash of the final managed representation. A matching hash avoids all routine assignment-body reads. Existing imported pages without a hash receive a one-time read: a matching body gets the hash only; a mismatch is safely replaced first. New pages and repairs receive the hash only after template stabilization and successful body verification, so failed body writes leave a missing or stale hash for a later repair. A replacement is built and verified under a temporary managed marker before the prior managed toggle is removed. All template content and user-owned sections remain untouched; `Raw Description` is only a bounded searchable excerpt and does not signal body initialization.
 
-The Sync Log separates planned changes from successfully applied changes, failed or ambiguous work, and operations that were not attempted. Live-run counts report only applied assignment operations; dry-run counts are explicitly proposed operations.
+The Sync Log separates planned changes from successfully applied changes, failed or ambiguous work, and operations that were not attempted. Live-run counts report only applied assignment operations; dry-run counts are explicitly proposed operations. Debug logs and the GitHub job summary include non-sensitive request/retry, recovery, body-read, replacement, avoided-update, course, and assignment-page metrics; no additional Notion properties are required.
+
+Extension authors should note that normalized assignments no longer carry unused `sourceUpdatedAt` or per-assignment `rawClassificationEvidence`, raw calendar events no longer retain unused `end` or `sequence`, and assignment updates no longer expose a redundant `reactivate` flag. Classification evidence remains available in structured feed diagnostics.
 
 ### Removal safety
 

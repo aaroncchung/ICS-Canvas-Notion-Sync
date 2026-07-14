@@ -12,6 +12,18 @@ export function hasAssignmentSignals(feed: AssignmentFeed): boolean {
   );
 }
 
+export function absenceRemovalSafe(feed: AssignmentFeed): boolean {
+  const unidentifiableAssignmentLikeEvent = feed.diagnostics.events.some(
+    (event) => (event.kind === "malformed" || event.kind === "suspicious") && !event.uid,
+  );
+  return (
+    feed.diagnostics.complete &&
+    !unidentifiableAssignmentLikeEvent &&
+    feed.diagnostics.totalEvents < 1000 &&
+    hasAssignmentSignals(feed)
+  );
+}
+
 export function detectRemovals(
   feed: AssignmentFeed,
   existing: AssignmentRecord[],

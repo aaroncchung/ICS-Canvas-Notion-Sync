@@ -19,6 +19,7 @@ const ASSIGNMENTS: Expected = {
   "Last Synced": "date",
   "Removed from Canvas": "checkbox",
   "Raw Description": "rich_text",
+  "Canvas Description Hash": "rich_text",
   Notes: "rich_text",
 };
 

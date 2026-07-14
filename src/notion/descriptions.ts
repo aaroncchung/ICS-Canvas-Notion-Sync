@@ -1,9 +1,11 @@
+import { createHash } from "node:crypto";
 import type { NotionGateway } from "./client.js";
 import { blockText, reconcileManagedSection } from "./managed-section.js";
 
 export const MANAGED_DESCRIPTION_TITLE = "Canvas Description — managed by sync";
 export const PENDING_MANAGED_DESCRIPTION_TITLE =
   "Canvas Description — managed by sync [replacement pending]";
+export const DESCRIPTION_HASH_VERSION = "canvas-description:v1";
 
 function paragraph(content: string): Record<string, unknown> {
   return {
@@ -22,10 +24,19 @@ function descriptionBlocks(markdown: string): Array<Record<string, unknown>> {
   return result;
 }
 
+export function managedDescriptionHash(
+  markdown: string | undefined,
+  version = DESCRIPTION_HASH_VERSION,
+): string {
+  const representation = JSON.stringify(descriptionBlocks(markdown ?? ""));
+  return `${version}:${createHash("sha256").update(representation).digest("hex")}`;
+}
+
 export async function readManagedDescription(
   gateway: NotionGateway,
   pageId: string,
 ): Promise<string | undefined> {
+  if (gateway.metrics) gateway.metrics.assignmentBodyReads += 1;
   const blocks = await gateway.listBlocks(pageId);
   const toggle = blocks.find(
     (block) => block.type === "toggle" && blockText(block) === MANAGED_DESCRIPTION_TITLE,
@@ -46,6 +57,16 @@ export async function replaceManagedDescription(
     { managed: MANAGED_DESCRIPTION_TITLE, pending: PENDING_MANAGED_DESCRIPTION_TITLE },
     descriptionBlocks(markdown ?? ""),
   );
+  if (gateway.metrics) gateway.metrics.descriptionReplacements += 1;
+}
+
+export async function ensureManagedDescription(
+  gateway: NotionGateway,
+  pageId: string,
+  markdown: string | undefined,
+): Promise<void> {
+  if ((await readManagedDescription(gateway, pageId)) === (markdown ?? "")) return;
+  await replaceManagedDescription(gateway, pageId, markdown);
 }
 
 export interface TemplateWaitOptions {

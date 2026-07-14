@@ -1,11 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { run } from "../../src/cli.js";
-import { createAssignment } from "../../src/notion/assignments.js";
-import { withRetry } from "../../src/notion/client.js";
+import { createAssignment, readAssignments } from "../../src/notion/assignments.js";
+import { createRunMetrics, withRetry } from "../../src/notion/client.js";
 import { createCourse } from "../../src/notion/courses.js";
 import {
   MANAGED_DESCRIPTION_TITLE,
   PENDING_MANAGED_DESCRIPTION_TITLE,
+  managedDescriptionHash,
   readManagedDescription,
   replaceManagedDescription,
   waitForTemplate,
@@ -16,7 +17,8 @@ import {
   PENDING_MANAGED_SYNC_LOG_TITLE,
   writeSyncLog,
 } from "../../src/notion/sync-log.js";
-import { safeError } from "../../src/observability/redaction.js";
+import { safeDiagnostic, safeError } from "../../src/observability/redaction.js";
+import { buildPlan } from "../../src/sync/plan.js";
 import { ApplyPlanError, applyPlan } from "../../src/sync/reconcile.js";
 import type {
   AssignmentCreate,
@@ -32,12 +34,10 @@ const emptyFeed: AssignmentFeed = {
   cancelledAssignments: [],
   diagnostics: {
     totalEvents: 0,
-    assignmentsParsed: 0,
     sourceUids: [],
     normalizedAssignmentUids: [],
     quarantinedUids: [],
     events: [],
-    ignoredEventCount: 0,
     complete: true,
   },
 };
@@ -46,8 +46,15 @@ function counts(): RunCounts {
   return {
     feedItems: 0,
     assignmentsParsed: 0,
+    cancelledAssignments: 0,
+    ignoredEvents: 0,
+    suspiciousEvents: 0,
+    malformedEvents: 0,
+    duplicateUids: 0,
+    quarantinedUids: 0,
     created: 0,
     updated: 0,
+    coursesUpdated: 0,
     removed: 0,
     unchanged: 0,
     skipped: 0,
@@ -62,7 +69,6 @@ function assignmentCreate(uid = "uid-new"): AssignmentCreate {
       uid,
       title: "Homework",
       inferredType: "Homework",
-      rawClassificationEvidence: [],
     },
   };
 }
@@ -119,6 +125,7 @@ function result(errors: string[] = []): RunResult {
     counts: counts(),
     warnings: [],
     errors,
+    metrics: createRunMetrics(),
   };
 }
 
@@ -140,14 +147,12 @@ describe("application modes and failure handling", () => {
           canvasCourseId: "123",
           canvasUrl: "https://canvas.example.edu/courses/123/assignments/456",
           inferredType: "Homework",
-          rawClassificationEvidence: ["canvas-assignment-route"],
         },
       ],
       cancelledAssignments: [],
       diagnostics: {
         ...emptyFeed.diagnostics,
         totalEvents: 1,
-        assignmentsParsed: 1,
         sourceUids: ["uid-new"],
         normalizedAssignmentUids: ["uid-new"],
       },
@@ -171,6 +176,37 @@ describe("application modes and failure handling", () => {
     expect(gateway.writes).toEqual([]);
   });
 
+  it("dry-run proposes course enrichment without writing it", async () => {
+    const gateway = new FakeGateway();
+    gateway.courses.push({
+      id: "course",
+      properties: { Course: { title: [{ plain_text: "EE 10" }] } },
+    });
+    const source = {
+      ...assignmentCreate().source,
+      courseName: "EE 10",
+      canvasCourseId: "123",
+      canvasUrl: "https://canvas.example.edu/courses/123/assignments/456",
+    };
+    const proposedFeed: AssignmentFeed = {
+      ...emptyFeed,
+      assignments: [source],
+      diagnostics: {
+        ...emptyFeed.diagnostics,
+        totalEvents: 1,
+        sourceUids: [source.uid],
+        normalizedAssignmentUids: [source.uid],
+      },
+    };
+    const result = await run(config({ mode: "dry-run" }), {
+      gateway,
+      provider: new FakeProvider(proposedFeed),
+    });
+    expect(result.plan?.coursesToUpdate).toHaveLength(1);
+    expect(result.counts.coursesUpdated).toBe(1);
+    expect(gateway.writes).toEqual([]);
+  });
+
   it("ordinary calendar events do not produce a warning run status", async () => {
     const gateway = new FakeGateway();
     const ordinaryFeed: AssignmentFeed = {
@@ -179,7 +215,6 @@ describe("application modes and failure handling", () => {
         ...emptyFeed.diagnostics,
         totalEvents: 1,
         sourceUids: ["calendar-event"],
-        ignoredEventCount: 1,
         events: [
           {
             kind: "ignored",
@@ -198,9 +233,86 @@ describe("application modes and failure handling", () => {
     expect(result.warnings).toEqual([]);
   });
 
+  it("validate warns for unsafe feed diagnostics without writing data", async () => {
+    const gateway = new FakeGateway();
+    const unsafeFeed: AssignmentFeed = {
+      ...emptyFeed,
+      diagnostics: {
+        ...emptyFeed.diagnostics,
+        totalEvents: 3,
+        quarantinedUids: ["secret-uid"],
+        events: [
+          { kind: "suspicious", reason: "assignment-like-event", indicators: [] },
+          { kind: "malformed", reason: "unparseable-event", indicators: [] },
+          {
+            kind: "duplicate",
+            reason: "duplicate-source-uid",
+            uid: "secret-uid",
+            indicators: [],
+          },
+        ],
+      },
+    };
+    const result = await run(config({ mode: "validate" }), {
+      gateway,
+      provider: new FakeProvider(unsafeFeed),
+    });
+    expect(result.status).toBe("Warning");
+    expect(result.counts).toMatchObject({
+      suspiciousEvents: 1,
+      malformedEvents: 1,
+      duplicateUids: 1,
+    });
+    expect(JSON.stringify(result.warnings)).not.toContain("secret-uid");
+    expect(gateway.writes).toEqual([]);
+  });
+
+  it("deterministically normalized cancellations do not force validate warnings", async () => {
+    const cancelled = assignmentCreate("cancelled").source;
+    const cancelledFeed: AssignmentFeed = {
+      ...emptyFeed,
+      cancelledAssignments: [cancelled],
+      diagnostics: {
+        ...emptyFeed.diagnostics,
+        totalEvents: 1,
+        normalizedAssignmentUids: [cancelled.uid],
+        quarantinedUids: [cancelled.uid],
+        events: [
+          {
+            kind: "cancelled",
+            reason: "cancelled-assignment",
+            uid: cancelled.uid,
+            indicators: [],
+          },
+        ],
+      },
+    };
+    const result = await run(config({ mode: "validate" }), {
+      gateway: new FakeGateway(),
+      provider: new FakeProvider(cancelledFeed),
+    });
+    expect(result.status).toBe("Success");
+    expect(result.counts.cancelledAssignments).toBe(1);
+  });
+
+  it("fails validate for a provider-declared incomplete feed without data writes", async () => {
+    const gateway = new FakeGateway();
+    const result = await run(config({ mode: "validate" }), {
+      gateway,
+      provider: new FakeProvider({
+        ...emptyFeed,
+        diagnostics: { ...emptyFeed.diagnostics, complete: false },
+      }),
+    });
+    expect(result.status).toBe("Failed");
+    expect(gateway.writes).toEqual([]);
+  });
+
   it("38 retries Notion rate limits with bounded backoff", async () => {
     let attempts = 0;
     const sleeps: number[] = [];
+    const retries: string[] = [];
+    const retryMetrics = createRunMetrics();
     const value = await withRetry(
       () => {
         attempts += 1;
@@ -215,11 +327,16 @@ describe("application modes and failure handling", () => {
           sleeps.push(ms);
           return Promise.resolve();
         },
+        onRetry: (operation) => retries.push(operation),
+        metrics: retryMetrics,
       },
     );
     expect(value).toBe("ok");
     expect(attempts).toBe(3);
     expect(sleeps).toHaveLength(2);
+    expect(retries).toEqual(["page-create", "page-create"]);
+    expect(retryMetrics.notionRequests).toBe(3);
+    expect(retryMetrics.requestsByOperation["page-create"]).toBe(3);
   });
 
   it("retries deterministic page-property updates after transient failures", async () => {
@@ -252,11 +369,31 @@ describe("application modes and failure handling", () => {
     }
   });
 
+  it.each(["read", "property-update"] as const)(
+    "counts %s retries and physical requests without duplicating logical success",
+    async (operation) => {
+      const metrics = createRunMetrics();
+      let attempts = 0;
+      await withRetry(
+        () => {
+          attempts += 1;
+          return attempts === 1
+            ? Promise.reject(Object.assign(new Error("transient"), { status: 503 }))
+            : Promise.resolve();
+        },
+        { operation, metrics, baseDelayMs: 0, sleep: () => Promise.resolve() },
+      );
+      expect(metrics.notionRequests).toBe(2);
+      expect(metrics.readRetries + metrics.propertyUpdateRetries).toBe(1);
+    },
+  );
+
   it("39 skips removal writes after an active assignment write fails", async () => {
     const gateway = new FakeGateway();
     gateway.failOnAssignmentWrite = true;
     const plan: SyncPlan = {
       coursesToCreate: [],
+      coursesToUpdate: [],
       assignmentsToCreate: [],
       assignmentsToUpdate: [
         {
@@ -265,12 +402,11 @@ describe("application modes and failure handling", () => {
             uid: "uid",
             title: "Changed",
             inferredType: "Other",
-            rawClassificationEvidence: [],
           },
           courseKey: "page:course",
           properties: { title: "Changed" },
-          updateDescription: false,
-          reactivate: false,
+          verifyDescription: false,
+          descriptionHash: managedDescriptionHash(undefined),
         },
       ],
       assignmentsToRemove: [
@@ -289,8 +425,15 @@ describe("application modes and failure handling", () => {
     const counts: RunCounts = {
       feedItems: 1,
       assignmentsParsed: 1,
+      cancelledAssignments: 0,
+      ignoredEvents: 0,
+      suspiciousEvents: 0,
+      malformedEvents: 0,
+      duplicateUids: 0,
+      quarantinedUids: 0,
       created: 0,
       updated: 0,
+      coursesUpdated: 0,
       removed: 0,
       unchanged: 0,
       skipped: 0,
@@ -301,10 +444,39 @@ describe("application modes and failure handling", () => {
     expect(counts.removed).toBe(0);
   });
 
+  it("tracks a partial course-enrichment failure separately from assignment updates", async () => {
+    const gateway = new StatefulFakeGateway();
+    gateway.updateFailures.push({ id: "course", status: 503, applied: false });
+    const plan: SyncPlan = {
+      coursesToCreate: [],
+      coursesToUpdate: [
+        { pageId: "course", canvasCourseId: "123", syncUpdatedAt: "2026-07-13T00:00:00Z" },
+      ],
+      assignmentsToCreate: [],
+      assignmentsToUpdate: [],
+      assignmentsToRemove: [],
+      unchanged: 0,
+      skipped: 0,
+      warnings: [],
+    };
+    const appliedCounts = counts();
+    let failure: ApplyPlanError | undefined;
+    try {
+      await applyPlan(gateway, config(), plan, appliedCounts);
+    } catch (error) {
+      if (error instanceof ApplyPlanError) failure = error;
+      else throw error;
+    }
+    expect(failure?.execution.failedOperation).toMatchObject({ kind: "course-update" });
+    expect(appliedCounts.coursesUpdated).toBe(0);
+    expect(appliedCounts.updated).toBe(0);
+  });
+
   it("applies a cancelled removal without writing Notion-owned fields", async () => {
     const gateway = new FakeGateway();
     const plan: SyncPlan = {
       coursesToCreate: [],
+      coursesToUpdate: [],
       assignmentsToCreate: [],
       assignmentsToUpdate: [],
       assignmentsToRemove: [
@@ -328,8 +500,15 @@ describe("application modes and failure handling", () => {
     const counts: RunCounts = {
       feedItems: 1,
       assignmentsParsed: 0,
+      cancelledAssignments: 1,
+      ignoredEvents: 0,
+      suspiciousEvents: 0,
+      malformedEvents: 0,
+      duplicateUids: 0,
+      quarantinedUids: 0,
       created: 0,
       updated: 0,
+      coursesUpdated: 0,
       removed: 0,
       unchanged: 0,
       skipped: 0,
@@ -356,6 +535,34 @@ describe("application modes and failure handling", () => {
     expect(message).not.toContain("secret_abcdefghijk");
     expect(message).toContain("[REDACTED]");
   });
+
+  it("sanitizes stacks, causes, aggregate errors, and ignores arbitrary metadata", () => {
+    const token = "secret_abcdefghijk";
+    const cause = new Error(`cause ${token} https://canvas.example.edu/feed.ics?token=hidden`);
+    cause.stack = `Error: ${token}\n    at loadFeed (feed.ts:10:2)`;
+    const aggregate = new AggregateError(
+      [cause, new Error("Authorization: Bearer oauth_abcdefghijk")],
+      `outer ${token}`,
+      { cause },
+    ) as AggregateError & { metadata?: unknown; operation?: string };
+    aggregate.metadata = { description: `private body ${token}` };
+    aggregate.operation = "assignment-description-update";
+    const diagnostic = safeDiagnostic(aggregate, [token]);
+    const serialized = JSON.stringify(diagnostic);
+    expect(serialized).not.toContain(token);
+    expect(serialized).not.toContain("oauth_abcdefghijk");
+    expect(serialized).not.toContain("canvas.example.edu");
+    expect(serialized).not.toContain("private body");
+    expect(serialized).toContain("loadFeed (feed.ts:10:2)");
+    expect(diagnostic.operation).toBe("assignment-description-update");
+    const bounded = safeDiagnostic(
+      new AggregateError(
+        Array.from({ length: 10 }, () => new Error("x".repeat(5000))),
+        "y".repeat(5000),
+      ),
+    );
+    expect(JSON.stringify(bounded).length).toBeLessThanOrEqual(6000);
+  });
 });
 
 describe("ambiguous create recovery", () => {
@@ -370,6 +577,8 @@ describe("ambiguous create recovery", () => {
       "America/Los_Angeles",
     );
     expect(result.recovered).toBe(true);
+    expect(gateway.metrics.ambiguousWriteRecoveries).toBe(1);
+    expect(gateway.metrics.assignmentPagesRecovered).toBe(1);
     expect(gateway.writes.filter((write) => write.kind === "create")).toHaveLength(1);
   });
 
@@ -399,6 +608,7 @@ describe("ambiguous create recovery", () => {
       canvasCourseId: "123",
     });
     expect(result.recovered).toBe(true);
+    expect(gateway.metrics.coursesRecovered).toBe(1);
     expect(gateway.writes.filter((write) => write.kind === "create")).toHaveLength(1);
   });
 
@@ -494,6 +704,7 @@ describe("template stabilization and recoverable initialization", () => {
     const gateway = new StatefulFakeGateway();
     const plan: SyncPlan = {
       coursesToCreate: [],
+      coursesToUpdate: [],
       assignmentsToCreate: [assignmentCreate()],
       assignmentsToUpdate: [],
       assignmentsToRemove: [],
@@ -528,6 +739,7 @@ describe("template stabilization and recoverable initialization", () => {
     const gateway = new StatefulFakeGateway();
     const createPlan: SyncPlan = {
       coursesToCreate: [],
+      coursesToUpdate: [],
       assignmentsToCreate: [assignmentCreate()],
       assignmentsToUpdate: [],
       assignmentsToRemove: [],
@@ -544,6 +756,7 @@ describe("template stabilization and recoverable initialization", () => {
     gateway.seedBlock(pageId, templateBlock("template"));
     const updatePlan: SyncPlan = {
       coursesToCreate: [],
+      coursesToUpdate: [],
       assignmentsToCreate: [],
       assignmentsToUpdate: [
         {
@@ -551,8 +764,8 @@ describe("template stabilization and recoverable initialization", () => {
           source: { ...assignmentCreate().source, descriptionMarkdown: "Recovered description" },
           courseKey: "page:course",
           properties: {},
-          updateDescription: true,
-          reactivate: false,
+          verifyDescription: true,
+          descriptionHash: managedDescriptionHash("Recovered description"),
         },
       ],
       assignmentsToRemove: [],
@@ -584,6 +797,112 @@ describe("managed descriptions", () => {
     });
     return gateway;
   }
+
+  function descriptionPlan(markdown: string): SyncPlan {
+    return {
+      coursesToCreate: [],
+      coursesToUpdate: [],
+      assignmentsToCreate: [],
+      assignmentsToUpdate: [
+        {
+          pageId: "page",
+          source: {
+            uid: "uid",
+            title: "Assignment",
+            inferredType: "Other",
+            descriptionMarkdown: markdown,
+          },
+          courseKey: "page:course",
+          properties: {},
+          verifyDescription: true,
+          descriptionHash: managedDescriptionHash(markdown),
+        },
+      ],
+      assignmentsToRemove: [],
+      unchanged: 0,
+      skipped: 0,
+      warnings: [],
+    };
+  }
+
+  it("reads assignment properties without routine page-body reads", async () => {
+    const gateway = new StatefulFakeGateway();
+    gateway.seedPage("assignments", "page", {
+      Assignment: { title: [{ plain_text: "Assignment" }] },
+      "Canvas UID": { rich_text: [{ plain_text: "uid" }] },
+      "Canvas Description Hash": {
+        rich_text: [{ plain_text: managedDescriptionHash("Old description") }],
+      },
+      Course: { relation: [{ id: "course" }] },
+      "Canvas State": { select: { name: "Active" } },
+      "Removed from Canvas": { checkbox: false },
+      "Imported From": { select: { name: "Canvas ICS" } },
+    });
+    const assignments = await readAssignments(gateway, "assignments");
+    expect(assignments[0]?.descriptionHash).toBe(managedDescriptionHash("Old description"));
+    const source = {
+      uid: "uid",
+      title: "Assignment",
+      courseName: "EE 10",
+      inferredType: "Other" as const,
+      descriptionMarkdown: "Old description",
+    };
+    const plan = buildPlan(
+      {
+        ...emptyFeed,
+        assignments: [source],
+        diagnostics: {
+          ...emptyFeed.diagnostics,
+          totalEvents: 1,
+          sourceUids: [source.uid],
+          normalizedAssignmentUids: [source.uid],
+        },
+      },
+      assignments,
+      [{ pageId: "course", title: "EE 10" }],
+      {},
+      false,
+      new Date("2026-07-13T00:00:00Z"),
+      gateway.metrics,
+    );
+    expect(plan.assignmentsToUpdate).toEqual([]);
+    await applyPlan(gateway, config(), plan, counts());
+    expect(gateway.metrics.assignmentBodyReads).toBe(0);
+  });
+
+  it("migrates a missing hash with one read and no replacement when the body matches", async () => {
+    const gateway = descriptionGateway();
+    await applyPlan(gateway, config(), descriptionPlan("Old description"), counts());
+    expect(gateway.metrics.assignmentBodyReads).toBe(1);
+    expect(gateway.metrics.descriptionReplacements).toBe(0);
+    expect(gateway.writes.filter((write) => write.kind === "append")).toEqual([]);
+    expect(JSON.stringify(gateway.writes)).toContain(managedDescriptionHash("Old description"));
+  });
+
+  it("replaces a mismatched body before committing its hash", async () => {
+    const gateway = descriptionGateway();
+    await applyPlan(gateway, config(), descriptionPlan("New description"), counts());
+    expect(await readManagedDescription(gateway, "page")).toBe("New description");
+    expect(gateway.metrics.descriptionReplacements).toBe(1);
+    expect(JSON.stringify(gateway.writes)).toContain(managedDescriptionHash("New description"));
+  });
+
+  it("does not advance the hash after a failed body write and repairs it on a later run", async () => {
+    const gateway = descriptionGateway();
+    gateway.appendFailures.push({ id: "page", status: 503, applied: false });
+    const plan = descriptionPlan("New description");
+    await expect(applyPlan(gateway, config(), plan, counts())).rejects.toThrow();
+    expect(
+      gateway.writes.some(
+        (write) =>
+          write.kind === "update" &&
+          JSON.stringify(write.value).includes("Canvas Description Hash"),
+      ),
+    ).toBe(false);
+    await applyPlan(gateway, config(), plan, counts());
+    expect(await readManagedDescription(gateway, "page")).toBe("New description");
+    expect(JSON.stringify(gateway.writes)).toContain(managedDescriptionHash("New description"));
+  });
 
   it("preserves the old managed section when replacement creation fails", async () => {
     const gateway = descriptionGateway();
@@ -681,6 +1000,7 @@ describe("partial execution and Sync Log recovery", () => {
     gateway.updateFailures.push({ id: "assignment-b", status: 400, applied: false });
     const plan: SyncPlan = {
       coursesToCreate: [],
+      coursesToUpdate: [],
       assignmentsToCreate: [],
       assignmentsToUpdate: ["assignment-a", "assignment-b"].map((pageId) => ({
         pageId,
@@ -688,12 +1008,11 @@ describe("partial execution and Sync Log recovery", () => {
           uid: `uid-${pageId}`,
           title: "Changed",
           inferredType: "Other" as const,
-          rawClassificationEvidence: [],
         },
         courseKey: "page:course",
         properties: { title: "Changed" },
-        updateDescription: false,
-        reactivate: false,
+        verifyDescription: false,
+        descriptionHash: managedDescriptionHash(undefined),
       })),
       assignmentsToRemove: [
         {
@@ -733,6 +1052,7 @@ describe("partial execution and Sync Log recovery", () => {
       counts: appliedCounts,
       warnings: [],
       errors: [failure?.message ?? "failed"],
+      metrics: createRunMetrics(),
       plan,
       ...(failure ? { execution: failure.execution } : {}),
     };
@@ -765,6 +1085,7 @@ describe("partial execution and Sync Log recovery", () => {
     gateway.appendFailures.push({ id: "assignments-1", status: 503, applied: false });
     const plan: SyncPlan = {
       coursesToCreate: [],
+      coursesToUpdate: [],
       assignmentsToCreate: [
         {
           ...assignmentCreate(),
@@ -799,6 +1120,7 @@ describe("partial execution and Sync Log recovery", () => {
       counts: appliedCounts,
       warnings: [],
       errors: [failure?.message ?? "failed"],
+      metrics: createRunMetrics(),
       plan,
       ...(failure ? { execution: failure.execution } : {}),
     };
@@ -821,6 +1143,7 @@ describe("partial execution and Sync Log recovery", () => {
     gateway.appendFailures.push({ id: "assignment", status: 503, applied: false });
     const plan: SyncPlan = {
       coursesToCreate: [],
+      coursesToUpdate: [],
       assignmentsToCreate: [],
       assignmentsToUpdate: [
         {
@@ -830,12 +1153,11 @@ describe("partial execution and Sync Log recovery", () => {
             title: "Changed",
             descriptionMarkdown: "Changed description",
             inferredType: "Other",
-            rawClassificationEvidence: [],
           },
           courseKey: "page:course",
           properties: { title: "Changed" },
-          updateDescription: true,
-          reactivate: false,
+          verifyDescription: true,
+          descriptionHash: managedDescriptionHash("new"),
         },
       ],
       assignmentsToRemove: [],
@@ -944,6 +1266,7 @@ describe("partial execution and Sync Log recovery", () => {
       counts: counts(),
       warnings: [],
       errors: ["assignment-update assignment-a: Notion request failed with status 503"],
+      metrics: createRunMetrics(),
     };
     const runConfig = config({ GITHUB_RUN_ID: "12345" });
     await writeSyncLog(gateway, runConfig, "start", "finish", result);

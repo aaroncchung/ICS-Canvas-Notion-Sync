@@ -1,8 +1,10 @@
 import { readFile } from "node:fs/promises";
 import { describe, expect, it } from "vitest";
+import { pino } from "pino";
 import { parseIcs } from "../../src/canvas/parse-ics.js";
 import { sanitizeDescription } from "../../src/canvas/normalize-assignment.js";
-import { rules } from "../helpers.js";
+import { CanvasIcsProvider } from "../../src/canvas/provider.js";
+import { config, rules } from "../helpers.js";
 
 const fixture = (name: string) =>
   readFile(new URL(`../../fixtures/synthetic/${name}`, import.meta.url), "utf8");
@@ -16,6 +18,22 @@ function event(values: string): string {
 }
 
 describe("RFC 5545 Canvas parsing", () => {
+  it("returns an AssignmentFeed directly without mutable provider state", async () => {
+    const source = calendar(
+      event(
+        "UID:event-assignment-77@canvas\nDTSTART:20260701T120000Z\nSUMMARY:Quiz 2 [EE 10]\nURL:https://x.test/courses/1/assignments/77",
+      ),
+    );
+    const provider = new CanvasIcsProvider(config(), pino({ level: "silent" }), () =>
+      Promise.resolve(new Response(source, { status: 200 })),
+    );
+    const feed = await provider.fetchAssignments();
+    expect(feed.assignments).toHaveLength(1);
+    expect(feed.cancelledAssignments).toEqual([]);
+    expect(feed.diagnostics.totalEvents).toBe(1);
+    expect("lastFeed" in provider).toBe(false);
+  });
+
   it("1 parses an empty feed safely", async () => {
     expect(parseIcs(await fixture("empty.ics"), rules).assignments).toEqual([]);
   });
@@ -89,7 +107,7 @@ describe("RFC 5545 Canvas parsing", () => {
   it("21 excludes ordinary Canvas calendar events", async () => {
     const parsed = parseIcs(await fixture("calendar-event.ics"), rules);
     expect(parsed.assignments).toEqual([]);
-    expect(parsed.diagnostics.ignoredEventCount).toBe(1);
+    expect(parsed.diagnostics.events.filter((item) => item.kind === "ignored")).toHaveLength(1);
     expect(parsed.diagnostics.events[0]?.reason).toBe("ordinary-calendar-event");
   });
 

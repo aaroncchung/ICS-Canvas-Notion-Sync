@@ -23,27 +23,29 @@ Add:
 - `Imported From` — Select, with option `Canvas ICS`
 - `Removed from Canvas` — Checkbox
 - `Raw Description` — Rich text
+- `Canvas Description Hash` — Rich text
 
 Confirm all required properties:
 
-| Property            | Type      | Required options or target                                                |
-| ------------------- | --------- | ------------------------------------------------------------------------- |
-| Assignment          | Title     | —                                                                         |
-| Course              | Relation  | The configured Courses data source                                        |
-| Effective Due Date  | Date      | —                                                                         |
-| Canvas Due Date     | Date      | —                                                                         |
-| Override Due Date   | Date      | —                                                                         |
-| Personal Status     | Status    | `Not started`, `In progress`, `Done`                                      |
-| Priority            | Select    | User-managed options                                                      |
-| Assignment Type     | Select    | `Homework`, `Lab`, `Quiz`, `Exam`, `Paper`, `Project`, `Reading`, `Other` |
-| Canvas URL          | URL       | —                                                                         |
-| Canvas UID          | Rich text | —                                                                         |
-| Canvas State        | Select    | `Active`, `Removed`                                                       |
-| Imported From       | Select    | `Canvas ICS`                                                              |
-| Last Synced         | Date      | —                                                                         |
-| Removed from Canvas | Checkbox  | —                                                                         |
-| Raw Description     | Rich text | —                                                                         |
-| Notes               | Rich text | —                                                                         |
+| Property                | Type      | Required options or target                                                |
+| ----------------------- | --------- | ------------------------------------------------------------------------- |
+| Assignment              | Title     | —                                                                         |
+| Course                  | Relation  | The configured Courses data source                                        |
+| Effective Due Date      | Date      | —                                                                         |
+| Canvas Due Date         | Date      | —                                                                         |
+| Override Due Date       | Date      | —                                                                         |
+| Personal Status         | Status    | `Not started`, `In progress`, `Done`                                      |
+| Priority                | Select    | User-managed options                                                      |
+| Assignment Type         | Select    | `Homework`, `Lab`, `Quiz`, `Exam`, `Paper`, `Project`, `Reading`, `Other` |
+| Canvas URL              | URL       | —                                                                         |
+| Canvas UID              | Rich text | —                                                                         |
+| Canvas State            | Select    | `Active`, `Removed`                                                       |
+| Imported From           | Select    | `Canvas ICS`                                                              |
+| Last Synced             | Date      | —                                                                         |
+| Removed from Canvas     | Checkbox  | —                                                                         |
+| Raw Description         | Rich text | —                                                                         |
+| Canvas Description Hash | Rich text | —                                                                         |
+| Notes                   | Rich text | —                                                                         |
 
 Leave older API-oriented properties in place. The ICS sync ignores `Canvas Assignment ID`, `Canvas Course ID`, `Canvas Submitted`, `Canvas Updated At`, `Available From`, `Available Until`, `Points Possible`, `Submission Types`, and `Submitted At`.
 
@@ -69,7 +71,7 @@ The sync does not overwrite Term, Instructor, Notes, Drive Folder, Color, or oth
 - Set that template as the Assignments data source's **default** template.
 - Share the template with the integration if it is not inherited automatically from the database connection.
 
-The sync applies the default through Notion's template API, waits for asynchronous template content, and then appends its own managed Canvas description toggle.
+The sync applies the default through Notion's template API, waits for asynchronous template content, and then appends its own managed Canvas description toggle. It writes `Canvas Description Hash` only after that managed body is verified. Existing imported assignments receive a one-time migration read; matching bodies get only the hash, while mismatches are replaced safely before the hash is committed.
 
 ## 5. Create Canvas Sync Log
 
@@ -120,6 +122,7 @@ Add variables:
 - `NOTION_COURSES_DATA_SOURCE_ID` (known starting value `e2c63549-089a-4461-9f19-52cd0626e386`)
 - `NOTION_SYNC_LOG_DATA_SOURCE_ID` (the ID created above)
 - `NOTION_TIMEZONE` (recommended `America/Los_Angeles`)
+- `HEALTH_ACTIVATION_GRACE_HOURS` (optional; defaults to `14` hours)
 
 Do not put secret values in variables, workflow inputs, issue text, or repository files.
 
@@ -133,4 +136,6 @@ From **Actions → Canvas–Notion sync → Run workflow**:
 4. Confirm the new Sync Log page and a sample assignment's template, managed description, course relation, and due dates.
 5. Enable GitHub notifications for failed workflows, new repository issues, and updates to the `sync-failure` issue.
 
-Scheduled syncs then run every four hours. The health workflow creates the `sync-failure` label automatically when first needed.
+Scheduled syncs then run every four hours. The health workflow creates the `sync-failure` label automatically when first needed. It ignores manual runs and suppresses no-success alerts during the initial workflow-activation grace period. Recovery is reported and closed through the durable marked issue; notification delivery remains a GitHub setting, not application email.
+
+Validate and GitHub summaries separate ordinary ignored events, suspicious events, malformed events, duplicate UIDs, cancelled assignments, and quarantined UID counts. Quarantined values are never displayed. Course metadata enrichment is proposed in dry-run and fills only blank Canvas Course ID, Canvas URL, and Sync Updated At fields; a conflicting nonblank ID or URL blocks the affected assignment until corrected.

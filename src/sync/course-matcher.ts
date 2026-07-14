@@ -1,9 +1,16 @@
-import type { CourseCreate, CourseRecord, ExternalAssignment } from "../types.js";
+import type { CourseCreate, CourseRecord, CourseUpdate, ExternalAssignment } from "../types.js";
 
 export type CourseMatch =
-  | { kind: "matched"; course: CourseRecord; method: string }
+  | { kind: "matched"; course: CourseRecord; method: string; update?: CourseUpdate }
   | { kind: "create"; course: CourseCreate }
-  | { kind: "ambiguous"; courses: CourseRecord[]; method: string };
+  | { kind: "ambiguous"; courses: CourseRecord[]; method: string }
+  | {
+      kind: "conflict";
+      course: CourseRecord;
+      method: string;
+      fields: Array<"Canvas Course ID" | "Canvas URL">;
+    }
+  | { kind: "unidentified" };
 
 export function normalizeCourse(value: string): string {
   return value
@@ -17,27 +24,69 @@ export function normalizeCourse(value: string): string {
 function courseUrl(assignment: ExternalAssignment): string | undefined {
   if (!assignment.canvasUrl || !assignment.canvasCourseId) return;
   try {
-    const url = new URL(assignment.canvasUrl);
-    url.pathname = `/courses/${assignment.canvasCourseId}`;
-    url.search = "";
-    url.hash = "";
-    return url.toString();
+    const value = new URL(assignment.canvasUrl);
+    value.pathname = `/courses/${assignment.canvasCourseId}`;
+    value.search = "";
+    value.hash = "";
+    return value.toString();
   } catch {
     return;
   }
 }
 
-function decide(matches: CourseRecord[], method: string): CourseMatch | undefined {
-  if (matches.length === 1) return { kind: "matched", course: matches[0]!, method };
-  if (matches.length > 1) return { kind: "ambiguous", courses: matches, method };
-  return;
+function comparableUrl(value: string): string {
+  try {
+    const parsed = new URL(value);
+    parsed.search = "";
+    parsed.hash = "";
+    return parsed.toString().replace(/\/$/, "");
+  } catch {
+    return value.replace(/\/$/, "");
+  }
+}
+
+function matchedCourse(
+  assignment: ExternalAssignment,
+  course: CourseRecord,
+  method: string,
+  now: string,
+): CourseMatch {
+  const sourceUrl = courseUrl(assignment);
+  const fields: Array<"Canvas Course ID" | "Canvas URL"> = [];
+  if (
+    assignment.canvasCourseId &&
+    course.canvasCourseId &&
+    assignment.canvasCourseId !== course.canvasCourseId
+  ) {
+    fields.push("Canvas Course ID");
+  }
+  if (sourceUrl && course.url && comparableUrl(sourceUrl) !== comparableUrl(course.url)) {
+    fields.push("Canvas URL");
+  }
+  if (fields.length) return { kind: "conflict", course, method, fields };
+
+  const update: CourseUpdate = { pageId: course.pageId };
+  if (assignment.canvasCourseId && !course.canvasCourseId) {
+    update.canvasCourseId = assignment.canvasCourseId;
+  }
+  if (sourceUrl && !course.url) update.canvasUrl = sourceUrl;
+  const enrichesCanvasMetadata = Boolean(update.canvasCourseId || update.canvasUrl);
+  if (enrichesCanvasMetadata && !course.syncUpdatedAt) update.syncUpdatedAt = now;
+  return Object.keys(update).length > 1
+    ? { kind: "matched", course, method, update }
+    : { kind: "matched", course, method };
 }
 
 export function matchCourse(
   assignment: ExternalAssignment,
   courses: CourseRecord[],
   aliases: Record<string, string>,
+  now = new Date().toISOString(),
 ): CourseMatch {
+  if (!assignment.canvasCourseId && !assignment.courseName && !assignment.courseCode) {
+    return { kind: "unidentified" };
+  }
+
   const levels: Array<[string, (course: CourseRecord) => boolean]> = [];
   if (assignment.canvasCourseId) {
     levels.push([
@@ -75,16 +124,15 @@ export function matchCourse(
     ]);
   }
   for (const [method, predicate] of levels) {
-    const result = decide(courses.filter(predicate), method);
-    if (result) return result;
+    const matches = courses.filter(predicate);
+    if (matches.length === 1) return matchedCourse(assignment, matches[0]!, method, now);
+    if (matches.length > 1) return { kind: "ambiguous", courses: matches, method };
   }
 
   const title =
     assignment.courseName ??
     assignment.courseCode ??
-    (assignment.canvasCourseId
-      ? `Canvas Course ${assignment.canvasCourseId}`
-      : "Canvas Course Unknown");
+    `Canvas Course ${assignment.canvasCourseId as string}`;
   const key = assignment.canvasCourseId
     ? `id:${assignment.canvasCourseId}`
     : `name:${normalizeCourse(title)}`;

@@ -6,7 +6,6 @@ import type {
   RecoveredCreate,
 } from "../types.js";
 import { AmbiguousNotionWriteError, isAmbiguousWriteError, type NotionGateway } from "./client.js";
-import { readManagedDescription } from "./descriptions.js";
 import { pollForUniquePage, type VisibilityPollingOptions } from "./recovery.js";
 import {
   checkbox,
@@ -53,13 +52,13 @@ export async function readAssignments(
     const effectiveDueDate = readDate(properties, "Effective Due Date");
     const overrideDueDate = readDate(properties, "Override Due Date");
     const storedDescription = readRichText(properties, "Raw Description");
+    const descriptionHash = readRichText(properties, "Canvas Description Hash");
     const personalStatus = readStatus(properties, "Personal Status");
     const priority = readSelect(properties, "Priority");
     const assignmentType = readSelect(properties, "Assignment Type");
     const canvasState = readSelect(properties, "Canvas State");
     const importedFrom = readSelect(properties, "Imported From");
     const id = pageId(page);
-    const managedDescription = await readManagedDescription(gateway, id);
     assignments.push({
       pageId: id,
       uid,
@@ -70,7 +69,7 @@ export async function readAssignments(
       ...(effectiveDueDate ? { effectiveDueDate } : {}),
       ...(overrideDueDate ? { overrideDueDate } : {}),
       ...(storedDescription ? { descriptionExcerpt: storedDescription } : {}),
-      ...(managedDescription !== undefined ? { managedDescription } : {}),
+      ...(descriptionHash ? { descriptionHash } : {}),
       ...(personalStatus ? { personalStatus } : {}),
       ...(priority ? { priority } : {}),
       ...(assignmentType ? { assignmentType } : {}),
@@ -109,13 +108,15 @@ export async function createAssignment(
     properties["Effective Due Date"] = date(source.dueAt);
   }
   try {
-    return {
+    const created = {
       pageId: await gateway.createPage(dataSourceId, properties, {
         useDefaultTemplate: true,
         templateTimezone: timezone,
       }),
       recovered: false,
     };
+    if (gateway.metrics) gateway.metrics.assignmentPagesCreated += 1;
+    return created;
   } catch (error) {
     if (!isAmbiguousWriteError(error)) throw error;
     const match = await pollForUniquePage(
@@ -127,7 +128,13 @@ export async function createAssignment(
       (count) => `Assignment create is ambiguous: ${count} pages match the Canvas UID`,
       recoveryOptions,
     );
-    if (match && typeof match.id === "string") return { pageId: match.id, recovered: true };
+    if (match && typeof match.id === "string") {
+      if (gateway.metrics) {
+        gateway.metrics.ambiguousWriteRecoveries += 1;
+        gateway.metrics.assignmentPagesRecovered += 1;
+      }
+      return { pageId: match.id, recovered: true };
+    }
     throw new AmbiguousNotionWriteError(
       "Assignment create is ambiguous: no matching page became visible; creation was not retried",
     );
@@ -150,6 +157,9 @@ export function buildUpdateProperties(update: AssignmentPropertyUpdate): Record<
   }
   if (update.rawDescription !== undefined) {
     properties["Raw Description"] = text(update.rawDescription);
+  }
+  if (update.descriptionHash !== undefined) {
+    properties["Canvas Description Hash"] = text(update.descriptionHash);
   }
   if (update.removed !== undefined) properties["Removed from Canvas"] = checkbox(update.removed);
   if (update.canvasState !== undefined) properties["Canvas State"] = select(update.canvasState);

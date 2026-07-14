@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { parseIcs } from "../../src/canvas/parse-ics.js";
 import { createAssignment } from "../../src/notion/assignments.js";
+import { managedDescriptionHash } from "../../src/notion/descriptions.js";
+import { createRunMetrics } from "../../src/notion/client.js";
 import { buildPlan } from "../../src/sync/plan.js";
 import type {
   AssignmentFeed,
@@ -38,7 +40,6 @@ function source(overrides: Partial<ExternalAssignment> = {}): ExternalAssignment
     descriptionPlainText: "Original description",
     descriptionMarkdown: "Original description",
     inferredType: "Homework",
-    rawClassificationEvidence: ["canvas-assignment-route"],
     ...overrides,
   };
 }
@@ -53,7 +54,7 @@ function record(overrides: Partial<AssignmentRecord> = {}): AssignmentRecord {
     canvasDueDate: "2026-07-20T20:00:00.000Z",
     effectiveDueDate: "2026-07-20T20:00:00.000Z",
     descriptionExcerpt: "Original description",
-    managedDescription: "Original description",
+    descriptionHash: managedDescriptionHash("Original description"),
     personalStatus: "Done",
     removed: false,
     canvasState: "Active",
@@ -77,14 +78,12 @@ function feed(
     cancelledAssignments,
     diagnostics: {
       totalEvents,
-      assignmentsParsed: assignments.length,
       sourceUids,
       normalizedAssignmentUids: [...assignments, ...cancelledAssignments].map(
         (assignment) => assignment.uid,
       ),
       quarantinedUids: [],
       events: [],
-      ignoredEventCount: 0,
       complete: true,
       ...options.diagnostics,
     },
@@ -116,6 +115,26 @@ describe("plan-first reconciliation", () => {
     expect(result.assignmentsToUpdate).toHaveLength(0);
     expect(result.unchanged).toBe(1);
   });
+
+  it("matching description hashes avoid validation work and increment the avoidance metric", () => {
+    const metrics = createRunMetrics();
+    const result = buildPlan(
+      feed([source()]),
+      [record()],
+      [course],
+      {},
+      false,
+      new Date("2026-07-13T12:00:00Z"),
+      metrics,
+    );
+    expect(result.assignmentsToUpdate).toEqual([]);
+    expect(metrics.descriptionUpdatesAvoided).toBe(1);
+  });
+
+  it("does not retain dead source or parsing fields", () => {
+    expect(source()).not.toHaveProperty("sourceUpdatedAt");
+    expect(source()).not.toHaveProperty("rawClassificationEvidence");
+  });
   it("16-18 plans changed title, due date, and description", () => {
     const result = plan([
       source({
@@ -126,7 +145,7 @@ describe("plan-first reconciliation", () => {
       }),
     ]);
     expect(result.assignmentsToUpdate[0]).toMatchObject({
-      updateDescription: true,
+      verifyDescription: true,
       properties: {
         title: "Homework 1 revised",
         canvasDueDate: "2026-07-21T20:00:00.000Z",
@@ -174,6 +193,19 @@ describe("plan-first reconciliation", () => {
     expect(result.warnings.some((warning) => warning.code === "ambiguous-course")).toBe(true);
   });
 
+  it("skips an alias that resolves to multiple courses", () => {
+    const aliasSource = source({ courseName: "EN 1" });
+    delete aliasSource.courseCode;
+    delete aliasSource.canvasCourseId;
+    const matches: CourseRecord[] = [
+      { pageId: "one", title: "Engineering 1" },
+      { pageId: "two", title: "Engineering 1" },
+    ];
+    const result = plan([aliasSource], [], matches, { "EN 1": "Engineering 1" });
+    expect(result.assignmentsToCreate).toEqual([]);
+    expect(result.warnings[0]?.message).toContain("configured-alias");
+  });
+
   it("27 generates a name when only a course ID exists", () => {
     const unnamedSource = source();
     delete unnamedSource.courseName;
@@ -181,6 +213,59 @@ describe("plan-first reconciliation", () => {
     const result = plan([unnamedSource], [], []);
     expect(result.coursesToCreate[0]?.title).toBe("Canvas Course 123");
     expect(result.warnings.some((warning) => warning.code === "unnamed-course")).toBe(true);
+  });
+
+  it("skips assignments whose course has no usable identity", () => {
+    const unidentified = source();
+    delete unidentified.canvasCourseId;
+    delete unidentified.courseName;
+    delete unidentified.courseCode;
+    const result = plan([unidentified]);
+    expect(result.assignmentsToCreate).toEqual([]);
+    expect(result.assignmentsToUpdate).toEqual([]);
+    expect(result.warnings).toContainEqual(
+      expect.objectContaining({ code: "unidentified-course" }),
+    );
+  });
+
+  it("plans blank-field course metadata enrichment without counting an assignment update", () => {
+    const blankCourse: CourseRecord = { pageId: "course-page", title: "EE 10" };
+    const result = plan([source()], [], [blankCourse]);
+    expect(result.coursesToUpdate).toEqual([
+      expect.objectContaining({
+        pageId: "course-page",
+        canvasCourseId: "123",
+        canvasUrl: "https://canvas.example.edu/courses/123",
+      }),
+    ]);
+    expect(result.assignmentsToCreate).toHaveLength(1);
+    expect(result.assignmentsToUpdate).toHaveLength(0);
+  });
+
+  it("does not enrich course metadata that already agrees", () => {
+    const completeCourse: CourseRecord = {
+      ...course,
+      url: "https://canvas.example.edu/courses/123",
+      syncUpdatedAt: "2026-07-01T00:00:00.000Z",
+    };
+    expect(plan([source()], [], [completeCourse]).coursesToUpdate).toEqual([]);
+  });
+
+  it.each([
+    [{ canvasCourseId: "999" }, "Canvas Course ID"],
+    [{ canvasCourseId: "123", url: "https://canvas.example.edu/courses/other" }, "Canvas URL"],
+  ] as const)("blocks assignment work for conflicting course metadata", (overrides, field) => {
+    const result = plan([source()], [], [{ ...course, ...overrides }]);
+    expect(result.assignmentsToCreate).toEqual([]);
+    expect(result.coursesToUpdate).toEqual([]);
+    const warning = result.warnings.find((item) => item.code === "course-metadata-conflict");
+    expect(warning?.message).toContain(field);
+  });
+
+  it("a description hash version change deliberately schedules revalidation", () => {
+    const oldVersion = managedDescriptionHash("Original description", "canvas-description:v0");
+    const result = plan([source()], [record({ descriptionHash: oldVersion })]);
+    expect(result.assignmentsToUpdate[0]?.verifyDescription).toBe(true);
   });
 
   it("28 updates Canvas-owned fields on Done assignments without status writes", () => {
@@ -374,7 +459,6 @@ describe("plan-first reconciliation", () => {
             indicators: [],
           },
         ],
-        ignoredEventCount: 1,
       },
     });
     expect(planFeed(value, []).warnings).toEqual([]);
@@ -392,7 +476,6 @@ describe("plan-first reconciliation", () => {
             indicators: [],
           },
         ],
-        ignoredEventCount: 1,
       },
     });
     const result = planFeed(value);
@@ -415,7 +498,6 @@ describe("plan-first reconciliation", () => {
             indicators: [],
           },
         ],
-        ignoredEventCount: 1,
       },
     });
     expect(planFeed(value, existing).assignmentsToRemove.map((item) => item.pageId)).toEqual([

@@ -72,13 +72,19 @@ export async function deleteBlockReconciled(
     if (!isAmbiguousWriteError(error)) throw error;
   }
 
-  if (!(await blockExists(gateway, parentId, blockId))) return;
+  if (!(await blockExists(gateway, parentId, blockId))) {
+    if (gateway.metrics) gateway.metrics.ambiguousWriteRecoveries += 1;
+    return;
+  }
 
   try {
     await gateway.deleteBlock(blockId);
   } catch (error) {
     if (errorStatus(error) === 404) return;
-    if (isAmbiguousWriteError(error) && !(await blockExists(gateway, parentId, blockId))) return;
+    if (isAmbiguousWriteError(error) && !(await blockExists(gateway, parentId, blockId))) {
+      if (gateway.metrics) gateway.metrics.ambiguousWriteRecoveries += 1;
+      return;
+    }
     throw error;
   }
 }
@@ -147,6 +153,7 @@ export async function reconcileManagedSection(
         );
       }
       replacement = recovered[0];
+      if (gateway.metrics) gateway.metrics.ambiguousWriteRecoveries += 1;
     }
   }
 
@@ -172,6 +179,7 @@ export async function reconcileManagedSection(
           "Managed section child append is ambiguous; the previous section was preserved",
         );
       }
+      if (gateway.metrics) gateway.metrics.ambiguousWriteRecoveries += 1;
     }
     actual = await childSignatures(gateway, replacementId);
     if (!isPrefix(actual, expected)) {
