@@ -5,32 +5,63 @@ import type {
   CourseRecord,
   FeedDiagnosticSummary,
   PlanWarning,
+  PlanningOperationCounters,
   RunMetrics,
   SyncPlan,
   Trigger,
 } from "../types.js";
 import { descriptionExcerpt } from "../notion/assignments.js";
 import { descriptionIntegrityAuditDue, managedDescriptionHash } from "../notion/descriptions.js";
-import { matchCourse } from "./course-matcher.js";
+import { buildCourseIndex, matchCourseFromIndex } from "./course-matcher.js";
 import { datesEqual, resolveDates } from "./date-resolution.js";
-import { possibleDuplicate } from "./duplicate-detector.js";
+import { buildAssignmentIndex, possibleDuplicateFromIndex } from "./duplicate-detector.js";
 import { absenceRemovalSafe, detectRemovals } from "./removal-detector.js";
 
 function sameOptional(left?: string, right?: string): boolean {
   return (left ?? undefined) === (right ?? undefined);
 }
 
+function aggregateFeedDiagnostics(feed: AssignmentFeed): {
+  ignored: number;
+  suspiciousReasons: string[];
+  malformed: number;
+  duplicate: number;
+} {
+  let ignored = 0;
+  let malformed = 0;
+  let duplicate = 0;
+  const suspiciousReasons: string[] = [];
+  for (const event of feed.diagnostics.events) {
+    switch (event.kind) {
+      case "ignored":
+        ignored += 1;
+        break;
+      case "suspicious":
+        suspiciousReasons.push(event.reason);
+        break;
+      case "malformed":
+        malformed += 1;
+        break;
+      case "duplicate":
+        duplicate += 1;
+        break;
+      case "cancelled":
+        break;
+    }
+  }
+  return { ignored, suspiciousReasons, malformed, duplicate };
+}
+
 export function feedDiagnosticSummary(feed: AssignmentFeed): FeedDiagnosticSummary {
-  const count = (kind: AssignmentFeed["diagnostics"]["events"][number]["kind"]) =>
-    feed.diagnostics.events.filter((event) => event.kind === kind).length;
+  const diagnostics = aggregateFeedDiagnostics(feed);
   return {
     totalEvents: feed.diagnostics.totalEvents,
     activeAssignments: feed.assignments.length,
     cancelledAssignments: feed.cancelledAssignments.length,
-    ignoredEvents: count("ignored"),
-    suspiciousEvents: count("suspicious"),
-    malformedEvents: count("malformed"),
-    duplicateUids: count("duplicate"),
+    ignoredEvents: diagnostics.ignored,
+    suspiciousEvents: diagnostics.suspiciousReasons.length,
+    malformedEvents: diagnostics.malformed,
+    duplicateUids: diagnostics.duplicate,
     quarantinedUids: feed.diagnostics.quarantinedUids.length,
     absenceRemovalSafe: absenceRemovalSafe(feed),
   };
@@ -38,6 +69,7 @@ export function feedDiagnosticSummary(feed: AssignmentFeed): FeedDiagnosticSumma
 
 export function feedWarnings(feed: AssignmentFeed): PlanWarning[] {
   const warnings: PlanWarning[] = [];
+  const diagnostics = aggregateFeedDiagnostics(feed);
   if (!feed.diagnostics.complete) {
     warnings.push({
       code: "incomplete-feed-diagnostics",
@@ -50,27 +82,24 @@ export function feedWarnings(feed: AssignmentFeed): PlanWarning[] {
       message: "The feed reached the safety limit of 1,000 events",
     });
   }
-  const duplicateEvents = feed.diagnostics.events.filter((event) => event.kind === "duplicate");
-  if (duplicateEvents.length) {
+  if (diagnostics.duplicate) {
     warnings.push({
       code: "duplicate-source-uids",
-      message: `${duplicateEvents.length} duplicate source UID(s) were quarantined`,
-      details: duplicateEvents.map(() => "duplicate UID redacted"),
+      message: `${diagnostics.duplicate} duplicate source UID(s) were quarantined`,
+      details: Array.from({ length: diagnostics.duplicate }, () => "duplicate UID redacted"),
     });
   }
-  const malformedEvents = feed.diagnostics.events.filter((event) => event.kind === "malformed");
-  if (malformedEvents.length) {
+  if (diagnostics.malformed) {
     warnings.push({
       code: "malformed-events",
-      message: `${malformedEvents.length} malformed assignment-like event(s) were quarantined`,
+      message: `${diagnostics.malformed} malformed assignment-like event(s) were quarantined`,
     });
   }
-  const suspiciousEvents = feed.diagnostics.events.filter((event) => event.kind === "suspicious");
-  if (suspiciousEvents.length) {
+  if (diagnostics.suspiciousReasons.length) {
     warnings.push({
       code: "suspicious-feed-events",
-      message: `${suspiciousEvents.length} assignment-like event(s) were quarantined`,
-      details: suspiciousEvents.map((event) => event.reason),
+      message: `${diagnostics.suspiciousReasons.length} assignment-like event(s) were quarantined`,
+      details: diagnostics.suspiciousReasons,
     });
   }
   return warnings;
@@ -86,7 +115,11 @@ export function buildPlan(
   metrics?: RunMetrics,
   trigger: Trigger = "scheduled",
   minimumMissingIntervalMs?: number,
+  operationCounters?: PlanningOperationCounters,
 ): SyncPlan {
+  const planTimestamp = now.toISOString();
+  const courseIndex = buildCourseIndex(courses, aliases, operationCounters);
+  const assignmentIndex = buildAssignmentIndex(existingAssignments, courseIndex, operationCounters);
   const plan: SyncPlan = {
     coursesToCreate: [],
     coursesToUpdate: [],
@@ -99,12 +132,7 @@ export function buildPlan(
     skipped: 0,
     warnings: feedWarnings(feed),
   };
-  const byUid = new Map<string, AssignmentRecord[]>();
-  for (const assignment of existingAssignments) {
-    const values = byUid.get(assignment.uid) ?? [];
-    values.push(assignment);
-    byUid.set(assignment.uid, values);
-  }
+  const byUid = assignmentIndex.byUid;
   const plannedCourseKeys = new Set<string>();
   const plannedCourseUpdates = new Map<string, SyncPlan["coursesToUpdate"][number]>();
   const conflictedCoursePageIds = new Set<string>();
@@ -147,11 +175,10 @@ export function buildPlan(
       continue;
     }
 
-    const match = matchCourse(source, courses, aliases, now.toISOString());
-    const duplicates = possibleDuplicate(
+    const match = matchCourseFromIndex(source, courseIndex, planTimestamp);
+    const duplicates = possibleDuplicateFromIndex(
       source,
-      existingAssignments,
-      courses,
+      assignmentIndex,
       match.kind === "matched" ? match.course.pageId : undefined,
     );
     plan.skipped += 1;
@@ -183,12 +210,11 @@ export function buildPlan(
       });
       continue;
     }
-    const match = matchCourse(source, courses, aliases, now.toISOString());
+    const match = matchCourseFromIndex(source, courseIndex, planTimestamp);
     if (uidMatches.length === 0) {
-      const duplicates = possibleDuplicate(
+      const duplicates = possibleDuplicateFromIndex(
         source,
-        existingAssignments,
-        courses,
+        assignmentIndex,
         match.kind === "matched" ? match.course.pageId : undefined,
       );
       if (duplicates.length) {
@@ -405,6 +431,7 @@ export function buildPlan(
     trigger,
     now,
     minimumMissingIntervalMs,
+    planTimestamp,
   );
   for (const assignment of removal.removals) removalsByPageId.set(assignment.pageId, assignment);
   plan.assignmentsMissingEvidenceToUpdate = removal.missingEvidenceUpdates;

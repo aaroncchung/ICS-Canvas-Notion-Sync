@@ -3,18 +3,26 @@ import type { AppConfig } from "../config.js";
 import type { AssignmentFeed, AssignmentProvider } from "../types.js";
 import { fetchFeed } from "./fetch-feed.js";
 import { parseIcs } from "./parse-ics.js";
+import {
+  compileAssignmentTypeMatcher,
+  type AssignmentTypeMatcher,
+} from "./normalize-assignment.js";
 
 export class CanvasIcsProvider implements AssignmentProvider {
+  private readonly assignmentTypeMatcher: AssignmentTypeMatcher;
+
   public constructor(
     private readonly config: AppConfig,
     private readonly logger: Logger,
     private readonly fetchImpl: typeof fetch = fetch,
-  ) {}
+  ) {
+    this.assignmentTypeMatcher = compileAssignmentTypeMatcher(config.assignmentTypeRules);
+  }
 
   public async fetchAssignments(): Promise<AssignmentFeed> {
     this.logger.info("Fetching Canvas ICS feed");
     const source = await fetchFeed(this.config.CANVAS_ICS_URL, this.fetchImpl);
-    const feed = parseIcs(source, this.config.assignmentTypeRules);
+    const feed = parseIcs(source, this.assignmentTypeMatcher);
     this.logger.info(
       {
         feedItems: feed.diagnostics.totalEvents,

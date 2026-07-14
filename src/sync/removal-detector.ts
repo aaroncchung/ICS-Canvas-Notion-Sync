@@ -55,6 +55,7 @@ export function detectRemovals(
   trigger: Trigger,
   now = new Date(),
   minimumMissingIntervalMs = MINIMUM_MISSING_EVIDENCE_INTERVAL_MS,
+  planTimestamp?: string,
 ): RemovalEvidenceResult {
   const result: RemovalEvidenceResult = {
     removals: [],
@@ -96,6 +97,7 @@ export function detectRemovals(
     ...feed.diagnostics.quarantinedUids,
   ]);
   const nowMs = now.getTime();
+  let missingTimestamp = planTimestamp;
   const earliest = nowMs - 30 * DAY;
   const latest = nowMs + 366 * DAY;
   const candidates = existing.filter((assignment) => {
@@ -123,7 +125,7 @@ export function detectRemovals(
 
     const canvasMissingSince = hasPersistedEvidence
       ? assignment.canvasMissingSince!
-      : now.toISOString();
+      : (missingTimestamp ??= now.toISOString());
     const canvasMissingCount = hasPersistedEvidence ? previousCount + 1 : 1;
     const intervalSatisfied = hasPersistedEvidence && nowMs - sinceMs >= minimumMissingIntervalMs;
     if (canvasMissingCount >= 2 && intervalSatisfied) {

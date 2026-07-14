@@ -2,7 +2,11 @@ import { readFile } from "node:fs/promises";
 import { describe, expect, it } from "vitest";
 import { pino } from "pino";
 import { parseIcs } from "../../src/canvas/parse-ics.js";
-import { sanitizeDescription } from "../../src/canvas/normalize-assignment.js";
+import {
+  compileAssignmentTypeMatcher,
+  inferAssignmentType,
+  sanitizeDescription,
+} from "../../src/canvas/normalize-assignment.js";
 import { CanvasIcsProvider } from "../../src/canvas/provider.js";
 import { config, rules } from "../helpers.js";
 
@@ -18,6 +22,30 @@ function event(values: string): string {
 }
 
 describe("RFC 5545 Canvas parsing", () => {
+  it("preserves assignment-type matching semantics with one compiled matcher", () => {
+    const configured = [
+      { type: "Quiz" as const, patterns: ["test", "problem   set"] },
+      { type: "Exam" as const, patterns: ["test"] },
+      { type: "Project" as const, patterns: ["C++", "[draft]"] },
+      { type: "Paper" as const, patterns: ["épreuve"] },
+    ];
+    const matcher = compileAssignmentTypeMatcher(configured);
+    const cases = [
+      ["Final test", "Quiz"],
+      ["Problem      set 2", "Quiz"],
+      ["problem\tset 3", "Quiz"],
+      ["C++ review", "Project"],
+      ["Submit [draft]", "Project"],
+      ["ÉPREUVE finale", "Paper"],
+      ["préépreuve finale", "Other"],
+      ["Contest results", "Other"],
+    ] as const;
+    for (const [title, expected] of cases) {
+      expect(matcher(title)).toBe(expected);
+      expect(matcher(title)).toBe(inferAssignmentType(title, configured));
+    }
+  });
+
   it("returns an AssignmentFeed directly without mutable provider state", async () => {
     const source = calendar(
       event(

@@ -1,15 +1,16 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { parseIcs } from "../../src/canvas/parse-ics.js";
 import { createAssignment } from "../../src/notion/assignments.js";
 import { managedDescriptionHash } from "../../src/notion/descriptions.js";
 import { createRunMetrics } from "../../src/notion/client.js";
-import { buildPlan } from "../../src/sync/plan.js";
+import { buildPlan, feedDiagnosticSummary, feedWarnings } from "../../src/sync/plan.js";
 import { MINIMUM_MISSING_EVIDENCE_INTERVAL_MS } from "../../src/sync/removal-detector.js";
 import type {
   AssignmentFeed,
   AssignmentRecord,
   CourseRecord,
   ExternalAssignment,
+  PlanningOperationCounters,
   Trigger,
 } from "../../src/types.js";
 import { FakeGateway, rules } from "../helpers.js";
@@ -214,6 +215,36 @@ describe("plan-first reconciliation", () => {
     const result = plan([ambiguousSource], [], [course, { ...course, pageId: "course-page-2" }]);
     expect(result.assignmentsToCreate).toHaveLength(0);
     expect(result.warnings.some((warning) => warning.code === "ambiguous-course")).toBe(true);
+  });
+
+  it("stops at ambiguous exact and normalized course identifiers in source order", () => {
+    const exactCodeSource = source({ courseCode: "SHARED" });
+    delete exactCodeSource.canvasCourseId;
+    delete exactCodeSource.courseName;
+    const exact = plan(
+      [exactCodeSource],
+      [],
+      [
+        { pageId: "exact-two", title: "Second", courseCode: "SHARED" },
+        { pageId: "exact-one", title: "First", courseCode: "SHARED" },
+      ],
+    );
+    expect(exact.warnings[0]?.message).toContain("exact-code");
+    expect(exact.warnings[0]?.details).toEqual(["exact-two", "exact-one"]);
+
+    const normalizedSource = source({ courseName: "data_science" });
+    delete normalizedSource.canvasCourseId;
+    delete normalizedSource.courseCode;
+    const normalized = plan(
+      [normalizedSource],
+      [],
+      [
+        { pageId: "normalized-two", title: "Data-Science" },
+        { pageId: "normalized-one", title: "Data Science" },
+      ],
+    );
+    expect(normalized.warnings[0]?.message).toContain("normalized-name-or-code");
+    expect(normalized.warnings[0]?.details).toEqual(["normalized-two", "normalized-one"]);
   });
 
   it("skips an alias that resolves to multiple courses", () => {
@@ -517,6 +548,230 @@ describe("plan-first reconciliation", () => {
     expect(
       result.warnings.some((warning) => warning.code === "possible-assignment-duplicate"),
     ).toBe(true);
+  });
+
+  it("uses a Canvas assignment ID as duplicate evidence independently of the URL", () => {
+    const incoming = source({
+      uid: "new-uid",
+      title: "Different title",
+      dueAt: "2026-08-02T20:00:00.000Z",
+      canvasAssignmentId: "456",
+      canvasUrl: "https://other.example.edu/courses/999/assignments/999",
+    });
+    const result = plan([incoming]);
+    expect(result.assignmentsToCreate).toEqual([]);
+    expect(result.warnings).toContainEqual(
+      expect.objectContaining({
+        code: "possible-assignment-duplicate",
+        details: ["assignment-page"],
+      }),
+    );
+  });
+
+  it("retains duplicate candidate and duplicate Notion UID page ordering", () => {
+    const candidates = [
+      record({ pageId: "page-two", uid: "old-two" }),
+      record({ pageId: "page-one", uid: "old-one" }),
+    ];
+    const duplicate = plan([source({ uid: "new-uid" })], candidates);
+    expect(duplicate.warnings[0]?.details).toEqual(["page-two", "page-one"]);
+
+    const duplicateUid = plan(
+      [source()],
+      [record({ pageId: "uid-two" }), record({ pageId: "uid-one" })],
+    );
+    expect(duplicateUid.warnings[0]).toMatchObject({
+      code: "duplicate-notion-uid",
+      details: ["uid-two", "uid-one"],
+    });
+  });
+
+  it("uses the assignment indexes for cancelled new UIDs", () => {
+    const value = feed([], 1, {
+      cancelledAssignments: [
+        source({
+          uid: "cancelled-new",
+          canvasUrl: "https://canvas.example.edu/courses/123/assignments/456/?module=1",
+        }),
+      ],
+    });
+    const result = planFeed(value);
+    expect(result.warnings).toContainEqual(
+      expect.objectContaining({
+        code: "possible-assignment-duplicate",
+        details: ["assignment-page"],
+      }),
+    );
+  });
+
+  it("keeps diagnostic counts, details, and warning order stable", () => {
+    const value = feed([], 5, {
+      diagnostics: {
+        events: [
+          { kind: "ignored", reason: "ordinary-calendar-event", indicators: [] },
+          {
+            kind: "suspicious",
+            reason: "assignment-like-event",
+            uid: "suspicious",
+            indicators: [],
+          },
+          {
+            kind: "duplicate",
+            reason: "duplicate-source-uid",
+            uid: "duplicate-one",
+            indicators: [],
+          },
+          {
+            kind: "malformed",
+            reason: "malformed-assignment-event",
+            uid: "malformed",
+            indicators: [],
+          },
+          {
+            kind: "duplicate",
+            reason: "duplicate-source-uid",
+            uid: "duplicate-two",
+            indicators: [],
+          },
+        ],
+      },
+    });
+    expect(feedDiagnosticSummary(value)).toMatchObject({
+      ignoredEvents: 1,
+      suspiciousEvents: 1,
+      malformedEvents: 1,
+      duplicateUids: 2,
+    });
+    expect(feedWarnings(value)).toEqual([
+      {
+        code: "duplicate-source-uids",
+        message: "2 duplicate source UID(s) were quarantined",
+        details: ["duplicate UID redacted", "duplicate UID redacted"],
+      },
+      {
+        code: "malformed-events",
+        message: "1 malformed assignment-like event(s) were quarantined",
+      },
+      {
+        code: "suspicious-feed-events",
+        message: "1 assignment-like event(s) were quarantined",
+        details: ["assignment-like-event"],
+      },
+    ]);
+  });
+
+  it("reuses one plan timestamp for every course enrichment", () => {
+    const now = new Date("2026-07-13T12:00:00Z");
+    const toISOString = vi
+      .spyOn(now, "toISOString")
+      .mockReturnValueOnce("2026-07-13T12:00:00.000Z")
+      .mockReturnValue("2026-07-13T12:00:01.000Z");
+    const assignments = [
+      source({
+        uid: "one",
+        title: "One assignment",
+        canvasCourseId: "1",
+        canvasAssignmentId: "101",
+        canvasUrl: "https://canvas.example.edu/courses/1/assignments/101",
+        courseName: "One",
+        courseCode: "ONE",
+      }),
+      source({
+        uid: "two",
+        title: "Two assignment",
+        canvasCourseId: "2",
+        canvasAssignmentId: "102",
+        canvasUrl: "https://canvas.example.edu/courses/2/assignments/102",
+        courseName: "Two",
+        courseCode: "TWO",
+      }),
+    ];
+    const result = buildPlan(
+      feed(assignments),
+      [
+        record({
+          pageId: "missing",
+          uid: "missing",
+          title: "Missing assignment",
+          coursePageIds: ["course-one"],
+          canvasUrl: "https://canvas.example.edu/courses/1/assignments/999",
+        }),
+      ],
+      [
+        { pageId: "course-one", title: "One" },
+        { pageId: "course-two", title: "Two" },
+      ],
+      {},
+      false,
+      now,
+    );
+    expect(toISOString).toHaveBeenCalledTimes(1);
+    expect(result.coursesToUpdate.map((update) => update.syncUpdatedAt)).toEqual([
+      "2026-07-13T12:00:00.000Z",
+      "2026-07-13T12:00:00.000Z",
+    ]);
+  });
+
+  it("builds linear indexes instead of rescanning full collections per source assignment", () => {
+    const size = 400;
+    const courses = Array.from(
+      { length: size },
+      (_, index): CourseRecord => ({
+        pageId: `course-${index}`,
+        title: `Course ${index}`,
+        courseCode: `CODE ${index}`,
+        canvasCourseId: String(index),
+      }),
+    );
+    const existing = Array.from(
+      { length: size },
+      (_, index): AssignmentRecord =>
+        record({
+          pageId: `existing-${index}`,
+          uid: `existing-${index}`,
+          title: `Existing ${index}`,
+          coursePageIds: [`course-${index}`],
+          canvasUrl: `https://canvas.example.edu/courses/${index}/assignments/${index}`,
+        }),
+    );
+    const assignments = Array.from(
+      { length: size },
+      (_, index): ExternalAssignment =>
+        source({
+          uid: `incoming-${index}`,
+          title: `Incoming ${index}`,
+          courseName: `Course ${index}`,
+          courseCode: `CODE ${index}`,
+          canvasCourseId: String(index),
+          canvasAssignmentId: String(10_000 + index),
+          canvasUrl: `https://canvas.example.edu/courses/${index}/assignments/${10_000 + index}`,
+        }),
+    );
+    const counters: PlanningOperationCounters = {
+      courseNormalizations: 0,
+      courseCandidatesExamined: 0,
+      assignmentNormalizations: 0,
+      assignmentCandidatesExamined: 0,
+    };
+    const result = buildPlan(
+      feed(assignments),
+      existing,
+      courses,
+      {},
+      false,
+      new Date("2026-07-13T12:00:00Z"),
+      undefined,
+      "scheduled",
+      undefined,
+      counters,
+    );
+    expect(result.assignmentsToCreate).toHaveLength(size);
+    expect(counters).toEqual({
+      courseNormalizations: size * 6,
+      courseCandidatesExamined: size,
+      assignmentNormalizations: size * 4,
+      assignmentCandidatesExamined: 0,
+    });
   });
 
   it("does not create an active assignment for a cancelled new event", () => {

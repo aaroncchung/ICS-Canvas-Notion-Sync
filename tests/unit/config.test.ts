@@ -1,4 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
 import {
   loadConfig,
   parseAssignmentTypeRules,
@@ -14,7 +17,64 @@ const environment = {
   NOTION_SYNC_LOG_DATA_SOURCE_ID: "log",
 };
 
+const temporaryDirectories: string[] = [];
+
+async function temporaryConfigDirectory(): Promise<string> {
+  const directory = await mkdtemp(join(tmpdir(), "canvas-notion-config-"));
+  temporaryDirectories.push(directory);
+  return directory;
+}
+
+afterEach(async () => {
+  await Promise.all(
+    temporaryDirectories
+      .splice(0)
+      .map((directory) => rm(directory, { recursive: true, force: true })),
+  );
+});
+
 describe("optional JSON configuration", () => {
+  it("uses defaults when both optional files are missing", async () => {
+    const directory = await temporaryConfigDirectory();
+    await expect(loadConfig([], environment, directory)).resolves.toMatchObject({
+      aliases: {},
+      assignmentTypeRules: [],
+    });
+  });
+
+  it("loads either optional file when the other is missing", async () => {
+    const aliasesOnly = await temporaryConfigDirectory();
+    await writeFile(join(aliasesOnly, "course-aliases.json"), '{"EN 1":"Engineering 1"}');
+    await expect(loadConfig([], environment, aliasesOnly)).resolves.toMatchObject({
+      aliases: { "EN 1": "Engineering 1" },
+      assignmentTypeRules: [],
+    });
+
+    const rulesOnly = await temporaryConfigDirectory();
+    await writeFile(
+      join(rulesOnly, "assignment-type-rules.json"),
+      '[{"type":"Quiz","patterns":["quiz"]}]',
+    );
+    await expect(loadConfig([], environment, rulesOnly)).resolves.toMatchObject({
+      aliases: {},
+      assignmentTypeRules: [{ type: "Quiz", patterns: ["quiz"] }],
+    });
+  });
+
+  it.each([
+    ["course-aliases.json", "config/course-aliases.json"],
+    ["assignment-type-rules.json", "config/assignment-type-rules.json"],
+  ])(
+    "reports the correct optional filename for an independent read failure",
+    async (file, label) => {
+      const directory = await temporaryConfigDirectory();
+      await mkdir(join(directory, file));
+      await expect(loadConfig([], environment, directory)).rejects.toThrow(
+        `${label}: could not be read`,
+      );
+    },
+  );
+
   it("defaults missing-evidence removal to six hours and rejects shorter intervals", async () => {
     await expect(loadConfig([], environment)).resolves.toMatchObject({
       CANVAS_MISSING_EVIDENCE_MINIMUM_HOURS: 6,

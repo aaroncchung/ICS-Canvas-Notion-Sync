@@ -292,6 +292,13 @@ export interface RunMetrics {
   assignmentPagesRecovered: number;
 }
 
+export interface PlanningOperationCounters {
+  courseNormalizations: number;
+  courseCandidatesExamined: number;
+  assignmentNormalizations: number;
+  assignmentCandidatesExamined: number;
+}
+
 export interface RunResult {
   status: "Success" | "Warning" | "Failed" | "Dry Run";
   counts: RunCounts;

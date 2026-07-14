@@ -1,7 +1,12 @@
 import ical from "node-ical";
 import type { AssignmentType, AssignmentFeed, FeedEventDiagnostic } from "../types.js";
 import { classifyEvent } from "./classify-event.js";
-import { normalizeAssignment, type RawCalendarEvent } from "./normalize-assignment.js";
+import {
+  compileAssignmentTypeMatcher,
+  normalizeAssignment,
+  type AssignmentTypeMatcher,
+  type RawCalendarEvent,
+} from "./normalize-assignment.js";
 
 function asString(value: unknown): string | undefined {
   return typeof value === "string" ? value : undefined;
@@ -45,7 +50,7 @@ function toEvent(value: unknown): RawCalendarEvent | undefined {
 
 export function parseIcs(
   source: string,
-  rules: Array<{ type: AssignmentType; patterns: string[] }>,
+  rulesOrMatcher: Array<{ type: AssignmentType; patterns: string[] }> | AssignmentTypeMatcher,
 ): AssignmentFeed {
   if (
     !source.trimStart().startsWith("BEGIN:VCALENDAR") ||
@@ -62,6 +67,10 @@ export function parseIcs(
   if (!parsed || typeof parsed !== "object") {
     throw new Error("Canvas feed parser returned no calendar data");
   }
+  const assignmentTypeMatcher =
+    typeof rulesOrMatcher === "function"
+      ? rulesOrMatcher
+      : compileAssignmentTypeMatcher(rulesOrMatcher);
 
   // node-ical indexes VEVENTs by UID, so retain source identity before that index collapses it.
   const rawEvents = source.split(/^BEGIN:VEVENT\r?$/gim).slice(1);
@@ -123,7 +132,7 @@ export function parseIcs(
       continue;
     }
     try {
-      const assignment = normalizeAssignment(event, classification, rules);
+      const assignment = normalizeAssignment(event, classification, assignmentTypeMatcher);
       if (event.status?.trim().toUpperCase() === "CANCELLED") {
         cancelledAssignments.push(assignment);
         quarantinedUids.add(assignment.uid);

@@ -162,6 +162,7 @@ export function parseJsonConfiguration(source: string, file: string): unknown {
 export async function loadConfig(
   argv = process.argv.slice(2),
   env: NodeJS.ProcessEnv = process.env,
+  configurationDirectory = "config",
 ): Promise<AppConfig> {
   const parsed = envSchema.safeParse(env);
   if (!parsed.success) {
@@ -173,14 +174,16 @@ export async function loadConfig(
   } catch {
     throw new Error("Invalid environment configuration: NOTION_TIMEZONE");
   }
-  const aliasesValue = await readJsonIfPresent(
-    resolve("config/course-aliases.json"),
-    "config/course-aliases.json",
-  );
-  const rulesValue = await readJsonIfPresent(
-    resolve("config/assignment-type-rules.json"),
-    "config/assignment-type-rules.json",
-  );
+  const [aliasesValue, rulesValue] = await Promise.all([
+    readJsonIfPresent(
+      resolve(configurationDirectory, "course-aliases.json"),
+      "config/course-aliases.json",
+    ),
+    readJsonIfPresent(
+      resolve(configurationDirectory, "assignment-type-rules.json"),
+      "config/assignment-type-rules.json",
+    ),
+  ]);
   const aliases = aliasesValue === undefined ? {} : parseCourseAliases(aliasesValue);
   const rules = rulesValue === undefined ? [] : parseAssignmentTypeRules(rulesValue);
   return { ...parsed.data, ...parseArguments(argv), aliases, assignmentTypeRules: rules };

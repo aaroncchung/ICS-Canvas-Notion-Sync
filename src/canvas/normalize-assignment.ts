@@ -17,6 +17,26 @@ export interface RawCalendarEvent {
 
 const turndown = new TurndownService({ headingStyle: "atx", bulletListMarker: "-" });
 
+export type AssignmentTypeMatcher = (title: string) => AssignmentType;
+
+export function compileAssignmentTypeMatcher(
+  rules: Array<{ type: AssignmentType; patterns: string[] }>,
+): AssignmentTypeMatcher {
+  const compiled = rules.map((rule) => ({
+    type: rule.type,
+    matchers: rule.patterns.map((pattern) => {
+      const escaped = pattern.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/\s+/g, "\\s+");
+      return new RegExp(`(?:^|[^\\p{L}\\p{N}])${escaped}(?:$|[^\\p{L}\\p{N}])`, "iu");
+    }),
+  }));
+  return (title) => {
+    for (const rule of compiled) {
+      if (rule.matchers.some((matcher) => matcher.test(title))) return rule.type;
+    }
+    return "Other";
+  };
+}
+
 export function sanitizeDescription(html: string | undefined): {
   plainText?: string;
   markdown?: string;
@@ -66,17 +86,7 @@ export function inferAssignmentType(
   title: string,
   rules: Array<{ type: AssignmentType; patterns: string[] }>,
 ): AssignmentType {
-  for (const rule of rules) {
-    if (
-      rule.patterns.some((pattern) => {
-        const escaped = pattern.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/\s+/g, "\\s+");
-        return new RegExp(`(?:^|[^\\p{L}\\p{N}])${escaped}(?:$|[^\\p{L}\\p{N}])`, "iu").test(title);
-      })
-    ) {
-      return rule.type;
-    }
-  }
-  return "Other";
+  return compileAssignmentTypeMatcher(rules)(title);
 }
 
 function parseCourse(summary: string, description?: string): { name?: string; code?: string } {
@@ -97,7 +107,7 @@ function dueAt(event: RawCalendarEvent): string | undefined {
 export function normalizeAssignment(
   event: RawCalendarEvent,
   classification: ClassificationResult,
-  rules: Array<{ type: AssignmentType; patterns: string[] }>,
+  assignmentTypeMatcher: AssignmentTypeMatcher,
 ): ExternalAssignment {
   const uid = event.uid?.trim();
   const rawTitle = event.summary?.trim();
@@ -119,6 +129,6 @@ export function normalizeAssignment(
     ...(due ? { dueAt: due } : {}),
     ...(description.plainText ? { descriptionPlainText: description.plainText } : {}),
     ...(description.markdown ? { descriptionMarkdown: description.markdown } : {}),
-    inferredType: inferAssignmentType(title, rules),
+    inferredType: assignmentTypeMatcher(title),
   };
 }
