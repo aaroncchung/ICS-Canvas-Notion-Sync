@@ -25,7 +25,7 @@ jobs:
           node-version: 24
           cache: npm
           cache-dependency-path: package-lock.json
-      - run: npm ci
+      - run: npm ci --no-audit --fund=false
       - run: npm run build
       - name: Inspect scheduled sync runs
         env:
