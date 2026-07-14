@@ -380,6 +380,49 @@ describe("plan-first reconciliation", () => {
     expect(planFeed(value, []).warnings).toEqual([]);
   });
 
+  it("preserves existing assignments when the feed contains only ordinary events", () => {
+    const value = feed([], 1, {
+      diagnostics: {
+        sourceUids: ["calendar-event"],
+        events: [
+          {
+            kind: "ignored",
+            reason: "ordinary-calendar-event",
+            uid: "calendar-event",
+            indicators: [],
+          },
+        ],
+        ignoredEventCount: 1,
+      },
+    });
+    const result = planFeed(value);
+    expect(result.assignmentsToRemove).toHaveLength(0);
+    expect(
+      result.warnings.some((warning) => warning.code === "unexpected-no-assignment-signals"),
+    ).toBe(true);
+  });
+
+  it("still removes a genuinely absent assignment when ordinary events accompany a valid one", () => {
+    const existing = [record(), record({ pageId: "assignment-absent", uid: "uid-absent" })];
+    const value = feed([source()], 2, {
+      diagnostics: {
+        sourceUids: ["uid-1", "calendar-event"],
+        events: [
+          {
+            kind: "ignored",
+            reason: "ordinary-calendar-event",
+            uid: "calendar-event",
+            indicators: [],
+          },
+        ],
+        ignoredEventCount: 1,
+      },
+    });
+    expect(planFeed(value, existing).assignmentsToRemove.map((item) => item.pageId)).toEqual([
+      "assignment-absent",
+    ]);
+  });
+
   it("warns for suspicious assignment-like events", () => {
     const value = feed([], 1, {
       diagnostics: {
@@ -409,7 +452,9 @@ describe("plan-first reconciliation", () => {
   it("35 suppresses removal on an unexpectedly empty feed", () => {
     const result = plan([], [record()]);
     expect(result.assignmentsToRemove).toHaveLength(0);
-    expect(result.warnings.some((warning) => warning.code === "unexpected-empty-feed")).toBe(true);
+    expect(
+      result.warnings.some((warning) => warning.code === "unexpected-no-assignment-signals"),
+    ).toBe(true);
   });
 
   it("36 suppresses removal at 1,000 feed items", () => {

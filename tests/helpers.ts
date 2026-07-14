@@ -109,6 +109,7 @@ export class FakeGateway implements NotionGateway {
   public writes: Array<{ kind: string; id: string; value?: unknown }> = [];
   public failOnAssignmentWrite = false;
   private sequence = 0;
+  private readonly blocks = new Map<string, Array<Record<string, unknown>>>();
 
   public async retrieveDataSource(id: string): Promise<Record<string, unknown>> {
     return Promise.resolve(
@@ -125,6 +126,11 @@ export class FakeGateway implements NotionGateway {
       throw Object.assign(new Error("write failed"), { status: 400 });
     const pageId = `${id}-${++this.sequence}`;
     this.writes.push({ kind: "create", id, value: properties });
+    if (id === "assignments") {
+      this.blocks.set(pageId, [
+        { id: `${pageId}-template`, type: "paragraph", paragraph: { rich_text: [] } },
+      ]);
+    }
     return Promise.resolve(pageId);
   }
 
@@ -137,11 +143,18 @@ export class FakeGateway implements NotionGateway {
 
   public async updateBlock(blockId: string, block: Record<string, unknown>): Promise<void> {
     this.writes.push({ kind: "update-block", id: blockId, value: block });
+    for (const values of this.blocks.values()) {
+      const index = values.findIndex((candidate) => candidate.id === blockId);
+      if (index >= 0) {
+        const current = values[index]!;
+        values[index] = materializeBlock(blockId, { ...current, ...block });
+      }
+    }
     return Promise.resolve();
   }
 
-  public async listBlocks(): Promise<Array<Record<string, unknown>>> {
-    return Promise.resolve([{ id: "template", type: "paragraph", paragraph: { rich_text: [] } }]);
+  public async listBlocks(pageId: string): Promise<Array<Record<string, unknown>>> {
+    return Promise.resolve(this.blocks.get(pageId) ?? []);
   }
 
   public async appendBlocks(
@@ -149,16 +162,27 @@ export class FakeGateway implements NotionGateway {
     children: Array<Record<string, unknown>>,
   ): Promise<string[]> {
     this.writes.push({ kind: "append", id: parentId, value: children });
-    return Promise.resolve(children.map((_, index) => `${parentId}-block-${index}`));
+    const ids = children.map(() => `${parentId}-block-${++this.sequence}`);
+    const values = this.blocks.get(parentId) ?? [];
+    values.push(...children.map((child, index) => materializeBlock(ids[index]!, child)));
+    this.blocks.set(parentId, values);
+    return Promise.resolve(ids);
   }
 
   public async deleteBlock(blockId: string): Promise<void> {
     this.writes.push({ kind: "delete", id: blockId });
+    for (const [parentId, values] of this.blocks) {
+      this.blocks.set(
+        parentId,
+        values.filter((block) => block.id !== blockId),
+      );
+    }
+    this.blocks.delete(blockId);
     return Promise.resolve();
   }
 }
 
-type SimulatedFailure = { id: string; status: number; applied: boolean };
+type SimulatedFailure = { id: string; status: number; applied: boolean; appliedCount?: number };
 
 function richTextValue(value: unknown): string {
   if (!Array.isArray(value)) return "";
@@ -210,6 +234,8 @@ export class StatefulFakeGateway implements NotionGateway {
   public readonly createFailures: SimulatedFailure[] = [];
   public readonly appendFailures: SimulatedFailure[] = [];
   public readonly updateFailures: SimulatedFailure[] = [];
+  public readonly deleteFailures: SimulatedFailure[] = [];
+  public readonly queryVisibilityMisses = new Map<string, number>();
   private sequence = 0;
 
   public seedPage(dataSourceId: string, id: string, properties: Record<string, unknown>): void {
@@ -235,6 +261,11 @@ export class StatefulFakeGateway implements NotionGateway {
     id: string,
     filter?: Record<string, unknown>,
   ): Promise<Array<Record<string, unknown>>> {
+    const misses = this.queryVisibilityMisses.get(id) ?? 0;
+    if (misses > 0) {
+      this.queryVisibilityMisses.set(id, misses - 1);
+      return Promise.resolve([]);
+    }
     const pages = this.pages.get(id) ?? [];
     if (!filter || typeof filter.property !== "string") return Promise.resolve(pages);
     const condition =
@@ -306,7 +337,8 @@ export class StatefulFakeGateway implements NotionGateway {
     this.writes.push({ kind: "append", id: parentId, value: children });
     if (!failure || failure.applied) {
       const values = this.blocks.get(parentId) ?? [];
-      values.push(...children.map((child, index) => materializeBlock(ids[index]!, child)));
+      const appliedChildren = children.slice(0, failure?.appliedCount ?? children.length);
+      values.push(...appliedChildren.map((child, index) => materializeBlock(ids[index]!, child)));
       this.blocks.set(parentId, values);
     }
     if (failure)
@@ -316,13 +348,19 @@ export class StatefulFakeGateway implements NotionGateway {
 
   public async deleteBlock(blockId: string): Promise<void> {
     this.writes.push({ kind: "delete", id: blockId });
-    for (const [parentId, values] of this.blocks) {
-      this.blocks.set(
-        parentId,
-        values.filter((block) => block.id !== blockId),
-      );
+    const failureIndex = this.deleteFailures.findIndex((failure) => failure.id === blockId);
+    const failure = failureIndex >= 0 ? this.deleteFailures.splice(failureIndex, 1)[0] : undefined;
+    if (!failure || failure.applied) {
+      for (const [parentId, values] of this.blocks) {
+        this.blocks.set(
+          parentId,
+          values.filter((block) => block.id !== blockId),
+        );
+      }
+      this.blocks.delete(blockId);
     }
-    this.blocks.delete(blockId);
+    if (failure)
+      throw Object.assign(new Error("simulated delete failure"), { status: failure.status });
     return Promise.resolve();
   }
 }

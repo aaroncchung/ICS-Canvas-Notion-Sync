@@ -1,8 +1,15 @@
 import type { AppConfig } from "../config.js";
 import { workflowUrl } from "../config.js";
+import { plannedOperations } from "../sync/reconcile.js";
 import type { RunResult, SyncOperation } from "../types.js";
 import { AmbiguousNotionWriteError, isAmbiguousWriteError, type NotionGateway } from "./client.js";
+import { reconcileManagedSection } from "./managed-section.js";
 import { date, number, pageId, select, text, title, url } from "./property-helpers.js";
+import { pollForUniquePage, type VisibilityPollingOptions } from "./recovery.js";
+
+export const MANAGED_SYNC_LOG_TITLE = "Canvas Sync Result — managed by sync";
+export const PENDING_MANAGED_SYNC_LOG_TITLE =
+  "Canvas Sync Result — managed by sync [replacement pending]";
 
 function heading(value: string): Record<string, unknown> {
   return {
@@ -26,42 +33,34 @@ function section(titleValue: string, lines: string[]): Array<Record<string, unkn
   return [heading(titleValue), ...(lines.length ? lines : ["None"]).map(paragraph)];
 }
 
-function operation(operation: SyncOperation): string {
-  return `${operation.kind}: ${operation.target}`;
+function operation(value: SyncOperation): string {
+  return `${value.kind}: ${value.target}`;
 }
 
 function resultBlocks(result: RunResult): Array<Record<string, unknown>> {
-  const plan = result.plan;
   const execution = result.execution;
-  const planned = plan
-    ? [
-        ...plan.coursesToCreate.map((item) => `course-create: ${item.key}`),
-        ...plan.assignmentsToCreate.map((item) => `assignment-create: ${item.source.uid}`),
-        ...plan.assignmentsToUpdate.map((item) => `assignment-update: ${item.pageId}`),
-        ...plan.assignmentsToRemove.map((item) => `assignment-remove: ${item.pageId}`),
-      ]
-    : [];
+  const planned = result.plan ? plannedOperations(result.plan).map(operation) : [];
   const applied = execution
-    ? [
-        ...execution.coursesCreated.map(
-          (item) => `${operation(item)}${item.recovered ? " (recovered)" : ""}`,
-        ),
-        ...execution.assignmentsCreated.map(
-          (item) => `${operation(item)}${item.recovered ? " (recovered)" : ""}`,
-        ),
-        ...execution.assignmentsUpdated.map(operation),
-        ...execution.assignmentsRemoved.map(operation),
-      ]
+    ? execution.appliedOperations.map(
+        (item) =>
+          `${operation(item)}${item.pageId ? ` -> ${item.pageId}` : ""}${item.recovered ? " (recovered)" : ""}`,
+      )
     : [];
+  const partial =
+    execution?.partialAssignments.map(
+      (item) =>
+        `${item.intent} ${item.target} -> ${item.pageId}: completed ${item.completedSubsteps.join(", ")}; requires repair at ${item.failedSubstep?.kind ?? "unknown substep"}`,
+    ) ?? [];
   const failed = execution?.failedOperation
     ? [
         `${operation(execution.failedOperation)} [${execution.failedOperation.outcome}]: ${execution.failedOperation.message}`,
       ]
     : [];
   return [
-    ...section("Planned changes", planned),
-    ...section("Successfully applied changes", applied),
-    ...section("Failed or ambiguous change", failed),
+    ...section("Planned operations", planned),
+    ...section("Applied operations", applied),
+    ...section("Partial operations", partial),
+    ...section("Failed or ambiguous operation", failed),
     ...section("Operations not attempted", execution?.notAttempted.map(operation) ?? []),
     ...section(
       "Warnings",
@@ -114,12 +113,15 @@ export async function writeSyncLog(
   startedAt: string,
   finishedAt: string,
   result: RunResult,
+  recoveryOptions: VisibilityPollingOptions = {},
 ): Promise<void> {
   const properties = logProperties(config, startedAt, finishedAt, result);
-  const matches = await gateway.queryDataSource(config.NOTION_SYNC_LOG_DATA_SOURCE_ID, {
-    property: "Run",
-    title: { equals: runTitle(config, startedAt) },
-  });
+  const query = () =>
+    gateway.queryDataSource(config.NOTION_SYNC_LOG_DATA_SOURCE_ID, {
+      property: "Run",
+      title: { equals: runTitle(config, startedAt) },
+    });
+  const matches = await query();
   if (matches.length > 1) {
     throw new AmbiguousNotionWriteError(
       `Sync Log create is ambiguous: ${matches.length} pages match this workflow run`,
@@ -136,22 +138,25 @@ export async function writeSyncLog(
       });
     } catch (error) {
       if (!isAmbiguousWriteError(error)) throw error;
-      const recovered = await gateway.queryDataSource(config.NOTION_SYNC_LOG_DATA_SOURCE_ID, {
-        property: "Run",
-        title: { equals: runTitle(config, startedAt) },
-      });
-      if (recovered.length !== 1) {
+      const recovered = await pollForUniquePage(
+        query,
+        (count) => `Sync Log create is ambiguous: ${count} matching pages found`,
+        recoveryOptions,
+      );
+      if (!recovered) {
         throw new AmbiguousNotionWriteError(
-          `Sync Log create is ambiguous: ${recovered.length} matching pages found`,
+          "Sync Log create is ambiguous: no matching page became visible; creation was not retried",
         );
       }
-      logPageId = pageId(recovered[0]!);
+      logPageId = pageId(recovered);
+      await gateway.updatePage(logPageId, properties);
     }
   }
 
-  if ((await gateway.listBlocks(logPageId)).length) return;
-  const blocks = resultBlocks(result);
-  for (let index = 0; index < blocks.length; index += 100) {
-    await gateway.appendBlocks(logPageId, blocks.slice(index, index + 100));
-  }
+  await reconcileManagedSection(
+    gateway,
+    logPageId,
+    { managed: MANAGED_SYNC_LOG_TITLE, pending: PENDING_MANAGED_SYNC_LOG_TITLE },
+    resultBlocks(result),
+  );
 }

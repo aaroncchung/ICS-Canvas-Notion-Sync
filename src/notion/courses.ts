@@ -1,6 +1,7 @@
 import type { CourseCreate, CourseRecord, RecoveredCreate } from "../types.js";
 import { AmbiguousNotionWriteError, isAmbiguousWriteError, type NotionGateway } from "./client.js";
 import { normalizeCourse } from "../sync/course-matcher.js";
+import { pollForUniquePage, type VisibilityPollingOptions } from "./recovery.js";
 import {
   checkbox,
   pageId,
@@ -38,6 +39,7 @@ export async function createCourse(
   gateway: NotionGateway,
   dataSourceId: string,
   course: CourseCreate,
+  recoveryOptions: VisibilityPollingOptions = {},
 ): Promise<RecoveredCreate> {
   const properties: Record<string, unknown> = {
     Course: title(course.title),
@@ -51,31 +53,33 @@ export async function createCourse(
     return { pageId: await gateway.createPage(dataSourceId, properties), recovered: false };
   } catch (error) {
     if (!isAmbiguousWriteError(error)) throw error;
-    const pages = course.canvasCourseId
-      ? await gateway.queryDataSource(dataSourceId, {
-          property: "Canvas Course ID",
-          rich_text: { equals: course.canvasCourseId },
-        })
-      : await gateway.queryDataSource(dataSourceId);
-    const records = pages.map(courseRecord);
-    const expected = [course.title, course.courseCode]
-      .filter((value): value is string => Boolean(value))
-      .map(normalizeCourse);
-    const matches = course.canvasCourseId
-      ? records
-      : records.filter(
-          (record) =>
-            expected.includes(normalizeCourse(record.title)) ||
-            Boolean(record.courseCode && expected.includes(normalizeCourse(record.courseCode))),
-        );
-    if (matches.length === 1) return { pageId: matches[0]!.pageId, recovered: true };
-    if (matches.length > 1) {
-      throw new AmbiguousNotionWriteError(
-        `Course create is ambiguous: ${matches.length} pages match its deterministic key`,
-      );
-    }
+    const match = await pollForUniquePage(
+      async () => {
+        const pages = course.canvasCourseId
+          ? await gateway.queryDataSource(dataSourceId, {
+              property: "Canvas Course ID",
+              rich_text: { equals: course.canvasCourseId },
+            })
+          : await gateway.queryDataSource(dataSourceId);
+        const expected = [course.title, course.courseCode]
+          .filter((value): value is string => Boolean(value))
+          .map(normalizeCourse);
+        return course.canvasCourseId
+          ? pages
+          : pages.filter((page) => {
+              const record = courseRecord(page);
+              return (
+                expected.includes(normalizeCourse(record.title)) ||
+                Boolean(record.courseCode && expected.includes(normalizeCourse(record.courseCode)))
+              );
+            });
+      },
+      (count) => `Course create is ambiguous: ${count} pages match its deterministic key`,
+      recoveryOptions,
+    );
+    if (match) return { pageId: courseRecord(match).pageId, recovered: true };
     throw new AmbiguousNotionWriteError(
-      "Course create is ambiguous: no matching page is visible; creation was not retried",
+      "Course create is ambiguous: no matching page became visible; creation was not retried",
     );
   }
 }

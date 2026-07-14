@@ -2,6 +2,16 @@ import type { AssignmentFeed, AssignmentRecord, PlanWarning } from "../types.js"
 
 const DAY = 86_400_000;
 
+export function hasAssignmentSignals(feed: AssignmentFeed): boolean {
+  return (
+    feed.assignments.length > 0 ||
+    feed.cancelledAssignments.length > 0 ||
+    feed.diagnostics.normalizedAssignmentUids.length > 0 ||
+    feed.diagnostics.quarantinedUids.length > 0 ||
+    feed.diagnostics.events.some((event) => event.kind !== "ignored")
+  );
+}
+
 export function detectRemovals(
   feed: AssignmentFeed,
   existing: AssignmentRecord[],
@@ -19,22 +29,20 @@ export function detectRemovals(
       code: "removals-unsafe-parse",
       message: "Removal detection skipped after parse warnings",
     });
-    return { removals: [], warnings };
   }
   if (feed.diagnostics.totalEvents >= 1000) {
     warnings.push({
       code: "removals-feed-limit",
       message: "Removal detection skipped for a feed with 1,000 or more items",
     });
-    return { removals: [], warnings };
   }
-  if (feed.diagnostics.totalEvents === 0 && existing.length > 0) {
+  if (existing.some((assignment) => !assignment.removed) && !hasAssignmentSignals(feed)) {
     warnings.push({
-      code: "unexpected-empty-feed",
-      message: "Removal detection skipped because the feed unexpectedly contained no assignments",
+      code: "unexpected-no-assignment-signals",
+      message: "Removal detection skipped because the feed contained no assignment signals",
     });
-    return { removals: [], warnings };
   }
+  if (warnings.length) return { removals: [], warnings };
   const present = new Set([
     ...feed.diagnostics.sourceUids,
     ...feed.diagnostics.normalizedAssignmentUids,

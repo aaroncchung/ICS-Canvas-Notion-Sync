@@ -7,6 +7,7 @@ import type {
 } from "../types.js";
 import { AmbiguousNotionWriteError, isAmbiguousWriteError, type NotionGateway } from "./client.js";
 import { readManagedDescription } from "./descriptions.js";
+import { pollForUniquePage, type VisibilityPollingOptions } from "./recovery.js";
 import {
   checkbox,
   date,
@@ -87,6 +88,7 @@ export async function createAssignment(
   create: AssignmentCreate,
   coursePageId: string,
   timezone: string,
+  recoveryOptions: VisibilityPollingOptions = {},
 ): Promise<RecoveredCreate> {
   const source = create.source;
   const properties: Record<string, unknown> = {
@@ -116,20 +118,18 @@ export async function createAssignment(
     };
   } catch (error) {
     if (!isAmbiguousWriteError(error)) throw error;
-    const matches = await gateway.queryDataSource(dataSourceId, {
-      property: "Canvas UID",
-      rich_text: { equals: source.uid },
-    });
-    if (matches.length === 1 && typeof matches[0]?.id === "string") {
-      return { pageId: matches[0].id, recovered: true };
-    }
-    if (matches.length > 1) {
-      throw new AmbiguousNotionWriteError(
-        `Assignment create is ambiguous: ${matches.length} pages match the Canvas UID`,
-      );
-    }
+    const match = await pollForUniquePage(
+      () =>
+        gateway.queryDataSource(dataSourceId, {
+          property: "Canvas UID",
+          rich_text: { equals: source.uid },
+        }),
+      (count) => `Assignment create is ambiguous: ${count} pages match the Canvas UID`,
+      recoveryOptions,
+    );
+    if (match && typeof match.id === "string") return { pageId: match.id, recovered: true };
     throw new AmbiguousNotionWriteError(
-      "Assignment create is ambiguous: no matching page is visible; creation was not retried",
+      "Assignment create is ambiguous: no matching page became visible; creation was not retried",
     );
   }
 }

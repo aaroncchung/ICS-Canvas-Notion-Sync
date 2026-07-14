@@ -68,7 +68,7 @@ export async function withRetry<T>(
   const sleep =
     options.sleep ?? ((ms: number) => new Promise((resolve) => setTimeout(resolve, ms)));
   const operationType = options.operation ?? "read";
-  const retriesAmbiguousFailures = ["read", "property-update", "delete"].includes(operationType);
+  const retriesAmbiguousFailures = ["read", "property-update"].includes(operationType);
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     try {
       return await operation();

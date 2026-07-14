@@ -166,8 +166,10 @@ export interface RecoveredCreate {
 
 export type SyncOperationKind =
   | "course-create"
-  | "assignment-create"
-  | "assignment-update"
+  | "assignment-page-create"
+  | "assignment-template-wait"
+  | "assignment-property-update"
+  | "assignment-description-update"
   | "assignment-remove";
 
 export interface SyncOperation {
@@ -175,9 +177,9 @@ export interface SyncOperation {
   target: string;
 }
 
-export interface AppliedCreate extends SyncOperation {
-  pageId: string;
-  recovered: boolean;
+export interface AppliedSyncOperation extends SyncOperation {
+  pageId?: string;
+  recovered?: boolean;
 }
 
 export interface FailedSyncOperation extends SyncOperation {
@@ -185,11 +187,19 @@ export interface FailedSyncOperation extends SyncOperation {
   message: string;
 }
 
+export interface AssignmentExecutionState {
+  target: string;
+  pageId: string;
+  intent: "create" | "update";
+  state: "synchronized" | "requires-repair";
+  completedSubsteps: SyncOperationKind[];
+  failedSubstep?: FailedSyncOperation;
+}
+
 export interface SyncExecutionResult {
-  coursesCreated: AppliedCreate[];
-  assignmentsCreated: AppliedCreate[];
-  assignmentsUpdated: SyncOperation[];
-  assignmentsRemoved: SyncOperation[];
+  appliedOperations: AppliedSyncOperation[];
+  assignmentsSynchronized: AssignmentExecutionState[];
+  partialAssignments: AssignmentExecutionState[];
   notAttempted: SyncOperation[];
   ambiguousOperations: FailedSyncOperation[];
   failedOperation?: FailedSyncOperation;
