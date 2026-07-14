@@ -82,13 +82,6 @@ export function sanitizeDescription(html: string | undefined): {
   };
 }
 
-export function inferAssignmentType(
-  title: string,
-  rules: Array<{ type: AssignmentType; patterns: string[] }>,
-): AssignmentType {
-  return compileAssignmentTypeMatcher(rules)(title);
-}
-
 function parseCourse(summary: string, description?: string): { name?: string; code?: string } {
   const bracket = summary.match(/\s+\[([^\]]+)]\s*$/);
   const descriptionCourse = description?.match(/(?:course|context)\s*:\s*([^\n<]+)/i)?.[1]?.trim();

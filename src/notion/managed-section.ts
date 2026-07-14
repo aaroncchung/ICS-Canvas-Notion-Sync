@@ -7,12 +7,12 @@ import {
 
 type Block = Record<string, unknown>;
 
-export interface ManagedSectionTitles {
+interface ManagedSectionTitles {
   managed: string;
   pending: string;
 }
 
-export interface ManagedSectionSnapshot {
+interface ManagedSectionSnapshot {
   readonly pageId: string;
   readonly titles: ManagedSectionTitles;
   readonly expectedBlocks: Block[];
@@ -21,16 +21,8 @@ export interface ManagedSectionSnapshot {
   readonly childSignatures: Map<string, string[]>;
 }
 
-export interface ManagedSectionVerification {
-  readonly canonicalId: string;
-  readonly rootBlocks: Block[];
-  readonly childSignatures: string[];
-  readonly expectedSignatures: string[];
-}
-
-export interface ManagedSectionReconciliation {
+interface ManagedSectionReconciliation {
   replaced: boolean;
-  verified: ManagedSectionVerification;
 }
 
 export function blockText(block: Block): string {
@@ -137,20 +129,14 @@ export async function createManagedSectionSnapshot(
 export async function verifyManagedSection(
   gateway: NotionGateway,
   snapshot: ManagedSectionSnapshot,
-): Promise<ManagedSectionVerification | undefined> {
+): Promise<boolean> {
   const root = await rootBlocks(gateway, snapshot);
   const canonical = markerBlocks(root, snapshot.titles.managed);
   const pending = markerBlocks(root, snapshot.titles.pending);
-  if (canonical.length !== 1 || pending.length !== 0) return;
+  if (canonical.length !== 1 || pending.length !== 0) return false;
   const canonicalId = canonical[0]!.id as string;
   const actual = await childSignatures(gateway, snapshot, canonicalId);
-  if (!signaturesEqual(actual, snapshot.expectedSignatures)) return;
-  return {
-    canonicalId,
-    rootBlocks: root,
-    childSignatures: actual,
-    expectedSignatures: snapshot.expectedSignatures,
-  };
+  return signaturesEqual(actual, snapshot.expectedSignatures);
 }
 
 async function deleteBlockWithObservation(
@@ -228,7 +214,7 @@ async function verifiedResult(
   if (!verified) {
     throw new AmbiguousNotionWriteError("Managed section integrity verification failed");
   }
-  return { replaced, verified };
+  return { replaced };
 }
 
 export async function reconcileManagedSection(

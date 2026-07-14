@@ -7,11 +7,10 @@ import {
   MANAGED_DESCRIPTION_TITLE,
   PENDING_MANAGED_DESCRIPTION_TITLE,
   managedDescriptionHash,
-  readManagedDescription,
   replaceManagedDescription,
   waitForTemplate,
 } from "../../src/notion/descriptions.js";
-import { deleteBlockReconciled } from "../../src/notion/managed-section.js";
+import { blockText, deleteBlockReconciled } from "../../src/notion/managed-section.js";
 import {
   MANAGED_SYNC_LOG_TITLE,
   PENDING_MANAGED_SYNC_LOG_TITLE,
@@ -27,43 +26,18 @@ import type {
   RunResult,
   SyncPlan,
 } from "../../src/types.js";
-import { config, FakeGateway, FakeProvider, StatefulFakeGateway } from "../helpers.js";
+import {
+  assignmentFeed,
+  config,
+  FakeGateway,
+  FakeProvider,
+  readManagedDescription,
+  runCounts,
+  runResult,
+} from "../helpers.js";
 
-const emptyFeed: AssignmentFeed = {
-  assignments: [],
-  cancelledAssignments: [],
-  diagnostics: {
-    totalEvents: 0,
-    sourceUids: [],
-    normalizedAssignmentUids: [],
-    quarantinedUids: [],
-    events: [],
-    complete: true,
-  },
-};
-
-function counts(): RunCounts {
-  return {
-    feedItems: 0,
-    assignmentsParsed: 0,
-    cancelledAssignments: 0,
-    ignoredEvents: 0,
-    suspiciousEvents: 0,
-    malformedEvents: 0,
-    duplicateUids: 0,
-    quarantinedUids: 0,
-    created: 0,
-    updated: 0,
-    coursesUpdated: 0,
-    removed: 0,
-    missingObserved: 0,
-    missingAdvanced: 0,
-    missingCleared: 0,
-    unchanged: 0,
-    skipped: 0,
-    warningCount: 0,
-  };
-}
+const emptyFeed = assignmentFeed();
+const counts = runCounts;
 
 function assignmentCreate(uid = "uid-new"): AssignmentCreate {
   return {
@@ -96,24 +70,8 @@ function templateBlock(id: string, value = "Template content"): Record<string, u
   };
 }
 
-function blockText(block: Record<string, unknown>): string {
-  const type = block.type as string;
-  const content = block[type] as Record<string, unknown> | undefined;
-  const values = content?.rich_text;
-  if (!Array.isArray(values)) return "";
-  return (values as unknown[])
-    .map((value) =>
-      value &&
-      typeof value === "object" &&
-      typeof (value as Record<string, unknown>).plain_text === "string"
-        ? ((value as Record<string, unknown>).plain_text as string)
-        : "",
-    )
-    .join("");
-}
-
 async function managedChildren(
-  gateway: StatefulFakeGateway,
+  gateway: FakeGateway,
   pageId: string,
   marker = MANAGED_SYNC_LOG_TITLE,
 ): Promise<Array<Record<string, unknown>>> {
@@ -123,23 +81,20 @@ async function managedChildren(
 }
 
 function result(errors: string[] = []): RunResult {
-  return {
+  return runResult({
     status: errors.length ? "Failed" : "Success",
-    counts: counts(),
-    warnings: [],
     errors,
-    metrics: createRunMetrics(),
-  };
+  });
 }
 
-function seedLogPage(gateway: StatefulFakeGateway, id: string, runId: string): void {
+function seedLogPage(gateway: FakeGateway, id: string, runId: string): void {
   gateway.seedPage("log", id, {
     Run: { title: [{ type: "text", text: { content: `Canvas sync GitHub run ${runId}` } }] },
   });
 }
 
 describe("application modes and failure handling", () => {
-  it("23 dry-run performs complete reads but no writes", async () => {
+  it("dry-run performs complete reads but no writes", async () => {
     const gateway = new FakeGateway();
     const proposedFeed: AssignmentFeed = {
       assignments: [
@@ -218,7 +173,7 @@ describe("application modes and failure handling", () => {
     expect(gateway.writes).toEqual([]);
   });
 
-  it("24 validate mode performs no data writes", async () => {
+  it("validate mode performs no data writes", async () => {
     const gateway = new FakeGateway();
     const result = await run(config({ mode: "validate" }), {
       gateway,
@@ -360,7 +315,7 @@ describe("application modes and failure handling", () => {
     expect(gateway.writes).toEqual([]);
   });
 
-  it("38 retries Notion rate limits with bounded backoff", async () => {
+  it("retries Notion rate limits with bounded backoff", async () => {
     let attempts = 0;
     const sleeps: number[] = [];
     const retries: string[] = [];
@@ -440,7 +395,7 @@ describe("application modes and failure handling", () => {
     },
   );
 
-  it("39 skips removal writes after an active assignment write fails", async () => {
+  it("skips removal writes after an active assignment write fails", async () => {
     const gateway = new FakeGateway();
     gateway.failOnAssignmentWrite = true;
     const plan: SyncPlan = {
@@ -506,8 +461,8 @@ describe("application modes and failure handling", () => {
   });
 
   it("tracks a partial course-enrichment failure separately from assignment updates", async () => {
-    const gateway = new StatefulFakeGateway();
-    gateway.updateFailures.push({ id: "course", status: 503, applied: false });
+    const gateway = new FakeGateway();
+    gateway.failUpdate({ id: "course", status: 503, applied: false });
     const plan: SyncPlan = {
       coursesToCreate: [],
       coursesToUpdate: [
@@ -600,7 +555,7 @@ describe("application modes and failure handling", () => {
     expect(counts.removed).toBe(1);
   });
 
-  it("40 redacts exact secrets, bearer tokens, and feed query parameters", () => {
+  it("redacts exact secrets, bearer tokens, and feed query parameters", () => {
     const secretUrl = "https://canvas.example.edu/feeds/private.ics?token=super-secret";
     const message = safeError(
       new Error(`Failed ${secretUrl} Authorization: Bearer secret_abcdefghijk`),
@@ -642,8 +597,8 @@ describe("application modes and failure handling", () => {
 
 describe("ambiguous create recovery", () => {
   it("recovers an applied assignment create after a statusless transport failure", async () => {
-    const gateway = new StatefulFakeGateway();
-    gateway.createFailures.push({ id: "assignments", code: "ECONNRESET", applied: true });
+    const gateway = new FakeGateway();
+    gateway.failCreate({ id: "assignments", code: "ECONNRESET", applied: true });
     const result = await createAssignment(
       gateway,
       "assignments",
@@ -658,8 +613,8 @@ describe("ambiguous create recovery", () => {
   });
 
   it("does not create again when statusless assignment recovery finds no page", async () => {
-    const gateway = new StatefulFakeGateway();
-    gateway.createFailures.push({ id: "assignments", code: "ETIMEDOUT", applied: false });
+    const gateway = new FakeGateway();
+    gateway.failCreate({ id: "assignments", code: "ETIMEDOUT", applied: false });
     await expect(
       createAssignment(
         gateway,
@@ -674,8 +629,8 @@ describe("ambiguous create recovery", () => {
   });
 
   it("recovers a statusless course create by Canvas Course ID", async () => {
-    const gateway = new StatefulFakeGateway();
-    gateway.createFailures.push({ id: "courses", code: "UND_ERR_SOCKET", applied: true });
+    const gateway = new FakeGateway();
+    gateway.failCreate({ id: "courses", code: "UND_ERR_SOCKET", applied: true });
     const result = await createCourse(gateway, "courses", {
       key: "id:123",
       title: "EE 10",
@@ -688,7 +643,7 @@ describe("ambiguous create recovery", () => {
   });
 
   it("keeps confirmed and recovered create metrics disjoint", async () => {
-    const gateway = new StatefulFakeGateway();
+    const gateway = new FakeGateway();
     await createAssignment(
       gateway,
       "assignments",
@@ -696,7 +651,7 @@ describe("ambiguous create recovery", () => {
       "course",
       "America/Los_Angeles",
     );
-    gateway.createFailures.push({ id: "assignments", code: "ECONNRESET", applied: true });
+    gateway.failCreate({ id: "assignments", code: "ECONNRESET", applied: true });
     await createAssignment(
       gateway,
       "assignments",
@@ -705,7 +660,7 @@ describe("ambiguous create recovery", () => {
       "America/Los_Angeles",
     );
     await createCourse(gateway, "courses", { key: "id:1", title: "Course 1", canvasCourseId: "1" });
-    gateway.createFailures.push({ id: "courses", code: "ETIMEDOUT", applied: true });
+    gateway.failCreate({ id: "courses", code: "ETIMEDOUT", applied: true });
     await createCourse(gateway, "courses", { key: "id:2", title: "Course 2", canvasCourseId: "2" });
     expect(gateway.metrics).toMatchObject({
       assignmentPagesCreated: 1,
@@ -720,7 +675,7 @@ describe("ambiguous create recovery", () => {
   });
 
   it("counts physical recovery polls without changing logical create metrics", async () => {
-    class CountingRecoveryGateway extends StatefulFakeGateway {
+    class CountingRecoveryGateway extends FakeGateway {
       public override async createPage(
         id: string,
         properties: Record<string, unknown>,
@@ -741,8 +696,8 @@ describe("ambiguous create recovery", () => {
       }
     }
     const gateway = new CountingRecoveryGateway();
-    gateway.createFailures.push({ id: "assignments", code: "ECONNRESET", applied: true });
-    gateway.queryVisibilityMisses.set("assignments", 1);
+    gateway.failCreate({ id: "assignments", code: "ECONNRESET", applied: true });
+    gateway.delayVisibility("assignments", 1);
     await createAssignment(
       gateway,
       "assignments",
@@ -758,7 +713,7 @@ describe("ambiguous create recovery", () => {
   });
 
   it("does not increment the live confirmed-create count for a recovered assignment", async () => {
-    class RecoveredAssignmentGateway extends StatefulFakeGateway {
+    class RecoveredAssignmentGateway extends FakeGateway {
       public override async listBlocks(pageId: string): Promise<Array<Record<string, unknown>>> {
         const blocks = await super.listBlocks(pageId);
         return pageId === "assignments-1" && blocks.length === 0
@@ -767,7 +722,7 @@ describe("ambiguous create recovery", () => {
       }
     }
     const gateway = new RecoveredAssignmentGateway();
-    gateway.createFailures.push({ id: "assignments", code: "ECONNRESET", applied: true });
+    gateway.failCreate({ id: "assignments", code: "ECONNRESET", applied: true });
     const appliedCounts = counts();
     await applyPlan(
       gateway,
@@ -793,9 +748,9 @@ describe("ambiguous create recovery", () => {
   });
 
   it("recovers an assignment that becomes visible on a later observation poll", async () => {
-    const gateway = new StatefulFakeGateway();
-    gateway.createFailures.push({ id: "assignments", status: 503, applied: true });
-    gateway.queryVisibilityMisses.set("assignments", 1);
+    const gateway = new FakeGateway();
+    gateway.failCreate({ id: "assignments", status: 503, applied: true });
+    gateway.delayVisibility("assignments", 1);
     const recovered = await createAssignment(
       gateway,
       "assignments",
@@ -809,9 +764,9 @@ describe("ambiguous create recovery", () => {
   });
 
   it("recovers a course that becomes visible on a later observation poll", async () => {
-    const gateway = new StatefulFakeGateway();
-    gateway.createFailures.push({ id: "courses", status: 503, applied: true });
-    gateway.queryVisibilityMisses.set("courses", 1);
+    const gateway = new FakeGateway();
+    gateway.failCreate({ id: "courses", status: 503, applied: true });
+    gateway.delayVisibility("courses", 1);
     const recovered = await createCourse(
       gateway,
       "courses",
@@ -823,10 +778,10 @@ describe("ambiguous create recovery", () => {
   });
 
   it("fails explicitly when assignment recovery finds multiple matching pages", async () => {
-    const gateway = new StatefulFakeGateway();
+    const gateway = new FakeGateway();
     gateway.seedPage("assignments", "assignment-1", { "Canvas UID": richText("uid-new") });
     gateway.seedPage("assignments", "assignment-2", { "Canvas UID": richText("uid-new") });
-    gateway.createFailures.push({ id: "assignments", status: 503, applied: false });
+    gateway.failCreate({ id: "assignments", status: 503, applied: false });
     await expect(
       createAssignment(gateway, "assignments", assignmentCreate(), "course", "America/Los_Angeles"),
     ).rejects.toThrow("2 pages match");
@@ -835,7 +790,7 @@ describe("ambiguous create recovery", () => {
 
 describe("template stabilization and recoverable initialization", () => {
   it("fails clearly when no template blocks ever appear", async () => {
-    const gateway = new StatefulFakeGateway();
+    const gateway = new FakeGateway();
     await expect(
       waitForTemplate(gateway, "page", {
         attempts: 3,
@@ -846,7 +801,7 @@ describe("template stabilization and recoverable initialization", () => {
   });
 
   it("waits through a growing template until the complete block set stabilizes", async () => {
-    const gateway = new StatefulFakeGateway();
+    const gateway = new FakeGateway();
     const observations = [
       [templateBlock("one")],
       [templateBlock("one"), templateBlock("two")],
@@ -866,7 +821,7 @@ describe("template stabilization and recoverable initialization", () => {
   });
 
   it("returns after two equivalent non-empty template observations", async () => {
-    const gateway = new StatefulFakeGateway();
+    const gateway = new FakeGateway();
     gateway.seedBlock("page", templateBlock("stable"));
     let sleeps = 0;
     await waitForTemplate(gateway, "page", {
@@ -881,7 +836,7 @@ describe("template stabilization and recoverable initialization", () => {
   });
 
   it("leaves a page discoverable by Canvas UID when template waiting times out", async () => {
-    const gateway = new StatefulFakeGateway();
+    const gateway = new FakeGateway();
     const plan: SyncPlan = {
       coursesToCreate: [],
       coursesToUpdate: [],
@@ -918,7 +873,7 @@ describe("template stabilization and recoverable initialization", () => {
   });
 
   it("allows a later run to finish an assignment left incomplete by template timeout", async () => {
-    const gateway = new StatefulFakeGateway();
+    const gateway = new FakeGateway();
     const createPlan: SyncPlan = {
       coursesToCreate: [],
       coursesToUpdate: [],
@@ -969,8 +924,8 @@ describe("template stabilization and recoverable initialization", () => {
 });
 
 describe("managed descriptions", () => {
-  function descriptionGateway(): StatefulFakeGateway {
-    const gateway = new StatefulFakeGateway();
+  function descriptionGateway(): FakeGateway {
+    const gateway = new FakeGateway();
     gateway.seedBlock("page", {
       id: "user",
       type: "heading_2",
@@ -1016,7 +971,7 @@ describe("managed descriptions", () => {
   }
 
   it("reads assignment properties without routine page-body reads", async () => {
-    const gateway = new StatefulFakeGateway();
+    const gateway = new FakeGateway();
     gateway.seedPage("assignments", "page", {
       Assignment: { title: [{ plain_text: "Assignment" }] },
       "Canvas UID": { rich_text: [{ plain_text: "uid" }] },
@@ -1074,7 +1029,7 @@ describe("managed descriptions", () => {
   });
 
   it("repairs a missing canonical toggle and preserves user-owned template blocks", async () => {
-    const gateway = new StatefulFakeGateway();
+    const gateway = new FakeGateway();
     gateway.seedBlock("page", {
       id: "user",
       type: "heading_2",
@@ -1104,7 +1059,7 @@ describe("managed descriptions", () => {
 
   it("does not advance the hash after a failed body write and repairs it on a later run", async () => {
     const gateway = descriptionGateway();
-    gateway.appendFailures.push({ id: "page", status: 503, applied: false });
+    gateway.failAppend({ id: "page", status: 503, applied: false });
     const plan = descriptionPlan("New description");
     let failed: ApplyPlanError | undefined;
     try {
@@ -1188,7 +1143,7 @@ describe("managed descriptions", () => {
   });
 
   it("writes a new page hash and verification timestamp only after body verification", async () => {
-    const gateway = new StatefulFakeGateway();
+    const gateway = new FakeGateway();
     gateway.seedBlock("assignments-1", {
       id: "template",
       type: "heading_2",
@@ -1227,7 +1182,7 @@ describe("managed descriptions", () => {
 
   it("preserves the old managed section when replacement creation fails", async () => {
     const gateway = descriptionGateway();
-    gateway.appendFailures.push({ id: "page", status: 503, applied: false });
+    gateway.failAppend({ id: "page", status: 503, applied: false });
     await expect(replaceManagedDescription(gateway, "page", "New description")).rejects.toThrow(
       "0 replacements found",
     );
@@ -1236,7 +1191,7 @@ describe("managed descriptions", () => {
 
   it("reconciles a statusless marker append without duplicate permanent sections", async () => {
     const gateway = descriptionGateway();
-    gateway.appendFailures.push({ id: "page", code: "ECONNRESET", applied: true });
+    gateway.failAppend({ id: "page", code: "ECONNRESET", applied: true });
     await replaceManagedDescription(gateway, "page", "New description");
     expect(gateway.listBlocksCallCount("page")).toBe(3);
     expect(gateway.listBlocksCallCount("managed")).toBe(1);
@@ -1253,7 +1208,7 @@ describe("managed descriptions", () => {
   it("resumes a statusless child append from its verified prefix", async () => {
     const gateway = descriptionGateway();
     gateway.seedBlock("page", toggle("pending", PENDING_MANAGED_DESCRIPTION_TITLE));
-    gateway.appendFailures.push({
+    gateway.failAppend({
       id: "pending",
       code: "UND_ERR_SOCKET",
       applied: true,
@@ -1286,25 +1241,25 @@ describe("managed descriptions", () => {
 
 describe("ambiguity-safe block deletion", () => {
   it("accepts a statusless delete when observation shows the block is absent", async () => {
-    const gateway = new StatefulFakeGateway();
+    const gateway = new FakeGateway();
     gateway.seedBlock("page", templateBlock("target"));
-    gateway.deleteFailures.push({ id: "target", code: "ECONNRESET", applied: true });
+    gateway.failDelete({ id: "target", code: "ECONNRESET", applied: true });
     await deleteBlockReconciled(gateway, "page", "target");
     expect(await gateway.listBlocks("page")).toHaveLength(0);
     expect(gateway.writes.filter((write) => write.kind === "delete")).toHaveLength(1);
   });
 
   it("performs one justified follow-up after a statusless unapplied delete", async () => {
-    const gateway = new StatefulFakeGateway();
+    const gateway = new FakeGateway();
     gateway.seedBlock("page", templateBlock("target"));
-    gateway.deleteFailures.push({ id: "target", code: "ETIMEDOUT", applied: false });
+    gateway.failDelete({ id: "target", code: "ETIMEDOUT", applied: false });
     await deleteBlockReconciled(gateway, "page", "target");
     expect(await gateway.listBlocks("page")).toHaveLength(0);
     expect(gateway.writes.filter((write) => write.kind === "delete")).toHaveLength(2);
   });
 
   it("treats a 404 follow-up as completion after an ambiguous delete", async () => {
-    class StaleObservationGateway extends StatefulFakeGateway {
+    class StaleObservationGateway extends FakeGateway {
       private stale = true;
 
       public override async listBlocks(pageId: string): Promise<Array<Record<string, unknown>>> {
@@ -1318,7 +1273,7 @@ describe("ambiguity-safe block deletion", () => {
     }
     const gateway = new StaleObservationGateway();
     gateway.seedBlock("page", templateBlock("target"));
-    gateway.deleteFailures.push(
+    gateway.failDelete(
       { id: "target", status: 503, applied: true },
       { id: "target", status: 404, applied: false },
     );
@@ -1329,9 +1284,9 @@ describe("ambiguity-safe block deletion", () => {
   it.each([400, 403])(
     "keeps definite validation and authorization failures fatal (%s)",
     async (status) => {
-      const gateway = new StatefulFakeGateway();
+      const gateway = new FakeGateway();
       gateway.seedBlock("page", templateBlock("target"));
-      gateway.deleteFailures.push({ id: "target", status, applied: false });
+      gateway.failDelete({ id: "target", status, applied: false });
       await expect(deleteBlockReconciled(gateway, "page", "target")).rejects.toMatchObject({
         status,
       });
@@ -1342,8 +1297,8 @@ describe("ambiguity-safe block deletion", () => {
 
 describe("partial execution and Sync Log recovery", () => {
   it("reports which missing-evidence writes persisted before a partial failure", async () => {
-    const gateway = new StatefulFakeGateway();
-    gateway.updateFailures.push({ id: "assignment-b", status: 400, applied: false });
+    const gateway = new FakeGateway();
+    gateway.failUpdate({ id: "assignment-b", status: 400, applied: false });
     const plan: SyncPlan = {
       coursesToCreate: [],
       coursesToUpdate: [],
@@ -1381,8 +1336,8 @@ describe("partial execution and Sync Log recovery", () => {
   });
 
   it("records only applied updates and leaves removals not attempted after failure", async () => {
-    const gateway = new StatefulFakeGateway();
-    gateway.updateFailures.push({ id: "assignment-b", status: 400, applied: false });
+    const gateway = new FakeGateway();
+    gateway.failUpdate({ id: "assignment-b", status: 400, applied: false });
     const plan: SyncPlan = {
       coursesToCreate: [],
       coursesToUpdate: [],
@@ -1471,9 +1426,9 @@ describe("partial execution and Sync Log recovery", () => {
   });
 
   it("records durable page creation and template completion when description setup fails", async () => {
-    const gateway = new StatefulFakeGateway();
+    const gateway = new FakeGateway();
     gateway.seedBlock("assignments-1", templateBlock("template"));
-    gateway.appendFailures.push({ id: "assignments-1", status: 503, applied: false });
+    gateway.failAppend({ id: "assignments-1", status: 503, applied: false });
     const plan: SyncPlan = {
       coursesToCreate: [],
       coursesToUpdate: [],
@@ -1532,8 +1487,8 @@ describe("partial execution and Sync Log recovery", () => {
   });
 
   it("does not count an update as complete when properties succeed but description repair fails", async () => {
-    const gateway = new StatefulFakeGateway();
-    gateway.appendFailures.push({ id: "assignment", status: 503, applied: false });
+    const gateway = new FakeGateway();
+    gateway.failAppend({ id: "assignment", status: 503, applied: false });
     const plan: SyncPlan = {
       coursesToCreate: [],
       coursesToUpdate: [],
@@ -1579,7 +1534,7 @@ describe("partial execution and Sync Log recovery", () => {
   });
 
   it("repairs a Sync Log whose managed body contains only its first half", async () => {
-    const gateway = new StatefulFakeGateway();
+    const gateway = new FakeGateway();
     const runConfig = config({ GITHUB_RUN_ID: "repair-half" });
     await writeSyncLog(gateway, runConfig, "start", "finish", result(["first error"]));
     const pageId = gateway.pages.get("log")?.[0]?.id as string;
@@ -1603,7 +1558,7 @@ describe("partial execution and Sync Log recovery", () => {
   });
 
   it("updates stale Sync Log properties and managed result details on rerun", async () => {
-    const gateway = new StatefulFakeGateway();
+    const gateway = new FakeGateway();
     const runConfig = config({ GITHUB_RUN_ID: "stale-details" });
     await writeSyncLog(gateway, runConfig, "start", "finish-1", result(["old error"]));
     await writeSyncLog(gateway, runConfig, "start", "finish-2", result(["new error"]));
@@ -1617,10 +1572,10 @@ describe("partial execution and Sync Log recovery", () => {
   });
 
   it("reconciles a partial ambiguous Sync Log body append without duplicate sections", async () => {
-    const gateway = new StatefulFakeGateway();
+    const gateway = new FakeGateway();
     seedLogPage(gateway, "log-page", "partial-append");
     gateway.seedBlock("log-page", toggle("pending-log", PENDING_MANAGED_SYNC_LOG_TITLE));
-    gateway.appendFailures.push({
+    gateway.failAppend({
       id: "pending-log",
       status: 503,
       applied: true,
@@ -1641,7 +1596,7 @@ describe("partial execution and Sync Log recovery", () => {
   });
 
   it("preserves user-created blocks outside the managed Sync Log section", async () => {
-    const gateway = new StatefulFakeGateway();
+    const gateway = new FakeGateway();
     seedLogPage(gateway, "log-page", "user-content");
     gateway.seedBlock("log-page", templateBlock("user-note", "User note"));
     await writeSyncLog(
@@ -1657,8 +1612,8 @@ describe("partial execution and Sync Log recovery", () => {
   });
 
   it("recovers statusless Sync Log creation and never creates a duplicate", async () => {
-    const gateway = new StatefulFakeGateway();
-    gateway.createFailures.push({ id: "log", code: "ECONNRESET", applied: true });
+    const gateway = new FakeGateway();
+    gateway.failCreate({ id: "log", code: "ECONNRESET", applied: true });
     const result: RunResult = {
       status: "Failed",
       counts: counts(),
@@ -1676,9 +1631,9 @@ describe("partial execution and Sync Log recovery", () => {
   });
 
   it("recovers a Sync Log page that becomes visible on a later observation poll", async () => {
-    const gateway = new StatefulFakeGateway();
-    gateway.createFailures.push({ id: "log", status: 503, applied: true });
-    gateway.queryVisibilityMisses.set("log", 2);
+    const gateway = new FakeGateway();
+    gateway.failCreate({ id: "log", status: 503, applied: true });
+    gateway.delayVisibility("log", 2);
     await writeSyncLog(
       gateway,
       config({ GITHUB_RUN_ID: "visible-later" }),
@@ -1694,8 +1649,8 @@ describe("partial execution and Sync Log recovery", () => {
   });
 
   it("does not retry an ambiguous Sync Log create when no page is visible", async () => {
-    const gateway = new StatefulFakeGateway();
-    gateway.createFailures.push({ id: "log", status: 503, applied: false });
+    const gateway = new FakeGateway();
+    gateway.failCreate({ id: "log", status: 503, applied: false });
     const result = await run(config(), {
       gateway,
       provider: new FakeProvider(emptyFeed),

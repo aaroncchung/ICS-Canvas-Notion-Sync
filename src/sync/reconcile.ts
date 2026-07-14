@@ -4,7 +4,6 @@ import { createAssignment, updateAssignment } from "../notion/assignments.js";
 import { errorStatus, isAmbiguousWriteError, type NotionGateway } from "../notion/client.js";
 import { createCourse, updateCourse } from "../notion/courses.js";
 import {
-  ensureManagedDescription,
   managedDescriptionHash,
   replaceManagedDescription,
   waitForTemplate,
@@ -282,7 +281,7 @@ export async function applyPlan(
       const descriptionOperation = operations[operationIndex]!;
       const integrity = await applyStep(
         descriptionOperation,
-        () => ensureManagedDescription(gateway, update.pageId, update.source.descriptionMarkdown),
+        () => replaceManagedDescription(gateway, update.pageId, update.source.descriptionMarkdown),
         undefined,
         recordRepair,
       );

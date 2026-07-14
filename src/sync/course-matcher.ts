@@ -303,12 +303,3 @@ export function matchCourseFromIndex(
     },
   };
 }
-
-export function matchCourse(
-  assignment: ExternalAssignment,
-  courses: CourseRecord[],
-  aliases: Record<string, string>,
-  now = new Date().toISOString(),
-): CourseMatch {
-  return matchCourseFromIndex(assignment, buildCourseIndex(courses, aliases), now);
-}

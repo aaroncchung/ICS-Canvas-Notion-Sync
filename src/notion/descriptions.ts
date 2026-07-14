@@ -48,20 +48,6 @@ export function managedDescriptionHash(
   return `${version}:${createHash("sha256").update(representation).digest("hex")}`;
 }
 
-export async function readManagedDescription(
-  gateway: NotionGateway,
-  pageId: string,
-): Promise<string | undefined> {
-  if (gateway.metrics) gateway.metrics.assignmentBodyReads += 1;
-  const blocks = await gateway.listBlocks(pageId);
-  const toggle = blocks.find(
-    (block) => block.type === "toggle" && blockText(block) === MANAGED_DESCRIPTION_TITLE,
-  );
-  if (!toggle || typeof toggle.id !== "string") return;
-  const value = (await gateway.listBlocks(toggle.id)).map(blockText).join("");
-  return value === "No description provided." ? "" : value;
-}
-
 export async function replaceManagedDescription(
   gateway: NotionGateway,
   pageId: string,
@@ -88,14 +74,6 @@ export async function replaceManagedDescription(
     if (result.replaced) gateway.metrics.descriptionReplacements += 1;
   }
   return { repaired: true, replaced: result.replaced };
-}
-
-export async function ensureManagedDescription(
-  gateway: NotionGateway,
-  pageId: string,
-  markdown: string | undefined,
-): Promise<{ repaired: boolean; replaced: boolean }> {
-  return replaceManagedDescription(gateway, pageId, markdown);
 }
 
 export interface TemplateWaitOptions {

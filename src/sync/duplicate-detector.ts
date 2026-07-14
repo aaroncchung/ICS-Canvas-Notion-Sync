@@ -1,10 +1,5 @@
-import type {
-  AssignmentRecord,
-  CourseRecord,
-  ExternalAssignment,
-  PlanningOperationCounters,
-} from "../types.js";
-import { buildCourseIndex, normalizeCourse, type CourseIndex } from "./course-matcher.js";
+import type { AssignmentRecord, ExternalAssignment, PlanningOperationCounters } from "../types.js";
+import { normalizeCourse, type CourseIndex } from "./course-matcher.js";
 import { datesEqual } from "./date-resolution.js";
 
 function normalizeTitle(value: string, counters?: PlanningOperationCounters): string {
@@ -207,18 +202,4 @@ export function possibleDuplicateFromIndex(
       ? [assignment]
       : [];
   });
-}
-
-export function possibleDuplicate(
-  source: ExternalAssignment,
-  existing: AssignmentRecord[],
-  courses: CourseRecord[],
-  resolvedCoursePageId?: string,
-): AssignmentRecord[] {
-  const courseIndex = buildCourseIndex(courses, {});
-  return possibleDuplicateFromIndex(
-    source,
-    buildAssignmentIndex(existing, courseIndex),
-    resolvedCoursePageId,
-  );
 }

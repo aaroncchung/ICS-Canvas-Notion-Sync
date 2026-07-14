@@ -40,13 +40,11 @@ The Notion API version is explicitly pinned to `2026-03-11`.
 
 Follow the exact checklist in [docs/notion-setup.md](docs/notion-setup.md). In summary:
 
-- Rename `Due` → `Effective Due Date`, `Canvas Key` → `Canvas UID`, and `Sync Updated At` → `Last Synced` in Assignments.
-- Add `Canvas Due Date`, `Override Due Date`, `Canvas Missing Since`, `Canvas Missing Count`, `Imported From`, `Removed from Canvas`, `Raw Description`, `Canvas Description Hash`, and `Canvas Description Verified At`.
-- Create the Canvas Sync Log data source with the documented fields and options.
-- Share Assignments, Courses, the default assignment template, and Canvas Sync Log with the integration.
-- Make the assignment template the data source's default. New pages use Notion's current default-template API, which applies the template asynchronously; the sync waits before adding its managed description.
+- Prepare the documented Assignments, Courses, and Canvas Sync Log schemas exactly.
+- Set and share the default assignment template, then share all three data sources with the integration.
+- Configure GitHub secrets and variables before running the required validate, dry-run, and sync deployment sequence.
 
-The application validates names, types, required select/status options, and the Course relation target. It never adds, deletes, renames, or converts schema properties. Older Canvas-API-oriented fields are ignored.
+The application validates names, types, required select/status options, and the Course relation target. It never adds, deletes, renames, or converts schema properties.
 
 ## Configuration
 
@@ -128,17 +126,9 @@ Add the two secrets, four required variables, and optional health-grace variable
 
 Scheduled runs execute at minute 17 every four hours. Manual runs can select any mode and disable removal detection. Concurrency prevents overlapping syncs.
 
-The health workflow checks only scheduled `sync.yml` runs; manual runs never improve or degrade scheduled health. Runs are sorted by their timestamps. `success` is healthy. Completed `failure`, `timed_out`, `action_required`, `startup_failure`, and scheduled `cancelled` runs are qualifying failures. `neutral`, `skipped`, and `stale` are not successes, do not count toward the three-failure threshold, and break a consecutive-failure sequence, but they still allow the no-success watchdog to fire. Queued and in-progress runs are not completed failures. A workflow state other than `active` opens an immediate `workflow_disabled` incident instead of being treated as an ordinary delayed schedule.
-
-Health alerts use two conditions: three consecutive qualifying scheduled failures, or no scheduled success within the 12-hour watchdog. The watchdog allows 60 minutes for GitHub scheduler delay, and a scheduled run that began within the previous two hours temporarily defers an absence alert. This keeps the health check at minute 47, 30 minutes after the four-hour sync at minute 17, without treating an ordinary running sync as failed. All comparisons use UTC timestamps.
-
-Before any scheduled success exists, the health workflow uses `.github/workflows/sync.yml` workflow metadata as its stable activation reference (`updated_at`, falling back to `created_at`). The default initial grace is 14 hours. Set the non-secret repository variable `HEALTH_ACTIVATION_GRACE_HOURS` to another positive hour value if needed. No-success alerts are suppressed during that grace; three actual qualifying failures can still alert. A recent queued or running first sync also defers the absence alert.
-
-One durable issue titled `Canvas–Notion sync is unhealthy` and labeled `sync-failure` is reused. Its body contains deterministic markers for the episode, incident start, and latest qualifying failure. The latest-failure boundary advances only for a newer qualifying failure. The checker updates the issue only when its generated body changes, reopens the same closed issue with a new incident boundary, and adds one marker-backed recovery comment per episode. It closes only after current health is otherwise healthy and a completed scheduled success is strictly newer than both the incident start and latest qualifying failure; an older success still inside the watchdog, a manual success, a neutral completion, or an active run cannot recover the issue. Legacy marked issues use their newest displayed qualifying failure (or issue timestamps when available) as a conservative migration boundary. Pull requests returned by GitHub's issues endpoint are ignored. See `docs/health-monitor.md` for the full policy.
+The health workflow opens or reuses a durable issue after three consecutive qualifying scheduled failures, after the no-success watchdog expires, or when the sync workflow is disabled. Manual runs do not affect scheduled health. See [docs/health-monitor.md](docs/health-monitor.md) for the authoritative run classification, timing, incident, recovery, and privacy policy.
 
 In GitHub Actions, fatal application failures produce sanitized `::error::` annotations and meaningful suspicious diagnostics produce a sanitized `::warning::`; ordinary ignored calendar events do not produce annotations. The job summary records mode and trigger, applied or proposed assignment and course counts, feed diagnostic counts, Notion request/retry metrics, removal-inference state, and a one-line failure summary without stacks. Summary-file I/O is best-effort: an append failure emits a sanitized warning but cannot change the synchronization result or exit status, and workflow annotations are still attempted. Normal logs retain sanitized diagnostic stacks. CI validates workflow syntax and expressions with pinned actionlint v1.7.12. GitHub-maintained actions are pinned to immutable commits, and npm caching uses `package-lock.json`.
-
-### GitHub email notifications
 
 No SMTP or external mail service is used. In GitHub notification settings, enable email or web notifications for failed Actions workflows. Watch this repository for new issues and issue updates, and subscribe to the `Canvas–Notion sync is unhealthy` issue when it is created. GitHub owns notification delivery.
 
@@ -180,8 +170,6 @@ Canvas HTML is sanitized, converted to readable Markdown, and stored completely 
 
 The Sync Log separates planned changes from successfully applied changes, failed or ambiguous work, and operations that were not attempted. Live create metrics distinguish confirmed normal creates from ambiguous creates later recovered as existing: logical pages added equals `created + recovered` for both courses and assignments. Recovery never increments the confirmed-create counter, and recovered applied operations are labeled accordingly. Dry-run counts remain proposed operations rather than runtime create/recovery metrics. Debug logs, the Sync Log body, and the GitHub job summary distinguish description audits, audit-only passes, repairs, managed-section replacements, and avoided body reads alongside the existing non-sensitive request/retry, recovery, course, and assignment-page metrics.
 
-Extension authors should note that normalized assignments no longer carry unused `sourceUpdatedAt` or per-assignment `rawClassificationEvidence`, raw calendar events no longer retain unused `end` or `sequence`, and assignment updates no longer expose a redundant `reactivate` flag. Classification evidence remains available in structured feed diagnostics.
-
 ### Removal safety
 
 Assignments are never deleted. A safe scheduled run records a first in-window absence in `Canvas Missing Since` and `Canvas Missing Count` without marking the assignment removed. Later safe scheduled runs advance the count; removal requires at least two safe scheduled absences, a count of at least two, and the configured minimum interval since the first observation. A second run before that interval only advances evidence. Manual live runs report candidates but never advance the count. Dry-run follows its declared trigger and shows proposed transitions without writes.
@@ -201,4 +189,4 @@ Common failures:
 - **Unexpected empty feed:** no removals occur. Check Canvas feed availability and privacy settings.
 - **Rate limiting/transient errors:** 429 responses use bounded backoff. Ambiguous 5xx responses are retried only for safe reads and deterministic updates; creates and appends use reconciliation.
 
-`npm audit` reports zero known vulnerabilities for the committed lockfile. Dependabot monitors npm and GitHub Actions dependencies.
+CI runs `npm audit`, and Dependabot monitors npm and GitHub Actions dependencies.

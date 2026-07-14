@@ -1,8 +1,7 @@
 import ical from "node-ical";
-import type { AssignmentType, AssignmentFeed, FeedEventDiagnostic } from "../types.js";
+import type { AssignmentFeed, FeedEventDiagnostic } from "../types.js";
 import { classifyEvent } from "./classify-event.js";
 import {
-  compileAssignmentTypeMatcher,
   normalizeAssignment,
   type AssignmentTypeMatcher,
   type RawCalendarEvent,
@@ -50,7 +49,7 @@ function toEvent(value: unknown): RawCalendarEvent | undefined {
 
 export function parseIcs(
   source: string,
-  rulesOrMatcher: Array<{ type: AssignmentType; patterns: string[] }> | AssignmentTypeMatcher,
+  assignmentTypeMatcher: AssignmentTypeMatcher,
 ): AssignmentFeed {
   if (
     !source.trimStart().startsWith("BEGIN:VCALENDAR") ||
@@ -67,11 +66,6 @@ export function parseIcs(
   if (!parsed || typeof parsed !== "object") {
     throw new Error("Canvas feed parser returned no calendar data");
   }
-  const assignmentTypeMatcher =
-    typeof rulesOrMatcher === "function"
-      ? rulesOrMatcher
-      : compileAssignmentTypeMatcher(rulesOrMatcher);
-
   // node-ical indexes VEVENTs by UID, so retain source identity before that index collapses it.
   const rawEvents = source.split(/^BEGIN:VEVENT\r?$/gim).slice(1);
   const sourceUids = rawEvents

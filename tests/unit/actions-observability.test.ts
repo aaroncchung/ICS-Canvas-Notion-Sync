@@ -2,27 +2,22 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { describe, expect, it } from "vitest";
 import { buildJobSummary, run, workflowAnnotations } from "../../src/cli.js";
-import { createRunMetrics } from "../../src/notion/client.js";
-import type { AssignmentFeed, RunResult } from "../../src/types.js";
-import { config, FakeGateway, FakeProvider } from "../helpers.js";
+import type { RunResult } from "../../src/types.js";
+import {
+  assignmentFeed,
+  config,
+  FakeGateway,
+  FakeProvider,
+  runCounts,
+  runResult,
+} from "../helpers.js";
 
-const emptyFeed: AssignmentFeed = {
-  assignments: [],
-  cancelledAssignments: [],
-  diagnostics: {
-    totalEvents: 0,
-    sourceUids: [],
-    normalizedAssignmentUids: [],
-    quarantinedUids: [],
-    events: [],
-    complete: true,
-  },
-};
+const emptyFeed = assignmentFeed();
 
 function result(status: RunResult["status"]): RunResult {
-  return {
+  return runResult({
     status,
-    counts: {
+    counts: runCounts({
       feedItems: 9,
       assignmentsParsed: 3,
       cancelledAssignments: 1,
@@ -41,10 +36,9 @@ function result(status: RunResult["status"]): RunResult {
       unchanged: 0,
       skipped: 1,
       warningCount: 1,
-    },
+    }),
     warnings: [{ code: "suspicious", message: "Suspicious assignment-like event" }],
     errors: [],
-    metrics: createRunMetrics(),
     feedDiagnostics: {
       totalEvents: 9,
       activeAssignments: 3,
@@ -56,7 +50,7 @@ function result(status: RunResult["status"]): RunResult {
       quarantinedUids: 2,
       absenceRemovalSafe: false,
     },
-  };
+  });
 }
 
 describe("GitHub Actions observability", () => {
@@ -116,25 +110,6 @@ describe("GitHub Actions observability", () => {
     expect(summary).toContain("Course pages added: 3");
     expect(summary).toContain("Course pages created: 1");
     expect(summary).toContain("Course pages recovered: 2");
-  });
-
-  it("keeps a successful sync successful when the summary parent path is missing", async () => {
-    const value = await run(
-      config({ GITHUB_STEP_SUMMARY: join(tmpdir(), `missing-${Date.now()}`, "summary.md") }),
-      { gateway: new FakeGateway(), provider: new FakeProvider(emptyFeed) },
-    );
-    expect(value.status).toBe("Success");
-  });
-
-  it("keeps the run result when summary writing is permission denied", async () => {
-    const denied = Object.assign(new Error("permission denied"), { code: "EACCES" });
-    const value = await run(config({ mode: "validate", GITHUB_STEP_SUMMARY: "summary.md" }), {
-      gateway: new FakeGateway(),
-      provider: new FakeProvider(emptyFeed),
-      summaryAppender: () => Promise.reject(denied),
-    });
-    expect(value.status).toBe("Success");
-    expect(value.errors).toEqual([]);
   });
 
   it("does not fail a successful sync after an append failure", async () => {

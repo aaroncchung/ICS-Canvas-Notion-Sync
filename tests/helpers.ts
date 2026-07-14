@@ -1,8 +1,14 @@
 import type { AppConfig } from "../src/config.js";
-import type { AssignmentFeed, AssignmentProvider } from "../src/types.js";
+import type { AssignmentFeed, AssignmentProvider, RunCounts, RunResult } from "../src/types.js";
 import { createRunMetrics, type NotionGateway } from "../src/notion/client.js";
+import {
+  compileAssignmentTypeMatcher,
+  type AssignmentTypeMatcher,
+} from "../src/canvas/normalize-assignment.js";
+import { MANAGED_DESCRIPTION_TITLE } from "../src/notion/descriptions.js";
+import { blockText } from "../src/notion/managed-section.js";
 
-export const rules: AppConfig["assignmentTypeRules"] = [
+const rules: AppConfig["assignmentTypeRules"] = [
   { type: "Quiz", patterns: ["quiz"] },
   { type: "Exam", patterns: ["exam", "test"] },
   { type: "Lab", patterns: ["lab"] },
@@ -11,6 +17,59 @@ export const rules: AppConfig["assignmentTypeRules"] = [
   { type: "Reading", patterns: ["reading"] },
   { type: "Homework", patterns: ["homework", "problem set", "pset"] },
 ];
+
+export const assignmentTypeMatcher: AssignmentTypeMatcher = compileAssignmentTypeMatcher(rules);
+
+export function assignmentFeed(overrides: Partial<AssignmentFeed> = {}): AssignmentFeed {
+  return {
+    assignments: [],
+    cancelledAssignments: [],
+    diagnostics: {
+      totalEvents: 0,
+      sourceUids: [],
+      normalizedAssignmentUids: [],
+      quarantinedUids: [],
+      events: [],
+      complete: true,
+    },
+    ...overrides,
+  };
+}
+
+export function runCounts(overrides: Partial<RunCounts> = {}): RunCounts {
+  return {
+    feedItems: 0,
+    assignmentsParsed: 0,
+    cancelledAssignments: 0,
+    ignoredEvents: 0,
+    suspiciousEvents: 0,
+    malformedEvents: 0,
+    duplicateUids: 0,
+    quarantinedUids: 0,
+    created: 0,
+    updated: 0,
+    coursesUpdated: 0,
+    removed: 0,
+    missingObserved: 0,
+    missingAdvanced: 0,
+    missingCleared: 0,
+    unchanged: 0,
+    skipped: 0,
+    warningCount: 0,
+    ...overrides,
+  };
+}
+
+export function runResult(overrides: Partial<RunResult> = {}): RunResult {
+  return {
+    status: "Success",
+    counts: runCounts(),
+    warnings: [],
+    errors: [],
+    metrics: createRunMetrics(),
+    ...overrides,
+  };
+}
 
 export function config(overrides: Partial<AppConfig> = {}): AppConfig {
   return {
@@ -108,96 +167,6 @@ const logSchema = schema({
   "Commit SHA": "rich_text",
 });
 
-export class FakeGateway implements NotionGateway {
-  public readonly metrics = createRunMetrics();
-  public assignments: Array<Record<string, unknown>> = [];
-  public courses: Array<Record<string, unknown>> = [];
-  public writes: Array<{ kind: string; id: string; value?: unknown }> = [];
-  public readonly listBlocksCalls = new Map<string, number>();
-  public failOnAssignmentWrite = false;
-  private sequence = 0;
-  private readonly blocks = new Map<string, Array<Record<string, unknown>>>();
-
-  public async retrieveDataSource(id: string): Promise<Record<string, unknown>> {
-    return Promise.resolve(
-      id === "assignments" ? assignmentSchema : id === "courses" ? courseSchema : logSchema,
-    );
-  }
-
-  public async queryDataSource(id: string): Promise<Array<Record<string, unknown>>> {
-    return Promise.resolve(id === "assignments" ? this.assignments : this.courses);
-  }
-
-  public async createPage(id: string, properties: Record<string, unknown>): Promise<string> {
-    if (this.failOnAssignmentWrite && id === "assignments")
-      throw Object.assign(new Error("write failed"), { status: 400 });
-    const pageId = `${id}-${++this.sequence}`;
-    this.writes.push({ kind: "create", id, value: properties });
-    if (id === "assignments") {
-      this.blocks.set(pageId, [
-        { id: `${pageId}-template`, type: "paragraph", paragraph: { rich_text: [] } },
-      ]);
-    }
-    return Promise.resolve(pageId);
-  }
-
-  public async updatePage(pageId: string, properties: Record<string, unknown>): Promise<void> {
-    if (this.failOnAssignmentWrite && pageId.startsWith("assignment"))
-      throw new Error("write failed");
-    this.writes.push({ kind: "update", id: pageId, value: properties });
-    return Promise.resolve();
-  }
-
-  public async updateBlock(blockId: string, block: Record<string, unknown>): Promise<void> {
-    this.writes.push({ kind: "update-block", id: blockId, value: block });
-    for (const values of this.blocks.values()) {
-      const index = values.findIndex((candidate) => candidate.id === blockId);
-      if (index >= 0) {
-        const current = values[index]!;
-        values[index] = materializeBlock(blockId, { ...current, ...block });
-      }
-    }
-    return Promise.resolve();
-  }
-
-  public async listBlocks(pageId: string): Promise<Array<Record<string, unknown>>> {
-    this.listBlocksCalls.set(pageId, (this.listBlocksCalls.get(pageId) ?? 0) + 1);
-    return Promise.resolve(this.blocks.get(pageId) ?? []);
-  }
-
-  public listBlocksCallCount(parentId: string): number {
-    return this.listBlocksCalls.get(parentId) ?? 0;
-  }
-
-  public totalListBlocksCalls(): number {
-    return [...this.listBlocksCalls.values()].reduce((total, count) => total + count, 0);
-  }
-
-  public async appendBlocks(
-    parentId: string,
-    children: Array<Record<string, unknown>>,
-  ): Promise<string[]> {
-    this.writes.push({ kind: "append", id: parentId, value: children });
-    const ids = children.map(() => `${parentId}-block-${++this.sequence}`);
-    const values = this.blocks.get(parentId) ?? [];
-    values.push(...children.map((child, index) => materializeBlock(ids[index]!, child)));
-    this.blocks.set(parentId, values);
-    return Promise.resolve(ids);
-  }
-
-  public async deleteBlock(blockId: string): Promise<void> {
-    this.writes.push({ kind: "delete", id: blockId });
-    for (const [parentId, values] of this.blocks) {
-      this.blocks.set(
-        parentId,
-        values.filter((block) => block.id !== blockId),
-      );
-    }
-    this.blocks.delete(blockId);
-    return Promise.resolve();
-  }
-}
-
 type SimulatedFailure = {
   id: string;
   status?: number;
@@ -258,18 +227,47 @@ function materializeBlock(id: string, source: Record<string, unknown>): Record<s
   return { ...source, id, type, [type]: { ...record, rich_text: richText } };
 }
 
-export class StatefulFakeGateway implements NotionGateway {
+export class FakeGateway implements NotionGateway {
   public readonly metrics = createRunMetrics();
   public readonly pages = new Map<string, Array<Record<string, unknown>>>();
   public readonly blocks = new Map<string, Array<Record<string, unknown>>>();
+  public readonly assignments: Array<Record<string, unknown>> = [];
+  public readonly courses: Array<Record<string, unknown>> = [];
   public readonly writes: Array<{ kind: string; id: string; value?: unknown }> = [];
   public readonly listBlocksCalls = new Map<string, number>();
-  public readonly createFailures: SimulatedFailure[] = [];
-  public readonly appendFailures: SimulatedFailure[] = [];
-  public readonly updateFailures: SimulatedFailure[] = [];
-  public readonly deleteFailures: SimulatedFailure[] = [];
-  public readonly queryVisibilityMisses = new Map<string, number>();
+  private readonly createFailures: SimulatedFailure[] = [];
+  private readonly appendFailures: SimulatedFailure[] = [];
+  private readonly updateFailures: SimulatedFailure[] = [];
+  private readonly deleteFailures: SimulatedFailure[] = [];
+  private readonly queryVisibilityMisses = new Map<string, number>();
+  public failOnAssignmentWrite = false;
+  public simulateDefaultTemplate = false;
   private sequence = 0;
+
+  public constructor() {
+    this.pages.set("assignments", this.assignments);
+    this.pages.set("courses", this.courses);
+  }
+
+  public failCreate(...failures: SimulatedFailure[]): void {
+    this.createFailures.push(...failures);
+  }
+
+  public failAppend(...failures: SimulatedFailure[]): void {
+    this.appendFailures.push(...failures);
+  }
+
+  public failUpdate(...failures: SimulatedFailure[]): void {
+    this.updateFailures.push(...failures);
+  }
+
+  public failDelete(...failures: SimulatedFailure[]): void {
+    this.deleteFailures.push(...failures);
+  }
+
+  public delayVisibility(dataSourceId: string, observations: number): void {
+    this.queryVisibilityMisses.set(dataSourceId, observations);
+  }
 
   public seedPage(dataSourceId: string, id: string, properties: Record<string, unknown>): void {
     const pages = this.pages.get(dataSourceId) ?? [];
@@ -318,16 +316,31 @@ export class StatefulFakeGateway implements NotionGateway {
   }
 
   public async createPage(id: string, properties: Record<string, unknown>): Promise<string> {
+    if (this.failOnAssignmentWrite && id === "assignments") {
+      throw Object.assign(new Error("write failed"), { status: 400 });
+    }
     const failureIndex = this.createFailures.findIndex((failure) => failure.id === id);
     const failure = failureIndex >= 0 ? this.createFailures.splice(failureIndex, 1)[0] : undefined;
     const newPageId = `${id}-${++this.sequence}`;
     this.writes.push({ kind: "create", id, value: properties });
-    if (!failure || failure.applied) this.seedPage(id, newPageId, properties);
+    if (!failure || failure.applied) {
+      this.seedPage(id, newPageId, properties);
+      if (id === "assignments" && this.simulateDefaultTemplate) {
+        this.seedBlock(newPageId, {
+          id: `${newPageId}-template`,
+          type: "paragraph",
+          paragraph: { rich_text: [] },
+        });
+      }
+    }
     if (failure) throw simulatedFailure("simulated create failure", failure);
     return Promise.resolve(newPageId);
   }
 
   public async updatePage(pageId: string, properties: Record<string, unknown>): Promise<void> {
+    if (this.failOnAssignmentWrite && pageId.startsWith("assignment")) {
+      throw new Error("write failed");
+    }
     const failureIndex = this.updateFailures.findIndex((failure) => failure.id === pageId);
     const failure = failureIndex >= 0 ? this.updateFailures.splice(failureIndex, 1)[0] : undefined;
     this.writes.push({ kind: "update", id: pageId, value: properties });
@@ -410,6 +423,16 @@ export class FakeProvider implements AssignmentProvider {
   }
 }
 
-export function pageProperty(type: string, value: unknown): Record<string, unknown> {
-  return { type, [type]: value };
+export async function readManagedDescription(
+  gateway: NotionGateway,
+  pageId: string,
+): Promise<string | undefined> {
+  if (gateway.metrics) gateway.metrics.assignmentBodyReads += 1;
+  const blocks = await gateway.listBlocks(pageId);
+  const marker = blocks.find(
+    (block) => block.type === "toggle" && blockText(block) === MANAGED_DESCRIPTION_TITLE,
+  );
+  if (!marker || typeof marker.id !== "string") return;
+  const value = (await gateway.listBlocks(marker.id)).map(blockText).join("");
+  return value === "No description provided." ? "" : value;
 }

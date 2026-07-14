@@ -163,7 +163,6 @@ export class OfficialNotionGateway implements NotionGateway {
         this.client.dataSources.query(request as Parameters<Client["dataSources"]["query"]>[0]),
       )) as unknown as {
         results: Array<Record<string, unknown>>;
-        has_more: boolean;
         next_cursor: string | null;
       };
       results.push(...response.results);
@@ -231,7 +230,6 @@ export class OfficialNotionGateway implements NotionGateway {
         }),
       )) as unknown as {
         results: Array<Record<string, unknown>>;
-        has_more: boolean;
         next_cursor: string | null;
       };
       results.push(...response.results);

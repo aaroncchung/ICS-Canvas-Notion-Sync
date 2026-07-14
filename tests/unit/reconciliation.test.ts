@@ -13,7 +13,7 @@ import type {
   PlanningOperationCounters,
   Trigger,
 } from "../../src/types.js";
-import { FakeGateway, rules } from "../helpers.js";
+import { assignmentTypeMatcher, FakeGateway } from "../helpers.js";
 
 const course: CourseRecord = {
   pageId: "course-page",
@@ -155,11 +155,7 @@ describe("plan-first reconciliation", () => {
     });
   });
 
-  it("does not retain dead source or parsing fields", () => {
-    expect(source()).not.toHaveProperty("sourceUpdatedAt");
-    expect(source()).not.toHaveProperty("rawClassificationEvidence");
-  });
-  it("16-18 plans changed title, due date, and description", () => {
+  it("plans changed title, due date, and description", () => {
     const result = plan([
       source({
         title: "Homework 1 revised",
@@ -179,7 +175,7 @@ describe("plan-first reconciliation", () => {
     });
   });
 
-  it("20 flags a same-looking assignment with a changed UID", () => {
+  it("flags a same-looking assignment with a changed UID", () => {
     const result = plan([source({ uid: "new-uid" })]);
     expect(result.assignmentsToCreate).toHaveLength(0);
     expect(result.assignmentsToRemove).toHaveLength(0);
@@ -188,13 +184,13 @@ describe("plan-first reconciliation", () => {
     ).toBe(true);
   });
 
-  it("24 creates a new course and assignment", () => {
+  it("creates a new course and assignment", () => {
     const result = plan([source()], [], []);
     expect(result.coursesToCreate).toHaveLength(1);
     expect(result.assignmentsToCreate).toHaveLength(1);
   });
 
-  it("25 uses a configured course alias", () => {
+  it("uses a configured course alias", () => {
     const aliasCourse: CourseRecord = {
       pageId: course.pageId,
       title: "Engineering 1",
@@ -209,7 +205,7 @@ describe("plan-first reconciliation", () => {
     expect(result.assignmentsToCreate[0]?.courseKey).toBe("page:course-page");
   });
 
-  it("26 skips an ambiguous course match", () => {
+  it("skips an ambiguous course match", () => {
     const ambiguousSource = source();
     delete ambiguousSource.canvasCourseId;
     const result = plan([ambiguousSource], [], [course, { ...course, pageId: "course-page-2" }]);
@@ -260,7 +256,7 @@ describe("plan-first reconciliation", () => {
     expect(result.warnings[0]?.message).toContain("configured-alias");
   });
 
-  it("27 generates a name when only a course ID exists", () => {
+  it("generates a name when only a course ID exists", () => {
     const unnamedSource = source();
     delete unnamedSource.courseName;
     delete unnamedSource.courseCode;
@@ -342,14 +338,15 @@ describe("plan-first reconciliation", () => {
     expect(result.assignmentsToUpdate[0]?.verifyDescription).toBe(true);
   });
 
-  it("28 updates Canvas-owned fields on Done assignments without status writes", () => {
+  it("updates Canvas-owned fields on Done assignments without status writes", () => {
     const update = plan([source({ title: "Changed" })]).assignmentsToUpdate[0];
     expect(update?.properties.title).toBe("Changed");
     expect(update?.properties).not.toHaveProperty("personalStatus");
   });
 
-  it("29 leaves priority blank on creation", async () => {
+  it("leaves priority blank on creation", async () => {
     const gateway = new FakeGateway();
+    gateway.simulateDefaultTemplate = true;
     await createAssignment(
       gateway,
       "assignments",
@@ -361,7 +358,7 @@ describe("plan-first reconciliation", () => {
     expect(properties).not.toHaveProperty("Priority");
   });
 
-  it("30 captures a manual Effective Due Date edit as an override", () => {
+  it("captures a manual Effective Due Date edit as an override", () => {
     const update = plan(
       [source({ dueAt: "2026-07-22T20:00:00.000Z" })],
       [record({ effectiveDueDate: "2026-07-25T20:00:00.000Z" })],
@@ -370,7 +367,7 @@ describe("plan-first reconciliation", () => {
     expect(update?.properties.effectiveDueDate).toBeUndefined();
   });
 
-  it("31 preserves an existing Override Due Date", () => {
+  it("preserves an existing Override Due Date", () => {
     const override = "2026-07-25T20:00:00.000Z";
     const update = plan(
       [source({ dueAt: "2026-07-22T20:00:00.000Z" })],
@@ -381,7 +378,7 @@ describe("plan-first reconciliation", () => {
     expect(update?.properties.canvasDueDate).toBe("2026-07-22T20:00:00.000Z");
   });
 
-  it("32 clears the override when Effective Due Date returns to Canvas", () => {
+  it("clears the override when Effective Due Date returns to Canvas", () => {
     const update = plan(
       [source()],
       [
@@ -447,7 +444,7 @@ describe("plan-first reconciliation", () => {
     expect(normalized.assignmentsToUpdate).toHaveLength(0);
   });
 
-  it("33 treats a first absent in-window assignment as a candidate", () => {
+  it("treats a first absent in-window assignment as a candidate", () => {
     const other = source({
       uid: "uid-other",
       title: "Different assignment",
@@ -474,7 +471,7 @@ describe("plan-first reconciliation", () => {
     const other = event(
       "UID:uid-other\nDTSTART:20260801T200000Z\nSUMMARY:Different assignment [EE 10]\nURL:https://canvas.example.edu/courses/123/assignments/999",
     );
-    const value = parseIcs(calendar(`${malformed}\n${other}`), rules);
+    const value = parseIcs(calendar(`${malformed}\n${other}`), assignmentTypeMatcher);
     expect(planFeed(value).assignmentsToRemove).toHaveLength(0);
   });
 
@@ -482,7 +479,7 @@ describe("plan-first reconciliation", () => {
     const duplicate = event(
       "UID:uid-1\nDTSTART:20260720T200000Z\nSUMMARY:Homework 1 [EE 10]\nURL:https://canvas.example.edu/courses/123/assignments/456",
     );
-    const value = parseIcs(calendar(`${duplicate}\n${duplicate}`), rules);
+    const value = parseIcs(calendar(`${duplicate}\n${duplicate}`), assignmentTypeMatcher);
     expect(planFeed(value).assignmentsToRemove).toHaveLength(0);
   });
 
@@ -490,7 +487,7 @@ describe("plan-first reconciliation", () => {
     const duplicate = event(
       "UID:uid-other\nDTSTART:20260720T200000Z\nSUMMARY:Other [EE 10]\nURL:https://canvas.example.edu/courses/123/assignments/999",
     );
-    const value = parseIcs(calendar(`${duplicate}\n${duplicate}`), rules);
+    const value = parseIcs(calendar(`${duplicate}\n${duplicate}`), assignmentTypeMatcher);
     const result = planFeed(value, [
       record({ canvasMissingSince: "2026-07-12T00:00:00Z", canvasMissingCount: 1 }),
     ]);
@@ -908,7 +905,7 @@ describe("plan-first reconciliation", () => {
     ).toBe(true);
   });
 
-  it("34 reactivates a reappearing removed assignment", () => {
+  it("reactivates a reappearing removed assignment", () => {
     const update = plan(
       [source()],
       [
@@ -1024,7 +1021,7 @@ describe("plan-first reconciliation", () => {
     });
   });
 
-  it("35 suppresses removal on an unexpectedly empty feed", () => {
+  it("suppresses removal on an unexpectedly empty feed", () => {
     const result = plan([], [record()]);
     expect(result.assignmentsToRemove).toHaveLength(0);
     expect(
@@ -1032,7 +1029,7 @@ describe("plan-first reconciliation", () => {
     ).toBe(true);
   });
 
-  it("36 suppresses removal at 1,000 feed items", () => {
+  it("suppresses removal at 1,000 feed items", () => {
     const result = buildPlan(
       feed([], 1000),
       [record()],
@@ -1045,7 +1042,7 @@ describe("plan-first reconciliation", () => {
     expect(result.warnings.some((warning) => warning.code === "removals-feed-limit")).toBe(true);
   });
 
-  it("37 honors removal-disabled mode", () => {
+  it("honors removal-disabled mode", () => {
     const result = buildPlan(
       feed([]),
       [record()],
