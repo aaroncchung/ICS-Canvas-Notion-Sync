@@ -6,11 +6,15 @@ export function detectRemovals(
   feed: AssignmentFeed,
   existing: AssignmentRecord[],
   disableRemovals: boolean,
+  protectedPageIds: ReadonlySet<string>,
   now = new Date(),
 ): { removals: AssignmentRecord[]; warnings: PlanWarning[] } {
   const warnings: PlanWarning[] = [];
   if (disableRemovals) return { removals: [], warnings };
-  if (!feed.diagnostics.complete || feed.diagnostics.malformedEvents > 0) {
+  const unidentifiableAssignmentLikeEvent = feed.diagnostics.events.some(
+    (event) => (event.kind === "malformed" || event.kind === "suspicious") && !event.uid,
+  );
+  if (!feed.diagnostics.complete || unidentifiableAssignmentLikeEvent) {
     warnings.push({
       code: "removals-unsafe-parse",
       message: "Removal detection skipped after parse warnings",
@@ -24,18 +28,27 @@ export function detectRemovals(
     });
     return { removals: [], warnings };
   }
-  if (feed.assignments.length === 0 && existing.length > 0) {
+  if (feed.diagnostics.totalEvents === 0 && existing.length > 0) {
     warnings.push({
       code: "unexpected-empty-feed",
       message: "Removal detection skipped because the feed unexpectedly contained no assignments",
     });
     return { removals: [], warnings };
   }
-  const present = new Set(feed.assignments.map((assignment) => assignment.uid));
+  const present = new Set([
+    ...feed.diagnostics.sourceUids,
+    ...feed.diagnostics.normalizedAssignmentUids,
+    ...feed.diagnostics.quarantinedUids,
+  ]);
   const earliest = now.getTime() - 30 * DAY;
   const latest = now.getTime() + 366 * DAY;
   const removals = existing.filter((assignment) => {
-    if (assignment.removed || present.has(assignment.uid) || !assignment.canvasDueDate)
+    if (
+      assignment.removed ||
+      present.has(assignment.uid) ||
+      protectedPageIds.has(assignment.pageId) ||
+      !assignment.canvasDueDate
+    )
       return false;
     const due = Date.parse(assignment.canvasDueDate);
     return !Number.isNaN(due) && due >= earliest && due <= latest;

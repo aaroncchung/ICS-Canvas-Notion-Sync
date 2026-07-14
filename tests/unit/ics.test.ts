@@ -75,19 +75,22 @@ describe("RFC 5545 Canvas parsing", () => {
     expect(parseIcs(source, rules).assignments).toHaveLength(1);
   });
 
-  it("19 reports duplicate UIDs without importing twice", () => {
+  it("19 quarantines every event with a duplicate source UID", () => {
     const one = event(
       "UID:event-assignment-77@canvas\nDTSTART:20260701T120000Z\nSUMMARY:A\nURL:https://x.test/courses/1/assignments/77",
     );
     const parsed = parseIcs(calendar(`${one}\n${one}`), rules);
-    expect(parsed.assignments).toHaveLength(1);
-    expect(parsed.diagnostics.duplicateUids).toHaveLength(1);
+    expect(parsed.assignments).toHaveLength(0);
+    expect(parsed.diagnostics.sourceUids).toEqual(["event-assignment-77@canvas"]);
+    expect(parsed.diagnostics.quarantinedUids).toEqual(["event-assignment-77@canvas"]);
+    expect(parsed.diagnostics.events.filter((item) => item.kind === "duplicate")).toHaveLength(1);
   });
 
   it("21 excludes ordinary Canvas calendar events", async () => {
     const parsed = parseIcs(await fixture("calendar-event.ics"), rules);
     expect(parsed.assignments).toEqual([]);
-    expect(parsed.diagnostics.skippedEvents[0]?.reason).toBe("insufficient-assignment-evidence");
+    expect(parsed.diagnostics.ignoredEventCount).toBe(1);
+    expect(parsed.diagnostics.events[0]?.reason).toBe("ordinary-calendar-event");
   });
 
   it("22 skips a malformed individual assignment", () => {
@@ -99,7 +102,34 @@ describe("RFC 5545 Canvas parsing", () => {
     );
     const parsed = parseIcs(calendar(`${malformed}\n${valid}`), rules);
     expect(parsed.assignments).toHaveLength(1);
-    expect(parsed.diagnostics.malformedEvents).toBe(1);
+    expect(parsed.diagnostics.events.filter((item) => item.kind === "malformed")).toHaveLength(1);
+    expect(parsed.diagnostics.quarantinedUids).toContain("event-assignment-77@canvas");
+  });
+
+  it("quarantines suspicious assignment-like events", () => {
+    const suspicious = event(
+      "UID:changed-format-77@canvas\nDTSTART:20260701T120000Z\nSUMMARY:Quiz 2 [EE 10]\nCATEGORIES:Assignment",
+    );
+    const parsed = parseIcs(calendar(suspicious), rules);
+    expect(parsed.assignments).toHaveLength(0);
+    expect(parsed.diagnostics.events[0]).toMatchObject({
+      kind: "suspicious",
+      reason: "assignment-like-event",
+      uid: "changed-format-77@canvas",
+    });
+  });
+
+  it("normalizes cancelled assignments separately from active assignments", () => {
+    const cancelled = event(
+      "UID:event-assignment-77@canvas\nDTSTART:20260701T120000Z\nSUMMARY:Quiz 2 [EE 10]\nURL:https://x.test/courses/1/assignments/77\nSTATUS:CANCELLED",
+    );
+    const parsed = parseIcs(calendar(cancelled), rules);
+    expect(parsed.assignments).toHaveLength(0);
+    expect(parsed.cancelledAssignments).toHaveLength(1);
+    expect(parsed.diagnostics.events[0]).toMatchObject({
+      kind: "cancelled",
+      uid: "event-assignment-77@canvas",
+    });
   });
 
   it("23 rejects a malformed complete calendar", () => {

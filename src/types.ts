@@ -33,17 +33,52 @@ export interface AssignmentProvider {
   fetchAssignments(): Promise<ExternalAssignment[]>;
 }
 
+export type FeedEventDiagnostic =
+  | {
+      kind: "ignored";
+      reason: "ordinary-calendar-event";
+      uid?: string;
+      indicators: string[];
+    }
+  | {
+      kind: "suspicious";
+      reason: "assignment-like-event";
+      uid?: string;
+      indicators: string[];
+    }
+  | {
+      kind: "malformed";
+      reason: "malformed-assignment-event" | "unparseable-event";
+      uid?: string;
+      indicators: string[];
+    }
+  | {
+      kind: "duplicate";
+      reason: "duplicate-source-uid";
+      uid: string;
+      indicators: string[];
+    }
+  | {
+      kind: "cancelled";
+      reason: "cancelled-assignment";
+      uid: string;
+      indicators: string[];
+    };
+
 export interface FeedDiagnostics {
   totalEvents: number;
   assignmentsParsed: number;
-  duplicateUids: string[];
-  malformedEvents: number;
-  skippedEvents: Array<{ reason: string; indicators: string[] }>;
+  sourceUids: string[];
+  normalizedAssignmentUids: string[];
+  quarantinedUids: string[];
+  events: FeedEventDiagnostic[];
+  ignoredEventCount: number;
   complete: boolean;
 }
 
 export interface AssignmentFeed {
   assignments: ExternalAssignment[];
+  cancelledAssignments: ExternalAssignment[];
   diagnostics: FeedDiagnostics;
 }
 

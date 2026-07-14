@@ -72,7 +72,7 @@ export async function run(
     if (!feed) throw new Error("Assignment provider did not supply feed diagnostics");
     counts.feedItems = feed.diagnostics.totalEvents;
     counts.assignmentsParsed = sourceAssignments.length;
-    counts.skipped = feed.diagnostics.skippedEvents.length;
+    counts.skipped = feed.diagnostics.events.length;
 
     if (config.mode === "validate") {
       result = { status: "Success", counts, warnings: [], errors: [] };

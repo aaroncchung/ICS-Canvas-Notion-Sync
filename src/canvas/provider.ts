@@ -21,7 +21,8 @@ export class CanvasIcsProvider implements AssignmentProvider {
       {
         feedItems: this.lastFeed.diagnostics.totalEvents,
         assignments: this.lastFeed.assignments.length,
-        skipped: this.lastFeed.diagnostics.skippedEvents.length,
+        skipped: this.lastFeed.diagnostics.events.length,
+        ignored: this.lastFeed.diagnostics.ignoredEventCount,
       },
       "Canvas ICS feed parsed",
     );

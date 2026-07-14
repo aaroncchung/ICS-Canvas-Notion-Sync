@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { parseIcs } from "../../src/canvas/parse-ics.js";
 import { createAssignment } from "../../src/notion/assignments.js";
 import { buildPlan } from "../../src/sync/plan.js";
 import type {
@@ -7,7 +8,7 @@ import type {
   CourseRecord,
   ExternalAssignment,
 } from "../../src/types.js";
-import { FakeGateway } from "../helpers.js";
+import { FakeGateway, rules } from "../helpers.js";
 
 const course: CourseRecord = {
   pageId: "course-page",
@@ -15,6 +16,14 @@ const course: CourseRecord = {
   courseCode: "EE 10",
   canvasCourseId: "123",
 };
+
+function calendar(events: string): string {
+  return `BEGIN:VCALENDAR\nVERSION:2.0\nPRODID:-//Test//EN\n${events}\nEND:VCALENDAR`;
+}
+
+function event(values: string): string {
+  return `BEGIN:VEVENT\n${values}\nEND:VEVENT`;
+}
 
 function source(overrides: Partial<ExternalAssignment> = {}): ExternalAssignment {
   return {
@@ -53,16 +62,31 @@ function record(overrides: Partial<AssignmentRecord> = {}): AssignmentRecord {
   };
 }
 
-function feed(assignments: ExternalAssignment[], totalEvents = assignments.length): AssignmentFeed {
+function feed(
+  assignments: ExternalAssignment[],
+  totalEvents = assignments.length,
+  options: {
+    cancelledAssignments?: ExternalAssignment[];
+    diagnostics?: Partial<AssignmentFeed["diagnostics"]>;
+  } = {},
+): AssignmentFeed {
+  const cancelledAssignments = options.cancelledAssignments ?? [];
+  const sourceUids = [...assignments, ...cancelledAssignments].map((assignment) => assignment.uid);
   return {
     assignments,
+    cancelledAssignments,
     diagnostics: {
       totalEvents,
       assignmentsParsed: assignments.length,
-      duplicateUids: [],
-      malformedEvents: 0,
-      skippedEvents: [],
+      sourceUids,
+      normalizedAssignmentUids: [...assignments, ...cancelledAssignments].map(
+        (assignment) => assignment.uid,
+      ),
+      quarantinedUids: [],
+      events: [],
+      ignoredEventCount: 0,
       complete: true,
+      ...options.diagnostics,
     },
   };
 }
@@ -73,14 +97,16 @@ function plan(
   courses: CourseRecord[] = [course],
   aliases: Record<string, string> = {},
 ) {
-  return buildPlan(
-    feed(assignments),
-    existing,
-    courses,
-    aliases,
-    false,
-    new Date("2026-07-13T12:00:00Z"),
-  );
+  return planFeed(feed(assignments), existing, courses, aliases);
+}
+
+function planFeed(
+  value: AssignmentFeed,
+  existing: AssignmentRecord[] = [record()],
+  courses: CourseRecord[] = [course],
+  aliases: Record<string, string> = {},
+) {
+  return buildPlan(value, existing, courses, aliases, false, new Date("2026-07-13T12:00:00Z"));
 }
 
 describe("plan-first reconciliation", () => {
@@ -113,6 +139,7 @@ describe("plan-first reconciliation", () => {
   it("20 flags a same-looking assignment with a changed UID", () => {
     const result = plan([source({ uid: "new-uid" })]);
     expect(result.assignmentsToCreate).toHaveLength(0);
+    expect(result.assignmentsToRemove).toHaveLength(0);
     expect(
       result.warnings.some((warning) => warning.code === "possible-assignment-duplicate"),
     ).toBe(true);
@@ -219,6 +246,160 @@ describe("plan-first reconciliation", () => {
     expect(plan([other], [record()]).assignmentsToRemove).toHaveLength(1);
   });
 
+  it("protects a raw assignment UID that could not be normalized", () => {
+    const malformed = event(
+      "UID:uid-1\nDTSTART:20260720T200000Z\nURL:https://canvas.example.edu/courses/123/assignments/456",
+    );
+    const other = event(
+      "UID:uid-other\nDTSTART:20260801T200000Z\nSUMMARY:Different assignment [EE 10]\nURL:https://canvas.example.edu/courses/123/assignments/999",
+    );
+    const value = parseIcs(calendar(`${malformed}\n${other}`), rules);
+    expect(planFeed(value).assignmentsToRemove).toHaveLength(0);
+  });
+
+  it("protects a duplicate source UID from removal", () => {
+    const duplicate = event(
+      "UID:uid-1\nDTSTART:20260720T200000Z\nSUMMARY:Homework 1 [EE 10]\nURL:https://canvas.example.edu/courses/123/assignments/456",
+    );
+    const value = parseIcs(calendar(`${duplicate}\n${duplicate}`), rules);
+    expect(planFeed(value).assignmentsToRemove).toHaveLength(0);
+  });
+
+  it("does not match title and date across different Canvas courses", () => {
+    const otherCourse: CourseRecord = {
+      pageId: "other-course-page",
+      title: "CS 20",
+      courseCode: "CS 20",
+      canvasCourseId: "999",
+    };
+    const incoming = source({
+      uid: "new-uid",
+      courseName: "CS 20",
+      courseCode: "CS 20",
+      canvasCourseId: "999",
+      canvasAssignmentId: "888",
+      canvasUrl: "https://canvas.example.edu/courses/999/assignments/888",
+    });
+    const result = plan([incoming], [record()], [course, otherCourse]);
+    expect(result.assignmentsToCreate).toHaveLength(1);
+    expect(
+      result.warnings.some((warning) => warning.code === "possible-assignment-duplicate"),
+    ).toBe(false);
+  });
+
+  it("matches title and date when course evidence is compatible", () => {
+    const incoming = source({ uid: "new-uid" });
+    delete incoming.canvasAssignmentId;
+    delete incoming.canvasUrl;
+    const candidate = record();
+    delete candidate.canvasUrl;
+    const result = plan([incoming], [candidate]);
+    expect(result.assignmentsToCreate).toHaveLength(0);
+    expect(
+      result.warnings.some((warning) => warning.code === "possible-assignment-duplicate"),
+    ).toBe(true);
+  });
+
+  it("uses an exact normalized Canvas assignment URL as strong duplicate evidence", () => {
+    const incoming = source({
+      uid: "new-uid",
+      title: "Unrelated title",
+      dueAt: "2026-08-02T20:00:00.000Z",
+      canvasUrl: "https://canvas.example.edu/courses/123/assignments/456/?module_item_id=9",
+    });
+    delete incoming.canvasAssignmentId;
+    const result = plan([incoming]);
+    expect(result.assignmentsToCreate).toHaveLength(0);
+    expect(
+      result.warnings.some((warning) => warning.code === "possible-assignment-duplicate"),
+    ).toBe(true);
+  });
+
+  it("does not create an active assignment for a cancelled new event", () => {
+    const value = feed([], 1, {
+      cancelledAssignments: [source({ uid: "cancelled-new" })],
+      diagnostics: {
+        sourceUids: ["cancelled-new"],
+        quarantinedUids: ["cancelled-new"],
+        events: [
+          {
+            kind: "cancelled",
+            reason: "cancelled-assignment",
+            uid: "cancelled-new",
+            indicators: ["status-cancelled"],
+          },
+        ],
+      },
+    });
+    const result = planFeed(value, []);
+    expect(result.assignmentsToCreate).toHaveLength(0);
+    expect(result.assignmentsToUpdate).toHaveLength(0);
+    expect(result.assignmentsToRemove).toHaveLength(0);
+  });
+
+  it("marks a cancelled existing assignment removed while retaining Notion-owned values", () => {
+    const existing = record({ priority: "High", assignmentType: "Quiz" });
+    const value = feed([], 1, {
+      cancelledAssignments: [source()],
+      diagnostics: {
+        sourceUids: ["uid-1"],
+        quarantinedUids: ["uid-1"],
+        events: [
+          {
+            kind: "cancelled",
+            reason: "cancelled-assignment",
+            uid: "uid-1",
+            indicators: ["status-cancelled"],
+          },
+        ],
+      },
+    });
+    expect(planFeed(value, [existing]).assignmentsToRemove[0]).toMatchObject({
+      pageId: "assignment-page",
+      personalStatus: "Done",
+      priority: "High",
+      assignmentType: "Quiz",
+    });
+  });
+
+  it("ignores ordinary calendar events without plan warnings", () => {
+    const value = feed([], 1, {
+      diagnostics: {
+        sourceUids: ["calendar-event"],
+        events: [
+          {
+            kind: "ignored",
+            reason: "ordinary-calendar-event",
+            uid: "calendar-event",
+            indicators: [],
+          },
+        ],
+        ignoredEventCount: 1,
+      },
+    });
+    expect(planFeed(value, []).warnings).toEqual([]);
+  });
+
+  it("warns for suspicious assignment-like events", () => {
+    const value = feed([], 1, {
+      diagnostics: {
+        sourceUids: ["suspicious-event"],
+        quarantinedUids: ["suspicious-event"],
+        events: [
+          {
+            kind: "suspicious",
+            reason: "assignment-like-event",
+            uid: "suspicious-event",
+            indicators: ["assignment-category"],
+          },
+        ],
+      },
+    });
+    expect(
+      planFeed(value, []).warnings.some((warning) => warning.code === "suspicious-feed-events"),
+    ).toBe(true);
+  });
+
   it("34 reactivates a reappearing removed assignment", () => {
     const update = plan([source()], [record({ removed: true, canvasState: "Removed" })])
       .assignmentsToUpdate[0];
@@ -262,6 +443,7 @@ describe("plan-first reconciliation", () => {
         source({
           uid: "uid-other",
           title: "Different assignment",
+          canvasAssignmentId: "999",
           canvasUrl: "https://canvas.example.edu/courses/123/assignments/999",
           dueAt: "2026-08-01T20:00:00.000Z",
         }),

@@ -7,7 +7,7 @@ export interface ClassificationInput {
 }
 
 export interface ClassificationResult {
-  isAssignment: boolean;
+  kind: "assignment" | "suspicious" | "ordinary";
   evidence: string[];
   canvasUrl?: string;
   canvasCourseId?: string;
@@ -47,8 +47,15 @@ export function classifyEvent(input: ClassificationInput): ClassificationResult 
     evidence.push("assignment-category");
   }
 
-  const isAssignment = Boolean(routeMatch || uidMatch);
-  const result: ClassificationResult = { isAssignment, evidence };
+  if (!routeMatch && fields.some((field) => /\/assignments(?:\/|\?|$)/i.test(field))) {
+    evidence.push("assignment-like-route");
+  }
+  if (!uidMatch && input.uid && /assignment/i.test(input.uid)) {
+    evidence.push("assignment-like-uid");
+  }
+
+  const kind = routeMatch || uidMatch ? "assignment" : evidence.length ? "suspicious" : "ordinary";
+  const result: ClassificationResult = { kind, evidence };
   if (canvasUrl) result.canvasUrl = canvasUrl;
   if (routeMatch?.[1]) result.canvasCourseId = routeMatch[1];
   if (routeMatch?.[2]) result.canvasAssignmentId = routeMatch[2];

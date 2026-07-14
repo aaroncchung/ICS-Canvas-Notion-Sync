@@ -12,12 +12,15 @@ import { config, FakeGateway, FakeProvider } from "../helpers.js";
 
 const emptyFeed: AssignmentFeed = {
   assignments: [],
+  cancelledAssignments: [],
   diagnostics: {
     totalEvents: 0,
     assignmentsParsed: 0,
-    duplicateUids: [],
-    malformedEvents: 0,
-    skippedEvents: [],
+    sourceUids: [],
+    normalizedAssignmentUids: [],
+    quarantinedUids: [],
+    events: [],
+    ignoredEventCount: 0,
     complete: true,
   },
 };
@@ -37,10 +40,13 @@ describe("application modes and failure handling", () => {
           rawClassificationEvidence: ["canvas-assignment-route"],
         },
       ],
+      cancelledAssignments: [],
       diagnostics: {
         ...emptyFeed.diagnostics,
         totalEvents: 1,
         assignmentsParsed: 1,
+        sourceUids: ["uid-new"],
+        normalizedAssignmentUids: ["uid-new"],
       },
     };
     const result = await run(config({ mode: "dry-run" }), {
@@ -60,6 +66,33 @@ describe("application modes and failure handling", () => {
     });
     expect(result.status).toBe("Success");
     expect(gateway.writes).toEqual([]);
+  });
+
+  it("ordinary calendar events do not produce a warning run status", async () => {
+    const gateway = new FakeGateway();
+    const ordinaryFeed: AssignmentFeed = {
+      ...emptyFeed,
+      diagnostics: {
+        ...emptyFeed.diagnostics,
+        totalEvents: 1,
+        sourceUids: ["calendar-event"],
+        ignoredEventCount: 1,
+        events: [
+          {
+            kind: "ignored",
+            reason: "ordinary-calendar-event",
+            uid: "calendar-event",
+            indicators: [],
+          },
+        ],
+      },
+    };
+    const result = await run(config(), {
+      gateway,
+      provider: new FakeProvider(ordinaryFeed),
+    });
+    expect(result.status).toBe("Success");
+    expect(result.warnings).toEqual([]);
   });
 
   it("38 retries Notion rate limits with bounded backoff", async () => {
@@ -132,6 +165,51 @@ describe("application modes and failure handling", () => {
     await expect(applyPlan(gateway, config(), plan, counts)).rejects.toThrow("write failed");
     expect(gateway.writes.some((write) => write.id === "assignment-remove")).toBe(false);
     expect(counts.removed).toBe(0);
+  });
+
+  it("applies a cancelled removal without writing Notion-owned fields", async () => {
+    const gateway = new FakeGateway();
+    const plan: SyncPlan = {
+      coursesToCreate: [],
+      assignmentsToCreate: [],
+      assignmentsToUpdate: [],
+      assignmentsToRemove: [
+        {
+          pageId: "assignment-cancelled",
+          uid: "cancelled",
+          title: "Cancelled",
+          coursePageIds: ["course"],
+          personalStatus: "Done",
+          priority: "High",
+          assignmentType: "Exam",
+          overrideDueDate: "2026-07-20T20:00:00.000Z",
+          removed: false,
+          canvasState: "Active",
+        },
+      ],
+      unchanged: 0,
+      skipped: 0,
+      warnings: [],
+    };
+    const counts: RunCounts = {
+      feedItems: 1,
+      assignmentsParsed: 0,
+      created: 0,
+      updated: 0,
+      removed: 0,
+      unchanged: 0,
+      skipped: 0,
+      warningCount: 0,
+    };
+    await applyPlan(gateway, config(), plan, counts);
+    const properties = gateway.writes[0]?.value as Record<string, unknown>;
+    expect(properties).toHaveProperty("Removed from Canvas");
+    expect(properties).toHaveProperty("Canvas State");
+    expect(properties).not.toHaveProperty("Personal Status");
+    expect(properties).not.toHaveProperty("Priority");
+    expect(properties).not.toHaveProperty("Assignment Type");
+    expect(properties).not.toHaveProperty("Override Due Date");
+    expect(counts.removed).toBe(1);
   });
 
   it("40 redacts exact secrets, bearer tokens, and feed query parameters", () => {

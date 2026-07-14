@@ -133,7 +133,13 @@ No SMTP or external mail service is used. In GitHub notification settings, enabl
 
 ## Reconciliation behavior
 
-The ICS UID is the primary identity. Canvas URL, assignment ID, course ID, normalized title, and due date are only duplicate evidence. Duplicate UIDs or strong lookalikes are reported and preserved without merging.
+The ICS UID is the primary identity. An exact normalized Canvas assignment URL or assignment ID is strong duplicate evidence. Title-and-date lookalikes are considered possible duplicates only when course identity is compatible through Canvas Course ID, the resolved Notion course, or normalized course name/code. Possible duplicates are reported and preserved without merging or rewriting UIDs.
+
+If multiple source `VEVENT`s have the same UID, every event with that UID is quarantined: none is selected for import or update. The UID still counts as present for removal safety, one redacted warning is recorded, and unrelated events continue normally.
+
+`STATUS:CANCELLED` assignments are never imported as active. A cancelled UID remains present in source diagnostics; when it maps to exactly one existing Notion assignment and removals are enabled, the plan marks that page `Removed from Canvas = true` and `Canvas State = Removed`. User-owned status, priority, assignment type, notes, due-date overrides, and page content are preserved. Ambiguous cancelled matches are preserved instead of guessed.
+
+Ordinary calendar events are expected in Canvas feeds. Confidently non-assignment events increase the ignored-event count without producing warnings or changing a successful run to `Warning`. Assignment-like events that cannot be classified or normalized remain quarantined warnings.
 
 Courses match in this order: Canvas Course ID, exact title, exact code, normalized title/code, configured alias, then create. Ties at one confidence level are reported as ambiguous and skipped. A course with only an ID is named `Canvas Course <course-id>` until renamed.
 
@@ -156,7 +162,7 @@ Canvas HTML is sanitized, converted to readable Markdown, and stored completely 
 
 ### Removal safety
 
-Assignments are never deleted. An absent imported assignment can be marked `Removed from Canvas = true` and `Canvas State = Removed` only after a complete, nonempty, nontruncated feed under 1,000 events, successful active writes, an absent UID, an in-window stored due date (approximately 30 days back through 366 days ahead), and enabled removal detection. Empty or suspicious feeds preserve every page. A reappearing UID is reactivated without changing status, priority, notes, type, override, or page content.
+Assignments are never deleted. An absent imported assignment can be marked `Removed from Canvas = true` and `Canvas State = Removed` only after a complete, nonempty, nontruncated feed under 1,000 events, successful active writes, an absent raw `VEVENT` UID, an in-window stored due date (approximately 30 days back through 366 days ahead), and enabled removal detection. Raw UIDs remain present even when their event is malformed, suspicious, cancelled, or quarantined as a duplicate. Existing pages involved in possible-duplicate or ambiguity warnings are also protected from removal for that run. An unidentifiable assignment-like event suppresses removals rather than risking a false removal. A reappearing active UID is reactivated without changing status, priority, notes, type, override, or page content.
 
 ## Security and troubleshooting
 
