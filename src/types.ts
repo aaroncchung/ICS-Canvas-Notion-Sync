@@ -159,6 +159,42 @@ export interface SyncPlan {
   warnings: PlanWarning[];
 }
 
+export interface RecoveredCreate {
+  pageId: string;
+  recovered: boolean;
+}
+
+export type SyncOperationKind =
+  | "course-create"
+  | "assignment-create"
+  | "assignment-update"
+  | "assignment-remove";
+
+export interface SyncOperation {
+  kind: SyncOperationKind;
+  target: string;
+}
+
+export interface AppliedCreate extends SyncOperation {
+  pageId: string;
+  recovered: boolean;
+}
+
+export interface FailedSyncOperation extends SyncOperation {
+  outcome: "failed" | "ambiguous";
+  message: string;
+}
+
+export interface SyncExecutionResult {
+  coursesCreated: AppliedCreate[];
+  assignmentsCreated: AppliedCreate[];
+  assignmentsUpdated: SyncOperation[];
+  assignmentsRemoved: SyncOperation[];
+  notAttempted: SyncOperation[];
+  ambiguousOperations: FailedSyncOperation[];
+  failedOperation?: FailedSyncOperation;
+}
+
 export interface RunCounts {
   feedItems: number;
   assignmentsParsed: number;
@@ -176,4 +212,5 @@ export interface RunResult {
   warnings: PlanWarning[];
   errors: string[];
   plan?: SyncPlan;
+  execution?: SyncExecutionResult;
 }

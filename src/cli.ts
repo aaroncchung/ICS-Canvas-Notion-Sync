@@ -10,7 +10,7 @@ import { writeSyncLog } from "./notion/sync-log.js";
 import { createLogger } from "./observability/logger.js";
 import { safeError } from "./observability/redaction.js";
 import { buildPlan } from "./sync/plan.js";
-import { applyPlan } from "./sync/reconcile.js";
+import { ApplyPlanError, applyPlan } from "./sync/reconcile.js";
 import type { AssignmentFeed, AssignmentProvider, RunCounts, RunResult } from "./types.js";
 
 export interface RunDependencies {
@@ -32,6 +32,7 @@ function emptyCounts(): RunCounts {
 }
 
 async function writeSummary(config: AppConfig, result: RunResult): Promise<void> {
+  const proposed = config.mode === "dry-run" ? "Proposed " : "";
   const lines = [
     "## Canvas–Notion sync",
     "",
@@ -39,9 +40,9 @@ async function writeSummary(config: AppConfig, result: RunResult): Promise<void>
     `- Mode: ${config.mode}`,
     `- Feed events: ${result.counts.feedItems}`,
     `- Assignments parsed: ${result.counts.assignmentsParsed}`,
-    `- Created: ${result.counts.created}`,
-    `- Updated: ${result.counts.updated}`,
-    `- Removed: ${result.counts.removed}`,
+    `- ${proposed}Created: ${result.counts.created}`,
+    `- ${proposed}Updated: ${result.counts.updated}`,
+    `- ${proposed}Removed: ${result.counts.removed}`,
     `- Unchanged: ${result.counts.unchanged}`,
     `- Skipped: ${result.counts.skipped}`,
     `- Warnings: ${result.counts.warningCount}`,
@@ -64,6 +65,7 @@ export async function run(
   const startedAt = new Date().toISOString();
   const counts = emptyCounts();
   let result: RunResult = { status: "Failed", counts, warnings: [], errors: [] };
+  let syncLogAttempted = false;
 
   try {
     await validateNotionSchemas(gateway, config);
@@ -104,26 +106,33 @@ export async function run(
         errors: [],
         plan,
       };
-      if (config.mode === "sync") await applyPlan(gateway, config, plan, counts);
+      if (config.mode === "sync") {
+        result.execution = await applyPlan(gateway, config, plan, counts);
+      }
     }
 
     if (config.mode === "sync") {
+      syncLogAttempted = true;
       await writeSyncLog(gateway, config, startedAt, new Date().toISOString(), result);
     }
     logger.info({ status: result.status, counts: result.counts }, "Synchronization run complete");
   } catch (error) {
+    if (error instanceof ApplyPlanError) result.execution = error.execution;
     const message = safeError(error, secrets);
     result.status = "Failed";
     result.errors.push(message);
     logger.error({ error: message, counts }, "Synchronization run failed");
-    if (config.mode === "sync") {
+    if (config.mode === "sync" && !syncLogAttempted) {
       try {
+        syncLogAttempted = true;
         await writeSyncLog(gateway, config, startedAt, new Date().toISOString(), result);
       } catch (logError) {
         const logMessage = safeError(logError, secrets);
         result.errors.push(`Sync Log write failed: ${logMessage}`);
         logger.error({ error: logMessage }, "Could not persist the failed run to Notion Sync Log");
       }
+    } else if (config.mode === "sync" && syncLogAttempted) {
+      result.errors.push("Sync Log write failed; creation was not blindly retried");
     }
   }
   await writeSummary(config, result);

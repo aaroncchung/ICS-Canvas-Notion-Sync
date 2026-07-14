@@ -3,6 +3,22 @@ import type { Logger } from "pino";
 
 export const NOTION_API_VERSION = "2026-03-11";
 const TRANSIENT_STATUSES = new Set([429, 500, 502, 503, 504]);
+const AMBIGUOUS_STATUSES = new Set([500, 502, 503, 504]);
+
+export type NotionOperation =
+  | "read"
+  | "property-update"
+  | "page-create"
+  | "block-append"
+  | "delete"
+  | "sync-log-create";
+
+export class AmbiguousNotionWriteError extends Error {
+  public constructor(message: string) {
+    super(message);
+    this.name = "AmbiguousNotionWriteError";
+  }
+}
 
 export interface NotionGateway {
   retrieveDataSource(id: string): Promise<Record<string, unknown>>;
@@ -13,33 +29,54 @@ export interface NotionGateway {
   createPage(
     id: string,
     properties: Record<string, unknown>,
-    options?: { useDefaultTemplate?: boolean; templateTimezone?: string },
+    options?: {
+      useDefaultTemplate?: boolean;
+      templateTimezone?: string;
+      operation?: "page-create" | "sync-log-create";
+    },
   ): Promise<string>;
   updatePage(pageId: string, properties: Record<string, unknown>): Promise<void>;
+  updateBlock(blockId: string, block: Record<string, unknown>): Promise<void>;
   listBlocks(pageId: string): Promise<Array<Record<string, unknown>>>;
   appendBlocks(parentId: string, children: Array<Record<string, unknown>>): Promise<string[]>;
   deleteBlock(blockId: string): Promise<void>;
 }
 
-function errorStatus(error: unknown): number | undefined {
+export function errorStatus(error: unknown): number | undefined {
   if (!error || typeof error !== "object") return;
   const status = (error as { status?: unknown }).status;
   return typeof status === "number" ? status : undefined;
 }
 
+export function isAmbiguousWriteError(error: unknown): boolean {
+  return (
+    error instanceof AmbiguousNotionWriteError || AMBIGUOUS_STATUSES.has(errorStatus(error) ?? 0)
+  );
+}
+
 export async function withRetry<T>(
   operation: () => Promise<T>,
-  options: { attempts?: number; baseDelayMs?: number; sleep?: (ms: number) => Promise<void> } = {},
+  options: {
+    attempts?: number;
+    baseDelayMs?: number;
+    sleep?: (ms: number) => Promise<void>;
+    operation?: NotionOperation;
+  } = {},
 ): Promise<T> {
   const attempts = options.attempts ?? 4;
   const baseDelayMs = options.baseDelayMs ?? 350;
   const sleep =
     options.sleep ?? ((ms: number) => new Promise((resolve) => setTimeout(resolve, ms)));
+  const operationType = options.operation ?? "read";
+  const retriesAmbiguousFailures = ["read", "property-update", "delete"].includes(operationType);
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     try {
       return await operation();
     } catch (error) {
-      if (attempt === attempts - 1 || !TRANSIENT_STATUSES.has(errorStatus(error) ?? 0)) throw error;
+      const status = errorStatus(error) ?? 0;
+      const retryable =
+        TRANSIENT_STATUSES.has(status) && (status === 429 || retriesAmbiguousFailures);
+      if (attempt === attempts - 1 || !retryable) throw error;
       const jitter = Math.floor(Math.random() * baseDelayMs);
       await sleep(baseDelayMs * 2 ** attempt + jitter);
     }
@@ -59,7 +96,7 @@ export class OfficialNotionGateway implements NotionGateway {
   }
 
   public async retrieveDataSource(id: string): Promise<Record<string, unknown>> {
-    const response: unknown = await this.request(() =>
+    const response: unknown = await this.request("read", () =>
       this.client.dataSources.retrieve({ data_source_id: id }),
     );
     return response as Record<string, unknown>;
@@ -78,7 +115,7 @@ export class OfficialNotionGateway implements NotionGateway {
         ...(cursor ? { start_cursor: cursor } : {}),
         ...(filter ? { filter } : {}),
       };
-      const response = (await this.request(() =>
+      const response = (await this.request("read", () =>
         this.client.dataSources.query(request as Parameters<Client["dataSources"]["query"]>[0]),
       )) as unknown as {
         results: Array<Record<string, unknown>>;
@@ -94,7 +131,11 @@ export class OfficialNotionGateway implements NotionGateway {
   public async createPage(
     id: string,
     properties: Record<string, unknown>,
-    options: { useDefaultTemplate?: boolean; templateTimezone?: string } = {},
+    options: {
+      useDefaultTemplate?: boolean;
+      templateTimezone?: string;
+      operation?: "page-create" | "sync-log-create";
+    } = {},
   ): Promise<string> {
     const request = {
       parent: { type: "data_source_id" as const, data_source_id: id },
@@ -108,12 +149,14 @@ export class OfficialNotionGateway implements NotionGateway {
           }
         : {}),
     };
-    const page = (await this.request(() => this.client.pages.create(request))) as { id: string };
+    const page = (await this.request(options.operation ?? "page-create", () =>
+      this.client.pages.create(request),
+    )) as { id: string };
     return page.id;
   }
 
   public async updatePage(pageId: string, properties: Record<string, unknown>): Promise<void> {
-    await this.request(() =>
+    await this.request("property-update", () =>
       this.client.pages.update({
         page_id: pageId,
         properties: properties as NonNullable<
@@ -123,11 +166,20 @@ export class OfficialNotionGateway implements NotionGateway {
     );
   }
 
+  public async updateBlock(blockId: string, block: Record<string, unknown>): Promise<void> {
+    await this.request("property-update", () =>
+      this.client.blocks.update({
+        block_id: blockId,
+        ...block,
+      }),
+    );
+  }
+
   public async listBlocks(pageId: string): Promise<Array<Record<string, unknown>>> {
     const results: Array<Record<string, unknown>> = [];
     let cursor: string | undefined;
     do {
-      const response = (await this.request(() =>
+      const response = (await this.request("read", () =>
         this.client.blocks.children.list({
           block_id: pageId,
           page_size: 100,
@@ -148,7 +200,7 @@ export class OfficialNotionGateway implements NotionGateway {
     parentId: string,
     children: Array<Record<string, unknown>>,
   ): Promise<string[]> {
-    const response = (await this.request(() =>
+    const response = (await this.request("block-append", () =>
       this.client.blocks.children.append({
         block_id: parentId,
         children: children as Parameters<Client["blocks"]["children"]["append"]>[0]["children"],
@@ -158,20 +210,26 @@ export class OfficialNotionGateway implements NotionGateway {
   }
 
   public async deleteBlock(blockId: string): Promise<void> {
-    await this.request(() => this.client.blocks.delete({ block_id: blockId }));
+    await this.request("delete", () => this.client.blocks.delete({ block_id: blockId }));
   }
 
-  private async request<T>(operation: () => Promise<T>): Promise<T> {
-    return withRetry(async () => {
-      const now = Date.now();
-      const scheduledAt = Math.max(now, this.nextRequestAt);
-      this.nextRequestAt = scheduledAt + 340;
-      const delay = scheduledAt - now;
-      if (delay > 0) {
-        this.logger.debug({ delay }, "Applying conservative Notion request pacing");
-        await new Promise((resolve) => setTimeout(resolve, delay));
-      }
-      return operation();
-    });
+  private async request<T>(
+    operationType: NotionOperation,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    return withRetry(
+      async () => {
+        const now = Date.now();
+        const scheduledAt = Math.max(now, this.nextRequestAt);
+        this.nextRequestAt = scheduledAt + 340;
+        const delay = scheduledAt - now;
+        if (delay > 0) {
+          this.logger.debug({ delay }, "Applying conservative Notion request pacing");
+          await new Promise((resolve) => setTimeout(resolve, delay));
+        }
+        return operation();
+      },
+      { operation: operationType },
+    );
   }
 }

@@ -3,8 +3,9 @@ import type {
   AssignmentPropertyUpdate,
   AssignmentRecord,
   ExternalAssignment,
+  RecoveredCreate,
 } from "../types.js";
-import type { NotionGateway } from "./client.js";
+import { AmbiguousNotionWriteError, isAmbiguousWriteError, type NotionGateway } from "./client.js";
 import { readManagedDescription } from "./descriptions.js";
 import {
   checkbox,
@@ -86,7 +87,7 @@ export async function createAssignment(
   create: AssignmentCreate,
   coursePageId: string,
   timezone: string,
-): Promise<string> {
+): Promise<RecoveredCreate> {
   const source = create.source;
   const properties: Record<string, unknown> = {
     Assignment: title(source.title),
@@ -105,10 +106,32 @@ export async function createAssignment(
     properties["Canvas Due Date"] = date(source.dueAt);
     properties["Effective Due Date"] = date(source.dueAt);
   }
-  return gateway.createPage(dataSourceId, properties, {
-    useDefaultTemplate: true,
-    templateTimezone: timezone,
-  });
+  try {
+    return {
+      pageId: await gateway.createPage(dataSourceId, properties, {
+        useDefaultTemplate: true,
+        templateTimezone: timezone,
+      }),
+      recovered: false,
+    };
+  } catch (error) {
+    if (!isAmbiguousWriteError(error)) throw error;
+    const matches = await gateway.queryDataSource(dataSourceId, {
+      property: "Canvas UID",
+      rich_text: { equals: source.uid },
+    });
+    if (matches.length === 1 && typeof matches[0]?.id === "string") {
+      return { pageId: matches[0].id, recovered: true };
+    }
+    if (matches.length > 1) {
+      throw new AmbiguousNotionWriteError(
+        `Assignment create is ambiguous: ${matches.length} pages match the Canvas UID`,
+      );
+    }
+    throw new AmbiguousNotionWriteError(
+      "Assignment create is ambiguous: no matching page is visible; creation was not retried",
+    );
+  }
 }
 
 export function buildUpdateProperties(update: AssignmentPropertyUpdate): Record<string, unknown> {

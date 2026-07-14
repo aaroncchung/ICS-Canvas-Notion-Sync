@@ -135,6 +135,8 @@ No SMTP or external mail service is used. In GitHub notification settings, enabl
 
 The ICS UID is the primary identity. An exact normalized Canvas assignment URL or assignment ID is strong duplicate evidence. Title-and-date lookalikes are considered possible duplicates only when course identity is compatible through Canvas Course ID, the resolved Notion course, or normalized course name/code. Possible duplicates are reported and preserved without merging or rewriting UIDs.
 
+Notion reads and deterministic property updates use bounded retries. Page creation and block appends do not blindly retry an ambiguous server error because the write may already have succeeded. Instead, assignment creation is reconciled by Canvas UID, course creation by Canvas Course ID or normalized title/code, and Sync Log creation by workflow-run identity. One matching page is recovered; no match remains an explicit ambiguity, and multiple matches stop the run rather than risk a duplicate.
+
 If multiple source `VEVENT`s have the same UID, every event with that UID is quarantined: none is selected for import or update. The UID still counts as present for removal safety, one redacted warning is recorded, and unrelated events continue normally.
 
 `STATUS:CANCELLED` assignments are never imported as active. A cancelled UID remains present in source diagnostics; when it maps to exactly one existing Notion assignment and removals are enabled, the plan marks that page `Removed from Canvas = true` and `Canvas State = Removed`. User-owned status, priority, assignment type, notes, due-date overrides, and page content are preserved. Ambiguous cancelled matches are preserved instead of guessed.
@@ -158,7 +160,9 @@ An explicit “no due date” override is not supported because an empty writabl
 
 ### Descriptions
 
-Canvas HTML is sanitized, converted to readable Markdown, and stored completely in one toggle named `Canvas Description — managed by sync`. Only that toggle and its children are replaced. All template content and user-owned sections such as Plan, Notes, and Submission check remain untouched. `Raw Description` stores a bounded searchable plain-text excerpt.
+Canvas HTML is sanitized, converted to readable Markdown, and stored completely in one toggle named `Canvas Description — managed by sync`. A replacement is built and verified under a temporary managed marker before the prior managed toggle is removed, so an interrupted write preserves the old description and a later run can safely finish or clean up the replacement. All template content and user-owned sections such as Plan, Notes, and Submission check remain untouched. `Raw Description` stores a bounded searchable plain-text excerpt.
+
+The Sync Log separates planned changes from successfully applied changes, failed or ambiguous work, and operations that were not attempted. Live-run counts report only applied assignment operations; dry-run counts are explicitly proposed operations.
 
 ### Removal safety
 
@@ -175,6 +179,6 @@ Common failures:
 - **Default template validation error:** mark an assignment template as the data source default.
 - **Feed parses but assignments are skipped:** inspect the redacted structural warnings in dry-run/Sync Log; a real institutional sample may require another high-confidence classifier rule.
 - **Unexpected empty feed:** no removals occur. Check Canvas feed availability and privacy settings.
-- **Rate limiting/transient errors:** 429 and 5xx responses are retried with bounded exponential backoff and jitter.
+- **Rate limiting/transient errors:** 429 responses use bounded backoff. Ambiguous 5xx responses are retried only for safe reads and deterministic updates; creates and appends use reconciliation.
 
 `npm audit` reports zero known vulnerabilities for the committed lockfile. Dependabot monitors npm and GitHub Actions dependencies.

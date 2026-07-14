@@ -135,6 +135,11 @@ export class FakeGateway implements NotionGateway {
     return Promise.resolve();
   }
 
+  public async updateBlock(blockId: string, block: Record<string, unknown>): Promise<void> {
+    this.writes.push({ kind: "update-block", id: blockId, value: block });
+    return Promise.resolve();
+  }
+
   public async listBlocks(): Promise<Array<Record<string, unknown>>> {
     return Promise.resolve([{ id: "template", type: "paragraph", paragraph: { rich_text: [] } }]);
   }
@@ -149,6 +154,175 @@ export class FakeGateway implements NotionGateway {
 
   public async deleteBlock(blockId: string): Promise<void> {
     this.writes.push({ kind: "delete", id: blockId });
+    return Promise.resolve();
+  }
+}
+
+type SimulatedFailure = { id: string; status: number; applied: boolean };
+
+function richTextValue(value: unknown): string {
+  if (!Array.isArray(value)) return "";
+  return value
+    .map((item) => {
+      if (!item || typeof item !== "object") return "";
+      const record = item as Record<string, unknown>;
+      if (typeof record.plain_text === "string") return record.plain_text;
+      const text = record.text;
+      if (!text || typeof text !== "object") return "";
+      const content = (text as Record<string, unknown>).content;
+      return typeof content === "string" ? content : "";
+    })
+    .join("");
+}
+
+function propertyText(property: unknown): string {
+  if (!property || typeof property !== "object") return "";
+  const record = property as Record<string, unknown>;
+  return richTextValue(record.title ?? record.rich_text);
+}
+
+function materializeBlock(id: string, source: Record<string, unknown>): Record<string, unknown> {
+  const type = typeof source.type === "string" ? source.type : "paragraph";
+  const content = source[type];
+  const record = content && typeof content === "object" ? (content as Record<string, unknown>) : {};
+  const richText = Array.isArray(record.rich_text)
+    ? (record.rich_text as unknown[]).map((item) => {
+        if (!item || typeof item !== "object") return {};
+        const value = item as Record<string, unknown>;
+        const text = value.text;
+        const contentValue =
+          text && typeof text === "object"
+            ? (text as Record<string, unknown>).content
+            : value.plain_text;
+        return {
+          ...value,
+          ...(typeof contentValue === "string" ? { plain_text: contentValue } : {}),
+        };
+      })
+    : [];
+  return { ...source, id, type, [type]: { ...record, rich_text: richText } };
+}
+
+export class StatefulFakeGateway implements NotionGateway {
+  public readonly pages = new Map<string, Array<Record<string, unknown>>>();
+  public readonly blocks = new Map<string, Array<Record<string, unknown>>>();
+  public readonly writes: Array<{ kind: string; id: string; value?: unknown }> = [];
+  public readonly createFailures: SimulatedFailure[] = [];
+  public readonly appendFailures: SimulatedFailure[] = [];
+  public readonly updateFailures: SimulatedFailure[] = [];
+  private sequence = 0;
+
+  public seedPage(dataSourceId: string, id: string, properties: Record<string, unknown>): void {
+    const pages = this.pages.get(dataSourceId) ?? [];
+    pages.push({ id, properties });
+    this.pages.set(dataSourceId, pages);
+  }
+
+  public seedBlock(parentId: string, block: Record<string, unknown>): void {
+    const values = this.blocks.get(parentId) ?? [];
+    const id = typeof block.id === "string" ? block.id : `block-${++this.sequence}`;
+    values.push(materializeBlock(id, block));
+    this.blocks.set(parentId, values);
+  }
+
+  public async retrieveDataSource(id: string): Promise<Record<string, unknown>> {
+    return Promise.resolve(
+      id === "assignments" ? assignmentSchema : id === "courses" ? courseSchema : logSchema,
+    );
+  }
+
+  public async queryDataSource(
+    id: string,
+    filter?: Record<string, unknown>,
+  ): Promise<Array<Record<string, unknown>>> {
+    const pages = this.pages.get(id) ?? [];
+    if (!filter || typeof filter.property !== "string") return Promise.resolve(pages);
+    const condition =
+      filter.rich_text && typeof filter.rich_text === "object"
+        ? (filter.rich_text as Record<string, unknown>)
+        : filter.title && typeof filter.title === "object"
+          ? (filter.title as Record<string, unknown>)
+          : undefined;
+    const expected = condition?.equals;
+    if (typeof expected !== "string") return Promise.resolve(pages);
+    return Promise.resolve(
+      pages.filter((page) => {
+        const properties = page.properties as Record<string, unknown>;
+        return propertyText(properties[filter.property as string]) === expected;
+      }),
+    );
+  }
+
+  public async createPage(id: string, properties: Record<string, unknown>): Promise<string> {
+    const failureIndex = this.createFailures.findIndex((failure) => failure.id === id);
+    const failure = failureIndex >= 0 ? this.createFailures.splice(failureIndex, 1)[0] : undefined;
+    const newPageId = `${id}-${++this.sequence}`;
+    this.writes.push({ kind: "create", id, value: properties });
+    if (!failure || failure.applied) this.seedPage(id, newPageId, properties);
+    if (failure)
+      throw Object.assign(new Error("simulated create failure"), { status: failure.status });
+    return Promise.resolve(newPageId);
+  }
+
+  public async updatePage(pageId: string, properties: Record<string, unknown>): Promise<void> {
+    const failureIndex = this.updateFailures.findIndex((failure) => failure.id === pageId);
+    const failure = failureIndex >= 0 ? this.updateFailures.splice(failureIndex, 1)[0] : undefined;
+    this.writes.push({ kind: "update", id: pageId, value: properties });
+    if (!failure || failure.applied) {
+      for (const pages of this.pages.values()) {
+        const page = pages.find((candidate) => candidate.id === pageId);
+        if (page) page.properties = { ...(page.properties as object), ...properties };
+      }
+    }
+    if (failure)
+      throw Object.assign(new Error("simulated update failure"), { status: failure.status });
+    return Promise.resolve();
+  }
+
+  public async updateBlock(blockId: string, block: Record<string, unknown>): Promise<void> {
+    this.writes.push({ kind: "update-block", id: blockId, value: block });
+    for (const values of this.blocks.values()) {
+      const index = values.findIndex((candidate) => candidate.id === blockId);
+      if (index < 0) continue;
+      const current = values[index]!;
+      const type = typeof current.type === "string" ? current.type : "toggle";
+      values[index] = materializeBlock(blockId, { ...current, ...block, type });
+      return Promise.resolve();
+    }
+    return Promise.resolve();
+  }
+
+  public async listBlocks(pageId: string): Promise<Array<Record<string, unknown>>> {
+    return Promise.resolve(this.blocks.get(pageId) ?? []);
+  }
+
+  public async appendBlocks(
+    parentId: string,
+    children: Array<Record<string, unknown>>,
+  ): Promise<string[]> {
+    const failureIndex = this.appendFailures.findIndex((failure) => failure.id === parentId);
+    const failure = failureIndex >= 0 ? this.appendFailures.splice(failureIndex, 1)[0] : undefined;
+    const ids = children.map(() => `${parentId}-block-${++this.sequence}`);
+    this.writes.push({ kind: "append", id: parentId, value: children });
+    if (!failure || failure.applied) {
+      const values = this.blocks.get(parentId) ?? [];
+      values.push(...children.map((child, index) => materializeBlock(ids[index]!, child)));
+      this.blocks.set(parentId, values);
+    }
+    if (failure)
+      throw Object.assign(new Error("simulated append failure"), { status: failure.status });
+    return Promise.resolve(ids);
+  }
+
+  public async deleteBlock(blockId: string): Promise<void> {
+    this.writes.push({ kind: "delete", id: blockId });
+    for (const [parentId, values] of this.blocks) {
+      this.blocks.set(
+        parentId,
+        values.filter((block) => block.id !== blockId),
+      );
+    }
+    this.blocks.delete(blockId);
     return Promise.resolve();
   }
 }
