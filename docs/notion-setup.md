@@ -79,7 +79,7 @@ The sync does not overwrite Term, Instructor, Notes, Drive Folder, Color, or oth
 - Set that template as the Assignments data source's **default** template.
 - Share the template with the integration if it is not inherited automatically from the database connection.
 
-The sync applies the default through Notion's template API, waits for asynchronous template content, and then reconciles its own managed Canvas description toggle. It writes `Canvas Description Hash` and `Canvas Description Verified At` together only after that managed body is verified. Matching hashes with verification dates no more than 30 days old avoid body reads; blank or older dates cause a periodic integrity audit. Dry-run reports that an audit is due without reading page bodies.
+The sync applies the default through Notion's template API, waits for asynchronous template content, and then reconciles its own managed Canvas description toggle. It writes `Canvas Description Hash` and `Canvas Description Verified At` together only after that managed body is verified. Hash changes and blank or invalid verification dates trigger immediate auditing. Matching hashes with valid dates are eligible after 30 calendar days and are distributed across 30 stable slots derived from the Canvas UID. The slot calendar and age use `NOTION_TIMEZONE`, and a 60-calendar-day maximum forces an audit even when the current run is outside the assignment's slot. Thus the first live sync at or after 60 days cannot defer the audit. Dry-run reports audits due and deferred without reading page bodies. The schedule requires no additional Notion properties.
 
 ## 5. Create Canvas Sync Log
 

@@ -66,6 +66,8 @@ function resultBlocks(result: RunResult): Array<Record<string, unknown>> {
       `Course pages recovered: ${result.metrics.coursesRecovered}`,
     ]),
     ...section("Description integrity", [
+      `Audits due this run: ${result.metrics.descriptionIntegrityAuditsDue}`,
+      `Audits deferred to later slots: ${result.metrics.descriptionIntegrityAuditsDeferred}`,
       `Audits run: ${result.metrics.descriptionIntegrityAuditsRun}`,
       `Audits passed without repair: ${result.metrics.descriptionIntegrityAuditsPassed}`,
       `Repairs performed: ${result.metrics.descriptionIntegrityRepairs}`,

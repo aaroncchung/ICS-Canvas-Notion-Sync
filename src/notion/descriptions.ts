@@ -12,7 +12,27 @@ export const MANAGED_DESCRIPTION_TITLE = "Canvas Description — managed by sync
 export const PENDING_MANAGED_DESCRIPTION_TITLE =
   "Canvas Description — managed by sync [replacement pending]";
 export const DESCRIPTION_HASH_VERSION = "canvas-description:v2";
-export const DESCRIPTION_INTEGRITY_INTERVAL_DAYS = 30;
+export const DESCRIPTION_INTEGRITY_MINIMUM_AGE_DAYS = 30;
+export const DESCRIPTION_INTEGRITY_MAXIMUM_AGE_DAYS = 60;
+export const DESCRIPTION_INTEGRITY_SLOT_COUNT = 30;
+
+const MILLISECONDS_PER_DAY = 24 * 60 * 60 * 1000;
+const DATE_ONLY = /^(\d{4})-(\d{2})-(\d{2})$/;
+
+export type DescriptionIntegrityAuditReason =
+  | "missing-verification"
+  | "invalid-verification"
+  | "not-eligible"
+  | "scheduled-slot"
+  | "maximum-age"
+  | "deferred";
+
+export interface DescriptionIntegrityAuditDecision {
+  due: boolean;
+  reason: DescriptionIntegrityAuditReason;
+  slot: number;
+  ageDays?: number;
+}
 
 function paragraph(content: string): Record<string, unknown> {
   return {
@@ -31,14 +51,67 @@ function descriptionBlocks(markdown: string): Array<Record<string, unknown>> {
   return result;
 }
 
-export function descriptionIntegrityAuditDue(
+function calendarDayOrdinal(value: Date, timeZone: string): number {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(value);
+  const year = Number(parts.find((part) => part.type === "year")?.value);
+  const month = Number(parts.find((part) => part.type === "month")?.value);
+  const day = Number(parts.find((part) => part.type === "day")?.value);
+  return Math.floor(Date.UTC(year, month - 1, day) / MILLISECONDS_PER_DAY);
+}
+
+function verifiedCalendarDayOrdinal(value: string, timestamp: number, timeZone: string): number {
+  const dateOnly = DATE_ONLY.exec(value);
+  if (dateOnly) {
+    return Math.floor(
+      Date.UTC(Number(dateOnly[1]), Number(dateOnly[2]) - 1, Number(dateOnly[3])) /
+        MILLISECONDS_PER_DAY,
+    );
+  }
+  return calendarDayOrdinal(new Date(timestamp), timeZone);
+}
+
+function modulo(value: number, divisor: number): number {
+  return ((value % divisor) + divisor) % divisor;
+}
+
+export function descriptionIntegrityAuditSlot(stableIdentifier: string): number {
+  return (
+    createHash("sha256").update(stableIdentifier).digest().readUInt32BE(0) %
+    DESCRIPTION_INTEGRITY_SLOT_COUNT
+  );
+}
+
+export function descriptionIntegrityAuditDecision(
+  stableIdentifier: string,
   verifiedAt: string | undefined,
+  timeZone: string,
   now = new Date(),
-): boolean {
-  if (!verifiedAt) return true;
+): DescriptionIntegrityAuditDecision {
+  const slot = descriptionIntegrityAuditSlot(stableIdentifier);
+  if (!verifiedAt) return { due: true, reason: "missing-verification", slot };
   const timestamp = Date.parse(verifiedAt);
-  if (!Number.isFinite(timestamp)) return true;
-  return now.getTime() - timestamp > DESCRIPTION_INTEGRITY_INTERVAL_DAYS * 24 * 60 * 60 * 1000;
+  if (!Number.isFinite(timestamp)) return { due: true, reason: "invalid-verification", slot };
+  if (!DATE_ONLY.test(verifiedAt) && timestamp > now.getTime()) {
+    return { due: true, reason: "invalid-verification", slot };
+  }
+
+  const ageDays =
+    calendarDayOrdinal(now, timeZone) - verifiedCalendarDayOrdinal(verifiedAt, timestamp, timeZone);
+  if (ageDays < 0) return { due: true, reason: "invalid-verification", slot, ageDays };
+  if (ageDays >= DESCRIPTION_INTEGRITY_MAXIMUM_AGE_DAYS) {
+    return { due: true, reason: "maximum-age", slot, ageDays };
+  }
+  if (ageDays < DESCRIPTION_INTEGRITY_MINIMUM_AGE_DAYS) {
+    return { due: false, reason: "not-eligible", slot, ageDays };
+  }
+  const currentSlot = modulo(calendarDayOrdinal(now, timeZone), DESCRIPTION_INTEGRITY_SLOT_COUNT);
+  if (currentSlot === slot) return { due: true, reason: "scheduled-slot", slot, ageDays };
+  return { due: false, reason: "deferred", slot, ageDays };
 }
 
 export function managedDescriptionHash(

@@ -11,7 +11,10 @@ import type {
   Trigger,
 } from "../types.js";
 import { descriptionExcerpt } from "../notion/assignments.js";
-import { descriptionIntegrityAuditDue, managedDescriptionHash } from "../notion/descriptions.js";
+import {
+  descriptionIntegrityAuditDecision,
+  managedDescriptionHash,
+} from "../notion/descriptions.js";
 import {
   addCanvasCourseIdToIndex,
   addCourseToIndex,
@@ -196,6 +199,7 @@ export function buildPlan(
   const protectedPageIds = new Set<string>();
   const removalsByPageId = new Map<string, SyncPlan["assignmentsToRemove"][number]>();
   const plannedAssignmentUpdates = new Map<string, SyncPlan["assignmentsToUpdate"][number]>();
+  const descriptionReadAvoidances = new Map<string, { courseKey: string; deferred: boolean }>();
 
   function rebuildCourseIndex(): void {
     courseIndex = buildCourseIndex(
@@ -239,6 +243,9 @@ export function buildPlan(
       if (assignment.courseKey === fromKey) {
         plannedAssignmentUpdates.set(pageId, { ...assignment, courseKey: toKey });
       }
+    }
+    for (const avoidance of descriptionReadAvoidances.values()) {
+      if (avoidance.courseKey === fromKey) avoidance.courseKey = toKey;
     }
     const warning = unnamedCourseWarnings.get(fromKey);
     if (warning) {
@@ -563,12 +570,20 @@ export function buildPlan(
     const excerptChanged = (existing.descriptionExcerpt ?? "") !== excerpt;
     const descriptionHash = managedDescriptionHash(source.descriptionMarkdown);
     const descriptionHashNeedsUpdate = existing.descriptionHash !== descriptionHash;
-    const verifyDescription =
-      descriptionHashNeedsUpdate ||
-      descriptionIntegrityAuditDue(existing.descriptionVerifiedAt, now);
-    if (!verifyDescription && metrics) {
-      metrics.descriptionUpdatesAvoided += 1;
-      metrics.descriptionBodyReadsAvoided += 1;
+    const auditDecision = descriptionHashNeedsUpdate
+      ? undefined
+      : descriptionIntegrityAuditDecision(
+          source.uid || existing.pageId,
+          existing.descriptionVerifiedAt,
+          notionTimezone,
+          now,
+        );
+    const verifyDescription = descriptionHashNeedsUpdate || auditDecision?.due === true;
+    if (!verifyDescription && auditDecision) {
+      descriptionReadAvoidances.set(existing.pageId, {
+        courseKey,
+        deferred: auditDecision.reason === "deferred",
+      });
     }
     if (excerptChanged) properties.rawDescription = excerpt;
     if (Object.keys(properties).length || verifyDescription) {
@@ -636,5 +651,18 @@ export function buildPlan(
   plan.missingCandidatesObserved = removal.newlyObserved;
   plan.coursesToUpdate = [...plannedCourseUpdates.values()];
   plan.warnings.push(...removal.warnings);
+  if (metrics) {
+    const finalizedAvoidances = [...descriptionReadAvoidances.values()].filter(
+      (avoidance) => !conflictedCourseKeys.has(avoidance.courseKey),
+    );
+    metrics.descriptionIntegrityAuditsDue =
+      plan.assignmentsToCreate.length +
+      plan.assignmentsToUpdate.filter((assignment) => assignment.verifyDescription).length;
+    metrics.descriptionIntegrityAuditsDeferred = finalizedAvoidances.filter(
+      (avoidance) => avoidance.deferred,
+    ).length;
+    metrics.descriptionUpdatesAvoided = finalizedAvoidances.length;
+    metrics.descriptionBodyReadsAvoided = finalizedAvoidances.length;
+  }
   return plan;
 }

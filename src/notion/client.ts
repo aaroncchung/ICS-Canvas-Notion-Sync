@@ -47,6 +47,8 @@ export function createRunMetrics(): RunMetrics {
     assignmentBodyReads: 0,
     descriptionReplacements: 0,
     descriptionUpdatesAvoided: 0,
+    descriptionIntegrityAuditsDue: 0,
+    descriptionIntegrityAuditsDeferred: 0,
     descriptionIntegrityAuditsRun: 0,
     descriptionIntegrityAuditsPassed: 0,
     descriptionIntegrityRepairs: 0,
