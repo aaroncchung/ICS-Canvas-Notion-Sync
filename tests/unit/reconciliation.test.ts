@@ -203,6 +203,45 @@ describe("plan-first reconciliation", () => {
     expect(result.assignmentsToCreate).toHaveLength(1);
   });
 
+  it.each(["rich-first", "name-first"] as const)(
+    "reuses one planned course creation with %s source ordering",
+    (ordering) => {
+      const rich = source({ uid: "rich", title: "Rich assignment" });
+      const nameOnly = source({ uid: "name-only", title: "Name-only assignment" });
+      delete nameOnly.canvasCourseId;
+      delete nameOnly.courseCode;
+      const assignments = ordering === "rich-first" ? [rich, nameOnly] : [nameOnly, rich];
+
+      const result = plan(assignments, [], []);
+
+      expect(result.coursesToCreate).toHaveLength(1);
+      expect(result.assignmentsToCreate).toHaveLength(2);
+      expect(new Set(result.assignmentsToCreate.map((item) => item.courseKey)).size).toBe(1);
+    },
+  );
+
+  it.each(["rich-first", "id-first"] as const)(
+    "reuses planned Canvas ID enrichment with %s source ordering",
+    (ordering) => {
+      const rich = source({ uid: "rich", title: "Rich assignment" });
+      const idOnly = source({ uid: "id-only", title: "ID-only assignment" });
+      delete idOnly.courseName;
+      delete idOnly.courseCode;
+      const assignments = ordering === "rich-first" ? [rich, idOnly] : [idOnly, rich];
+
+      const result = plan(assignments, [], [{ pageId: "existing-course", title: "EE 10" }]);
+
+      expect(result.coursesToCreate).toEqual([]);
+      expect(result.coursesToUpdate).toEqual([
+        expect.objectContaining({ pageId: "existing-course", canvasCourseId: "123" }),
+      ]);
+      expect(result.assignmentsToCreate.map((item) => item.courseKey)).toEqual([
+        "page:existing-course",
+        "page:existing-course",
+      ]);
+    },
+  );
+
   it("uses a configured course alias", () => {
     const aliasCourse: CourseRecord = {
       pageId: course.pageId,
@@ -267,6 +306,57 @@ describe("plan-first reconciliation", () => {
     const result = plan([aliasSource], [], matches, { "EN 1": "Engineering 1" });
     expect(result.assignmentsToCreate).toEqual([]);
     expect(result.warnings[0]?.message).toContain("configured-alias");
+  });
+
+  it("treats conflicting applicable aliases as ambiguous regardless of property order", () => {
+    const aliased = source({ courseName: "Name Alias", courseCode: "Code Alias" });
+    delete aliased.canvasCourseId;
+    const courses: CourseRecord[] = [
+      { pageId: "course-one", title: "Target One" },
+      { pageId: "course-two", title: "Target Two" },
+    ];
+    const existing = record({ removed: true, canvasState: "Removed" });
+    const entries = [
+      ["Name Alias", "Target One"],
+      ["Code Alias", "Target Two"],
+    ] as const;
+
+    for (const aliases of [
+      Object.fromEntries(entries),
+      Object.fromEntries([...entries].reverse()),
+    ]) {
+      const result = plan([aliased], [existing], courses, aliases);
+      expect(result.coursesToCreate).toEqual([]);
+      expect(result.assignmentsToCreate).toEqual([]);
+      expect(result.assignmentsToUpdate).toEqual([
+        expect.objectContaining({
+          pageId: existing.pageId,
+          properties: { removed: false, canvasState: "Active" },
+          verifyDescription: false,
+        }),
+      ]);
+      expect(result.assignmentsToRemove).toEqual([]);
+      expect(result.warnings).toContainEqual(
+        expect.objectContaining({
+          code: "ambiguous-course",
+          details: ["course-one", "course-two"],
+        }),
+      );
+    }
+  });
+
+  it("accepts multiple applicable aliases that resolve to the same course", () => {
+    const aliased = source({ courseName: "Name Alias", courseCode: "Code Alias" });
+    delete aliased.canvasCourseId;
+    const result = plan([aliased], [], [{ pageId: "course-one", title: "Target One" }], {
+      "Name Alias": "Target One",
+      "Code Alias": "Target One",
+    });
+
+    expect(result.assignmentsToCreate[0]?.courseKey).toBe("page:course-one");
+    expect(result.warnings).not.toContainEqual(
+      expect.objectContaining({ code: "ambiguous-course" }),
+    );
   });
 
   it("generates a name when only a course ID exists", () => {
@@ -343,6 +433,37 @@ describe("plan-first reconciliation", () => {
     expect(result.coursesToUpdate).toEqual([]);
     const warning = result.warnings.find((item) => item.code === "course-metadata-conflict");
     expect(warning?.message).toContain(field);
+  });
+
+  it("blocks a planned course enrichment when later source metadata conflicts", () => {
+    const first = source({ uid: "first", title: "First" });
+    const second = source({ uid: "second", title: "Second", canvasCourseId: "999" });
+    const result = plan([first, second], [], [{ pageId: "course-page", title: "EE 10" }]);
+
+    expect(result.coursesToUpdate).toEqual([]);
+    expect(result.assignmentsToCreate).toEqual([]);
+    expect(result.warnings).toContainEqual(
+      expect.objectContaining({ code: "course-metadata-conflict", details: ["course-page"] }),
+    );
+  });
+
+  it("detects a Canvas URL conflict against metadata enriched earlier in the plan", () => {
+    const first = source({ uid: "first", title: "First" });
+    const second = source({
+      uid: "second",
+      title: "Second",
+      canvasUrl: "https://other.example.edu/courses/123/assignments/999",
+    });
+    const result = plan(
+      [first, second],
+      [],
+      [{ pageId: "course-page", title: "EE 10", canvasCourseId: "123" }],
+    );
+
+    expect(result.coursesToUpdate).toEqual([]);
+    expect(result.assignmentsToCreate).toEqual([]);
+    const warning = result.warnings.find((item) => item.code === "course-metadata-conflict");
+    expect(warning?.message).toContain("Canvas URL");
   });
 
   it("a description hash version change deliberately schedules revalidation", () => {

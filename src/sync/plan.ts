@@ -12,7 +12,13 @@ import type {
 } from "../types.js";
 import { descriptionExcerpt } from "../notion/assignments.js";
 import { descriptionIntegrityAuditDue, managedDescriptionHash } from "../notion/descriptions.js";
-import { buildCourseIndex, matchCourseFromIndex } from "./course-matcher.js";
+import {
+  addCanvasCourseIdToIndex,
+  addCourseToIndex,
+  buildCourseIndex,
+  matchCourseFromIndex,
+  type CourseMatch,
+} from "./course-matcher.js";
 import { datesEqual, resolveDates } from "./date-resolution.js";
 import { buildAssignmentIndex, possibleDuplicateFromIndex } from "./duplicate-detector.js";
 import { absenceRemovalSafe, detectRemovals } from "./removal-detector.js";
@@ -150,7 +156,20 @@ export function buildPlan(
   operationCounters?: PlanningOperationCounters,
 ): SyncPlan {
   const planTimestamp = now.toISOString();
-  const courseIndex = buildCourseIndex(courses, aliases, operationCounters);
+  const plannedCourseRecords = courses.map((course) => ({ ...course }));
+  const courseKeysByPageId = new Map<string, string>(
+    courses.map((course) => [course.pageId, `page:${course.pageId}`] as const),
+  );
+  let courseIndex = buildCourseIndex(
+    plannedCourseRecords,
+    aliases,
+    operationCounters,
+    courseKeysByPageId,
+  );
+  const originalCourseIndex = buildCourseIndex(
+    courses.map((course) => ({ ...course })),
+    aliases,
+  );
   const assignmentIndex = buildAssignmentIndex(
     existingAssignments,
     courseIndex,
@@ -170,13 +189,78 @@ export function buildPlan(
     warnings: feedWarnings(feed),
   };
   const byUid = assignmentIndex.byUid;
-  const plannedCourseKeys = new Set<string>();
   const plannedCourseUpdates = new Map<string, SyncPlan["coursesToUpdate"][number]>();
-  const conflictedCoursePageIds = new Set<string>();
+  const conflictedCourseKeys = new Set<string>();
+  const unnamedCourseWarnings = new Map<string, PlanWarning>();
   const assignmentsAlreadySkippedForCourse = new Set<string>();
   const protectedPageIds = new Set<string>();
   const removalsByPageId = new Map<string, SyncPlan["assignmentsToRemove"][number]>();
   const plannedAssignmentUpdates = new Map<string, SyncPlan["assignmentsToUpdate"][number]>();
+
+  function rebuildCourseIndex(): void {
+    courseIndex = buildCourseIndex(
+      plannedCourseRecords,
+      aliases,
+      operationCounters,
+      courseKeysByPageId,
+    );
+  }
+
+  function updatePlannedCourseRecord(
+    courseKey: string,
+    update: { canvasCourseId?: string; canvasUrl?: string; syncUpdatedAt?: string },
+  ): void {
+    const record = plannedCourseRecords.find(
+      (candidate) => courseKeysByPageId.get(candidate.pageId) === courseKey,
+    );
+    if (!record) return;
+    if (update.canvasCourseId && !record.canvasCourseId) {
+      record.canvasCourseId = update.canvasCourseId;
+      addCanvasCourseIdToIndex(courseIndex, record, update.canvasCourseId);
+    }
+    if (update.canvasUrl) record.url = update.canvasUrl;
+    if (update.syncUpdatedAt) record.syncUpdatedAt = update.syncUpdatedAt;
+  }
+
+  function redirectPlannedCourse(fromKey: string, toKey: string): void {
+    const recordIndex = plannedCourseRecords.findIndex(
+      (candidate) => courseKeysByPageId.get(candidate.pageId) === fromKey,
+    );
+    if (recordIndex >= 0) {
+      const [record] = plannedCourseRecords.splice(recordIndex, 1);
+      if (record) courseKeysByPageId.delete(record.pageId);
+    }
+    const createIndex = plan.coursesToCreate.findIndex((course) => course.key === fromKey);
+    if (createIndex >= 0) plan.coursesToCreate.splice(createIndex, 1);
+    for (const assignment of plan.assignmentsToCreate) {
+      if (assignment.courseKey === fromKey) assignment.courseKey = toKey;
+    }
+    for (const [pageId, assignment] of plannedAssignmentUpdates) {
+      if (assignment.courseKey === fromKey) {
+        plannedAssignmentUpdates.set(pageId, { ...assignment, courseKey: toKey });
+      }
+    }
+    const warning = unnamedCourseWarnings.get(fromKey);
+    if (warning) {
+      const warningIndex = plan.warnings.indexOf(warning);
+      if (warningIndex >= 0) plan.warnings.splice(warningIndex, 1);
+      unnamedCourseWarnings.delete(fromKey);
+    }
+    rebuildCourseIndex();
+  }
+
+  function reconcileProvisionalMatch(
+    source: AssignmentFeed["assignments"][number],
+    match: CourseMatch,
+  ): CourseMatch {
+    if (match.kind !== "matched" || match.courseKey.startsWith("page:")) return match;
+    const existingMatch = matchCourseFromIndex(source, originalCourseIndex, planTimestamp);
+    if (existingMatch.kind === "create" || existingMatch.kind === "unidentified") return match;
+    if (existingMatch.kind === "matched") {
+      redirectPlannedCourse(match.courseKey, existingMatch.courseKey);
+    }
+    return existingMatch;
+  }
 
   function queueAssignmentUpdate(update: SyncPlan["assignmentsToUpdate"][number]): void {
     const current = plannedAssignmentUpdates.get(update.pageId);
@@ -255,7 +339,9 @@ export function buildPlan(
     const duplicates = possibleDuplicateFromIndex(
       source,
       assignmentIndex,
-      match.kind === "matched" ? match.course.pageId : undefined,
+      match.kind === "matched" && match.courseKey.startsWith("page:")
+        ? match.course.pageId
+        : undefined,
     );
     plan.skipped += 1;
     if (duplicates.length) {
@@ -287,12 +373,15 @@ export function buildPlan(
       continue;
     }
     const existing = uidMatches[0];
-    const match = matchCourseFromIndex(source, courseIndex, planTimestamp);
+    let match = matchCourseFromIndex(source, courseIndex, planTimestamp);
+    match = reconcileProvisionalMatch(source, match);
     if (uidMatches.length === 0) {
       const duplicates = possibleDuplicateFromIndex(
         source,
         assignmentIndex,
-        match.kind === "matched" ? match.course.pageId : undefined,
+        match.kind === "matched" && match.courseKey.startsWith("page:")
+          ? match.course.pageId
+          : undefined,
       );
       if (duplicates.length) {
         plan.skipped += 1;
@@ -312,7 +401,10 @@ export function buildPlan(
       for (const assignment of uidMatches) protectedPageIds.add(assignment.pageId);
       plan.warnings.push({
         code: "ambiguous-course",
-        message: `Multiple courses matched at the ${match.method} confidence level`,
+        message:
+          match.method === "configured-alias"
+            ? "Applicable configured-alias mappings resolved to multiple courses; assignment changes were blocked"
+            : `Multiple courses matched at the ${match.method} confidence level`,
         details: match.courses.map((course) => course.pageId),
       });
       continue;
@@ -334,11 +426,16 @@ export function buildPlan(
         assignmentsAlreadySkippedForCourse.add(existing.pageId);
       }
       plan.skipped += 1;
-      if (!conflictedCoursePageIds.has(match.course.pageId) && metrics) {
+      if (!conflictedCourseKeys.has(match.courseKey) && metrics) {
         metrics.coursesConflicted += 1;
       }
-      conflictedCoursePageIds.add(match.course.pageId);
+      conflictedCourseKeys.add(match.courseKey);
       plannedCourseUpdates.delete(match.course.pageId);
+      if (!match.courseKey.startsWith("page:")) {
+        plan.coursesToCreate = plan.coursesToCreate.filter(
+          (course) => course.key !== match.courseKey,
+        );
+      }
       for (const assignment of uidMatches) protectedPageIds.add(assignment.pageId);
       plan.warnings.push({
         code: "course-metadata-conflict",
@@ -347,7 +444,7 @@ export function buildPlan(
       });
       continue;
     }
-    if (match.kind === "matched" && conflictedCoursePageIds.has(match.course.pageId)) {
+    if (match.kind === "matched" && conflictedCourseKeys.has(match.courseKey)) {
       if (existing) {
         queueLifecycleUpdate(source, existing);
         assignmentsAlreadySkippedForCourse.add(existing.pageId);
@@ -357,51 +454,78 @@ export function buildPlan(
       continue;
     }
     if (match.kind === "matched" && match.update) {
-      const current = plannedCourseUpdates.get(match.course.pageId) ?? {
-        pageId: match.course.pageId,
-      };
-      const conflictsWithPlannedUpdate =
-        Boolean(
-          current.canvasCourseId &&
-            match.update.canvasCourseId &&
-            current.canvasCourseId !== match.update.canvasCourseId,
-        ) ||
-        Boolean(
-          current.canvasUrl &&
-            match.update.canvasUrl &&
-            current.canvasUrl !== match.update.canvasUrl,
+      if (!match.courseKey.startsWith("page:")) {
+        const createIndex = plan.coursesToCreate.findIndex(
+          (course) => course.key === match.courseKey,
         );
-      if (conflictsWithPlannedUpdate) {
-        if (existing) {
-          queueLifecycleUpdate(source, existing);
-          assignmentsAlreadySkippedForCourse.add(existing.pageId);
+        const current = plan.coursesToCreate[createIndex];
+        if (current) {
+          plan.coursesToCreate[createIndex] = {
+            ...current,
+            ...(match.update.canvasCourseId ? { canvasCourseId: match.update.canvasCourseId } : {}),
+            ...(match.update.canvasUrl ? { canvasUrl: match.update.canvasUrl } : {}),
+          };
+          updatePlannedCourseRecord(match.courseKey, match.update);
         }
-        if (!conflictedCoursePageIds.has(match.course.pageId) && metrics) {
-          metrics.coursesConflicted += 1;
+      } else {
+        const current = plannedCourseUpdates.get(match.course.pageId) ?? {
+          pageId: match.course.pageId,
+        };
+        const conflictsWithPlannedUpdate =
+          Boolean(
+            current.canvasCourseId &&
+              match.update.canvasCourseId &&
+              current.canvasCourseId !== match.update.canvasCourseId,
+          ) ||
+          Boolean(
+            current.canvasUrl &&
+              match.update.canvasUrl &&
+              current.canvasUrl !== match.update.canvasUrl,
+          );
+        if (conflictsWithPlannedUpdate) {
+          if (existing) {
+            queueLifecycleUpdate(source, existing);
+            assignmentsAlreadySkippedForCourse.add(existing.pageId);
+          }
+          if (!conflictedCourseKeys.has(match.courseKey) && metrics) {
+            metrics.coursesConflicted += 1;
+          }
+          conflictedCourseKeys.add(match.courseKey);
+          plannedCourseUpdates.delete(match.course.pageId);
+          for (const assignment of uidMatches) protectedPageIds.add(assignment.pageId);
+          plan.skipped += 1;
+          plan.warnings.push({
+            code: "course-metadata-conflict",
+            message: "Multiple source assignments supplied conflicting metadata for one course",
+            details: [match.course.pageId],
+          });
+          continue;
         }
-        conflictedCoursePageIds.add(match.course.pageId);
-        plannedCourseUpdates.delete(match.course.pageId);
-        for (const assignment of uidMatches) protectedPageIds.add(assignment.pageId);
-        plan.skipped += 1;
-        plan.warnings.push({
-          code: "course-metadata-conflict",
-          message: "Multiple source assignments supplied conflicting metadata for one course",
-          details: [match.course.pageId],
-        });
-        continue;
+        const merged = { ...current, ...match.update };
+        plannedCourseUpdates.set(match.course.pageId, merged);
+        updatePlannedCourseRecord(match.courseKey, merged);
       }
-      const merged = { ...current, ...match.update };
-      plannedCourseUpdates.set(match.course.pageId, merged);
     }
-    const courseKey = match.kind === "matched" ? `page:${match.course.pageId}` : match.course.key;
-    if (match.kind === "create" && !plannedCourseKeys.has(courseKey)) {
-      plannedCourseKeys.add(courseKey);
+    const courseKey = match.kind === "matched" ? match.courseKey : match.course.key;
+    if (match.kind === "create") {
       plan.coursesToCreate.push(match.course);
+      const pageId = `planned-course:${plan.coursesToCreate.length}`;
+      plannedCourseRecords.push({
+        pageId,
+        title: match.course.title,
+        ...(match.course.courseCode ? { courseCode: match.course.courseCode } : {}),
+        ...(match.course.canvasCourseId ? { canvasCourseId: match.course.canvasCourseId } : {}),
+        ...(match.course.canvasUrl ? { url: match.course.canvasUrl } : {}),
+      });
+      courseKeysByPageId.set(pageId, courseKey);
+      addCourseToIndex(courseIndex, plannedCourseRecords.at(-1)!, courseKey);
       if (!source.courseName && !source.courseCode) {
-        plan.warnings.push({
+        const warning: PlanWarning = {
           code: "unnamed-course",
           message: "A course lacked a usable name and will use a generated Canvas Course label",
-        });
+        };
+        unnamedCourseWarnings.set(courseKey, warning);
+        plan.warnings.push(warning);
       }
     }
 
@@ -412,7 +536,10 @@ export function buildPlan(
 
     const lifecycle = lifecycleProperties(existing);
     const properties: AssignmentPropertyUpdate = { ...lifecycle.properties };
-    const matchedPageId = match.kind === "matched" ? match.course.pageId : undefined;
+    const matchedPageId =
+      match.kind === "matched" && match.courseKey.startsWith("page:")
+        ? match.course.pageId
+        : undefined;
     if (matchedPageId && !existing.coursePageIds.includes(matchedPageId)) {
       properties.coursePageId = matchedPageId;
     } else if (match.kind === "create") {
@@ -462,13 +589,13 @@ export function buildPlan(
 
   plan.assignmentsToUpdate = [...plannedAssignmentUpdates.values()];
 
-  if (conflictedCoursePageIds.size) {
+  if (conflictedCourseKeys.size) {
     const blockedCreates = plan.assignmentsToCreate.filter((assignment) =>
-      conflictedCoursePageIds.has(assignment.courseKey.replace(/^page:/, "")),
+      conflictedCourseKeys.has(assignment.courseKey),
     );
     let blockedUpdatesNotAlreadySkipped = 0;
     plan.assignmentsToUpdate = plan.assignmentsToUpdate.flatMap((assignment) => {
-      if (!conflictedCoursePageIds.has(assignment.courseKey.replace(/^page:/, ""))) {
+      if (!conflictedCourseKeys.has(assignment.courseKey)) {
         return [assignment];
       }
       protectedPageIds.add(assignment.pageId);

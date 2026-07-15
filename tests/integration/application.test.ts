@@ -154,6 +154,57 @@ function removalFeed(presentUid = "uid-present"): AssignmentFeed {
 }
 
 describe("application modes and failure handling", () => {
+  it.each(["rich-first", "name-first"] as const)(
+    "applies one planned course creation for related assignments with %s ordering",
+    async (ordering) => {
+      const rich: ExternalAssignment = {
+        uid: "rich",
+        title: "Rich assignment",
+        courseName: "EE 10",
+        canvasCourseId: "123",
+        canvasUrl: "https://canvas.example.edu/courses/123/assignments/1",
+        inferredType: "Homework",
+      };
+      const nameOnly: ExternalAssignment = {
+        uid: "name-only",
+        title: "Name-only assignment",
+        courseName: "EE 10",
+        inferredType: "Homework",
+      };
+      const assignments = ordering === "rich-first" ? [rich, nameOnly] : [nameOnly, rich];
+      const plan = buildPlan(
+        assignmentFeed({
+          assignments,
+          diagnostics: {
+            ...emptyFeed.diagnostics,
+            totalEvents: assignments.length,
+            sourceUids: assignments.map((assignment) => assignment.uid),
+            normalizedAssignmentUids: assignments.map((assignment) => assignment.uid),
+          },
+        }),
+        [],
+        [],
+        {},
+        false,
+        "America/Los_Angeles",
+      );
+      const gateway = new FakeGateway();
+      gateway.simulateDefaultTemplate = true;
+
+      await applyPlan(gateway, config(), plan, counts());
+
+      expect(gateway.courses).toHaveLength(1);
+      expect(gateway.assignments).toHaveLength(2);
+      const coursePageId = gateway.courses[0]?.id;
+      const relatedCourseIds = gateway.assignments.map((assignment) => {
+        const properties = assignment.properties as Record<string, unknown>;
+        const relation = properties.Course as { relation: Array<{ id: string }> };
+        return relation.relation[0]?.id;
+      });
+      expect(relatedCourseIds).toEqual([coursePageId, coursePageId]);
+    },
+  );
+
   it("dry-run performs complete reads but no writes", async () => {
     const gateway = new FakeGateway();
     const proposedFeed: AssignmentFeed = {
