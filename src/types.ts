@@ -280,6 +280,8 @@ export interface RunMetrics {
   assignmentBodyReads: number;
   descriptionReplacements: number;
   descriptionUpdatesAvoided: number;
+  descriptionIntegrityAuditsDue: number;
+  descriptionIntegrityAuditsDeferred: number;
   descriptionIntegrityAuditsRun: number;
   descriptionIntegrityAuditsPassed: number;
   descriptionIntegrityRepairs: number;

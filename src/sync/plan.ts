@@ -11,7 +11,10 @@ import type {
   Trigger,
 } from "../types.js";
 import { descriptionExcerpt } from "../notion/assignments.js";
-import { descriptionIntegrityAuditDue, managedDescriptionHash } from "../notion/descriptions.js";
+import {
+  descriptionIntegrityAuditDecision,
+  managedDescriptionHash,
+} from "../notion/descriptions.js";
 import {
   addCanvasCourseIdToIndex,
   addCourseToIndex,
@@ -530,6 +533,7 @@ export function buildPlan(
     }
 
     if (!existing) {
+      if (metrics) metrics.descriptionIntegrityAuditsDue += 1;
       plan.assignmentsToCreate.push({ source, courseKey });
       continue;
     }
@@ -563,12 +567,23 @@ export function buildPlan(
     const excerptChanged = (existing.descriptionExcerpt ?? "") !== excerpt;
     const descriptionHash = managedDescriptionHash(source.descriptionMarkdown);
     const descriptionHashNeedsUpdate = existing.descriptionHash !== descriptionHash;
-    const verifyDescription =
-      descriptionHashNeedsUpdate ||
-      descriptionIntegrityAuditDue(existing.descriptionVerifiedAt, now);
-    if (!verifyDescription && metrics) {
-      metrics.descriptionUpdatesAvoided += 1;
-      metrics.descriptionBodyReadsAvoided += 1;
+    const auditDecision = descriptionHashNeedsUpdate
+      ? undefined
+      : descriptionIntegrityAuditDecision(
+          source.uid || existing.pageId,
+          existing.descriptionVerifiedAt,
+          notionTimezone,
+          now,
+        );
+    const verifyDescription = descriptionHashNeedsUpdate || auditDecision?.due === true;
+    if (metrics) {
+      if (verifyDescription) {
+        metrics.descriptionIntegrityAuditsDue += 1;
+      } else {
+        metrics.descriptionIntegrityAuditsDeferred += 1;
+        metrics.descriptionUpdatesAvoided += 1;
+        metrics.descriptionBodyReadsAvoided += 1;
+      }
     }
     if (excerptChanged) properties.rawDescription = excerpt;
     if (Object.keys(properties).length || verifyDescription) {

@@ -74,7 +74,7 @@ export function buildJobSummary(config: AppConfig, result: RunResult): string {
           `- Proposed Assignment pages: ${result.counts.created}`,
           `- Proposed Assignments updated: ${result.counts.updated}`,
           `- Proposed Assignments marked removed: ${result.counts.removed}`,
-          `- Proposed description integrity audits: ${result.plan?.assignmentsToUpdate.filter((assignment) => assignment.verifyDescription).length ?? 0}`,
+          `- Proposed description integrity audits: ${result.metrics.descriptionIntegrityAuditsDue}`,
         ]
       : [
           `- Assignment pages added: ${assignmentPagesAdded}`,
@@ -106,7 +106,9 @@ export function buildJobSummary(config: AppConfig, result: RunResult): string {
     `- Notion property-update retries: ${result.metrics.propertyUpdateRetries}`,
     `- Assignment body reads: ${result.metrics.assignmentBodyReads}`,
     `- Description updates avoided: ${result.metrics.descriptionUpdatesAvoided}`,
-    `- Description integrity audits: ${result.metrics.descriptionIntegrityAuditsRun}`,
+    `- Description integrity audits due this run: ${result.metrics.descriptionIntegrityAuditsDue}`,
+    `- Description integrity audits deferred: ${result.metrics.descriptionIntegrityAuditsDeferred}`,
+    `- Description integrity audits run: ${result.metrics.descriptionIntegrityAuditsRun}`,
     `- Description audits passed without repair: ${result.metrics.descriptionIntegrityAuditsPassed}`,
     `- Description integrity repairs: ${result.metrics.descriptionIntegrityRepairs}`,
     `- Description body reads avoided: ${result.metrics.descriptionBodyReadsAvoided}`,

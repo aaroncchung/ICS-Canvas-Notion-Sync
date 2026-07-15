@@ -56,6 +56,8 @@ function result(status: RunResult["status"]): RunResult {
 describe("GitHub Actions observability", () => {
   it("preserves proposed dry-run counts in the expanded job summary", () => {
     const value = result("Dry Run");
+    value.metrics.descriptionIntegrityAuditsDue = 2;
+    value.metrics.descriptionIntegrityAuditsDeferred = 7;
     value.plan = {
       coursesToCreate: [{ key: "course", title: "Course" }],
       coursesToUpdate: [],
@@ -76,6 +78,8 @@ describe("GitHub Actions observability", () => {
     expect(summary).toContain("Newly observed missing candidates: 2");
     expect(summary).toContain("Proposed Missing evidence advanced: 1");
     expect(summary).toContain("Removal inference safe: no");
+    expect(summary).toContain("Proposed description integrity audits: 2");
+    expect(summary).toContain("Description integrity audits deferred: 7");
   });
 
   it("emits sanitized fatal annotations only in GitHub Actions", () => {

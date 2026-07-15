@@ -155,17 +155,42 @@ describe("plan-first reconciliation", () => {
     expect(result.assignmentsToUpdate).toEqual([]);
     expect(metrics.descriptionUpdatesAvoided).toBe(1);
     expect(metrics.descriptionBodyReadsAvoided).toBe(1);
+    expect(metrics.descriptionIntegrityAuditsDue).toBe(0);
+    expect(metrics.descriptionIntegrityAuditsDeferred).toBe(1);
   });
 
+  it.each([undefined, "not-a-timestamp"])(
+    "schedules an immediate integrity audit for verification timestamp %s",
+    (descriptionVerifiedAt) => {
+      const existing = record();
+      if (descriptionVerifiedAt === undefined) delete existing.descriptionVerifiedAt;
+      else existing.descriptionVerifiedAt = descriptionVerifiedAt;
+      const result = plan([source()], [existing]);
+      expect(result.assignmentsToUpdate[0]).toMatchObject({
+        verifyDescription: true,
+        descriptionHashNeedsUpdate: false,
+      });
+    },
+  );
+
   it("schedules an integrity audit when a matching hash has stale verification", () => {
-    const result = plan(
-      [source()],
+    const metrics = createRunMetrics();
+    const result = buildPlan(
+      feed([source()]),
       [record({ descriptionVerifiedAt: "2026-05-01T00:00:00.000Z" })],
+      [course],
+      {},
+      false,
+      notionTimezone,
+      new Date("2026-07-13T12:00:00Z"),
+      metrics,
     );
     expect(result.assignmentsToUpdate[0]).toMatchObject({
       verifyDescription: true,
       descriptionHashNeedsUpdate: false,
     });
+    expect(metrics.descriptionIntegrityAuditsDue).toBe(1);
+    expect(metrics.descriptionIntegrityAuditsDeferred).toBe(0);
   });
 
   it("plans changed title, due date, and description", () => {
