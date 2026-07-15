@@ -259,7 +259,9 @@ export async function run(
           (assignment) => assignment.markRemoved,
         ).length;
         counts.missingAdvanced =
-          plan.assignmentsMissingEvidenceToUpdate.length +
+          plan.assignmentsMissingEvidenceToUpdate.filter(
+            (assignment) => assignment.transition === "advanced",
+          ).length +
           plan.assignmentsToRemove.filter(
             (assignment) => assignment.canvasMissingCountAfter !== undefined,
           ).length;

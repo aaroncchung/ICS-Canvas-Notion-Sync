@@ -41,6 +41,7 @@ import {
 
 const emptyFeed = assignmentFeed();
 const counts = runCounts;
+const REMOVAL_DUE_AT = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
 
 function assignmentCreate(uid = "uid-new"): AssignmentCreate {
   return {
@@ -94,6 +95,62 @@ function seedLogPage(gateway: FakeGateway, id: string, runId: string): void {
   gateway.seedPage("log", id, {
     Run: { title: [{ type: "text", text: { content: `Canvas sync GitHub run ${runId}` } }] },
   });
+}
+
+function seedRemovalAssignment(
+  gateway: FakeGateway,
+  evidence?: { since: string; count: number },
+): void {
+  gateway.assignments.push({
+    id: "assignment-missing",
+    properties: {
+      Assignment: { title: [{ plain_text: "Existing" }] },
+      Course: { relation: [{ id: "course" }] },
+      "Canvas UID": { rich_text: [{ plain_text: "uid-missing" }] },
+      "Canvas Due Date": { date: { start: REMOVAL_DUE_AT } },
+      "Canvas Description Hash": {
+        rich_text: [{ plain_text: managedDescriptionHash(undefined) }],
+      },
+      "Canvas Description Verified At": { date: { start: new Date().toISOString() } },
+      "Imported From": { select: { name: "Canvas ICS" } },
+      "Removed from Canvas": { checkbox: false },
+      "Canvas State": { select: { name: "Active" } },
+      ...(evidence
+        ? {
+            "Canvas Missing Since": { date: { start: evidence.since } },
+            "Canvas Missing Count": { number: evidence.count },
+          }
+        : {}),
+    },
+  });
+  gateway.courses.push({
+    id: "course",
+    properties: {
+      Course: { title: [{ plain_text: "EE 10" }] },
+      "Canvas Course ID": { rich_text: [{ plain_text: "123" }] },
+    },
+  });
+}
+
+function removalFeed(presentUid = "uid-present"): AssignmentFeed {
+  const present: ExternalAssignment = {
+    uid: presentUid,
+    title: presentUid === "uid-missing" ? "Existing" : "Present",
+    courseName: "EE 10",
+    canvasCourseId: "123",
+    dueAt: REMOVAL_DUE_AT,
+    inferredType: "Homework",
+  };
+  return {
+    assignments: presentUid === "uid-missing" ? [present] : [],
+    cancelledAssignments: [],
+    diagnostics: {
+      ...emptyFeed.diagnostics,
+      totalEvents: 1,
+      sourceUids: [present.uid],
+      normalizedAssignmentUids: [present.uid],
+    },
+  };
 }
 
 describe("application modes and failure handling", () => {
@@ -171,7 +228,7 @@ describe("application modes and failure handling", () => {
     });
     expect(result.plan?.assignmentsMissingEvidenceToUpdate).toHaveLength(1);
     expect(result.counts.missingObserved).toBe(1);
-    expect(result.counts.missingAdvanced).toBe(1);
+    expect(result.counts.missingAdvanced).toBe(0);
     expect(result.counts.removed).toBe(0);
     expect(gateway.writes).toEqual([]);
   });
@@ -714,6 +771,151 @@ describe("application modes and failure handling", () => {
   });
 });
 
+describe("removal evidence reporting", () => {
+  it("reports a first scheduled absence as observed but not advanced", async () => {
+    const gateway = new FakeGateway();
+    seedRemovalAssignment(gateway);
+
+    const result = await run(config({ trigger: "scheduled" }), {
+      gateway,
+      provider: new FakeProvider(removalFeed()),
+    });
+
+    expect(result.counts).toMatchObject({
+      missingObserved: 1,
+      missingAdvanced: 0,
+      removed: 0,
+    });
+    expect((await readAssignments(gateway, "assignments"))[0]).toMatchObject({
+      canvasMissingCount: 1,
+    });
+    const logPageId = gateway.pages.get("log")?.[0]?.id;
+    expect(typeof logPageId).toBe("string");
+    const logText = (await managedChildren(gateway, logPageId as string)).map(blockText);
+    expect(logText).toContain("Newly observed missing candidates: 1");
+    expect(logText).toContain("Missing evidence advanced: 0");
+  });
+
+  it("reports a repeated scheduled absence before the interval as advanced", async () => {
+    const gateway = new FakeGateway();
+    seedRemovalAssignment(gateway, {
+      since: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
+      count: 1,
+    });
+
+    const result = await run(config({ trigger: "scheduled" }), {
+      gateway,
+      provider: new FakeProvider(removalFeed()),
+    });
+
+    expect(result.counts).toMatchObject({
+      missingObserved: 0,
+      missingAdvanced: 1,
+      removed: 0,
+    });
+    expect((await readAssignments(gateway, "assignments"))[0]).toMatchObject({
+      canvasMissingCount: 2,
+    });
+  });
+
+  it("reports the later evidence count as advanced when persistent absence removes", async () => {
+    const gateway = new FakeGateway();
+    seedRemovalAssignment(gateway, {
+      since: new Date(Date.now() - 7 * 60 * 60 * 1000).toISOString(),
+      count: 1,
+    });
+
+    const result = await run(config({ trigger: "scheduled" }), {
+      gateway,
+      provider: new FakeProvider(removalFeed()),
+    });
+
+    expect(result.counts).toMatchObject({
+      missingObserved: 0,
+      missingAdvanced: 1,
+      removed: 1,
+    });
+  });
+
+  it("reports a manual observation without persisting or advancing evidence", async () => {
+    const gateway = new FakeGateway();
+    seedRemovalAssignment(gateway);
+
+    const result = await run(config({ trigger: "manual" }), {
+      gateway,
+      provider: new FakeProvider(removalFeed()),
+    });
+
+    expect(result.counts).toMatchObject({
+      missingObserved: 1,
+      missingAdvanced: 0,
+      removed: 0,
+    });
+    expect(
+      gateway.writes.some((write) => write.kind === "update" && write.id === "assignment-missing"),
+    ).toBe(false);
+  });
+
+  it.each([
+    ["first observation", undefined, { missingObserved: 1, missingAdvanced: 0, removed: 0 }],
+    [
+      "evidence increase",
+      { ageHours: 1, count: 1 },
+      { missingObserved: 0, missingAdvanced: 1, removed: 0 },
+    ],
+    [
+      "persistent-absence removal",
+      { ageHours: 7, count: 1 },
+      { missingObserved: 0, missingAdvanced: 1, removed: 1 },
+    ],
+  ])("uses identical dry-run semantics for %s", async (_label, evidence, expected) => {
+    const gateway = new FakeGateway();
+    seedRemovalAssignment(
+      gateway,
+      evidence
+        ? {
+            since: new Date(Date.now() - evidence.ageHours * 60 * 60 * 1000).toISOString(),
+            count: evidence.count,
+          }
+        : undefined,
+    );
+
+    const result = await run(config({ mode: "dry-run", trigger: "scheduled" }), {
+      gateway,
+      provider: new FakeProvider(removalFeed()),
+    });
+
+    expect(result.counts).toMatchObject(expected);
+    expect(gateway.writes).toEqual([]);
+  });
+
+  it("reports clearing prior evidence when the assignment is present", async () => {
+    const gateway = new FakeGateway();
+    seedRemovalAssignment(gateway, {
+      since: new Date(Date.now() - 7 * 60 * 60 * 1000).toISOString(),
+      count: 1,
+    });
+
+    const result = await run(config({ trigger: "scheduled" }), {
+      gateway,
+      provider: new FakeProvider(removalFeed("uid-missing")),
+    });
+
+    expect(result.counts).toMatchObject({
+      missingObserved: 0,
+      missingAdvanced: 0,
+      missingCleared: 1,
+      removed: 0,
+    });
+    expect((await readAssignments(gateway, "assignments"))[0]).not.toHaveProperty(
+      "canvasMissingSince",
+    );
+    expect((await readAssignments(gateway, "assignments"))[0]).not.toHaveProperty(
+      "canvasMissingCount",
+    );
+  });
+});
+
 describe("ambiguous create recovery", () => {
   it("recovers an applied assignment create after a statusless transport failure", async () => {
     const gateway = new FakeGateway();
@@ -1148,6 +1350,83 @@ describe("managed descriptions", () => {
     expect(JSON.stringify(gateway.writes)).toContain(managedDescriptionHash("Old description"));
   });
 
+  it.each([
+    [
+      "link URL",
+      {
+        rich_text: [
+          {
+            type: "text",
+            text: {
+              content: "Old description",
+              link: { url: "https://example.invalid/changed" },
+            },
+          },
+        ],
+      },
+    ],
+    [
+      "annotation",
+      {
+        rich_text: [
+          {
+            type: "text",
+            text: { content: "Old description" },
+            annotations: { bold: true },
+          },
+        ],
+      },
+    ],
+    ["block color", { rich_text: [{ plain_text: "Old description" }], color: "red" }],
+    [
+      "rich-text segmentation",
+      { rich_text: [{ plain_text: "Old " }, { plain_text: "description" }] },
+    ],
+  ])("repairs unchanged visible text when its %s changes", async (_label, paragraph) => {
+    const gateway = descriptionGateway();
+    const child = gateway.blocks.get("managed")?.[0];
+    expect(child).toBeDefined();
+    child!.paragraph = paragraph;
+
+    const result = await replaceManagedDescription(gateway, "page", "Old description");
+
+    expect(result).toEqual({ repaired: true, replaced: true });
+    expect(await readManagedDescription(gateway, "page")).toBe("Old description");
+  });
+
+  it("repairs unchanged visible text when an unexpected nested child is present", async () => {
+    const gateway = descriptionGateway();
+    const child = gateway.blocks.get("managed")?.[0];
+    expect(child).toBeDefined();
+    child!.has_children = true;
+    gateway.seedBlock("old-child", templateBlock("unexpected-child", "Unexpected nested text"));
+
+    const result = await replaceManagedDescription(gateway, "page", "Old description");
+
+    expect(result).toEqual({ repaired: true, replaced: true });
+    expect(gateway.writes).toContainEqual({ kind: "delete", id: "managed" });
+  });
+
+  it("ignores server-generated metadata during managed-body verification", async () => {
+    const gateway = descriptionGateway();
+    const child = gateway.blocks.get("managed")?.[0];
+    expect(child).toBeDefined();
+    Object.assign(child!, {
+      created_time: "2026-07-14T12:00:00.000Z",
+      last_edited_time: "2026-07-14T12:05:00.000Z",
+      created_by: { object: "user", id: "server-user" },
+      last_edited_by: { object: "user", id: "server-user" },
+      parent: { type: "block_id", block_id: "managed" },
+      archived: false,
+      in_trash: false,
+    });
+
+    const result = await replaceManagedDescription(gateway, "page", "Old description");
+
+    expect(result).toEqual({ repaired: false, replaced: false });
+    expect(gateway.writes).toEqual([]);
+  });
+
   it("repairs a missing canonical toggle and preserves user-owned template blocks", async () => {
     const gateway = new FakeGateway();
     gateway.seedBlock("page", {
@@ -1444,7 +1723,7 @@ describe("partial execution and Sync Log recovery", () => {
       if (error instanceof ApplyPlanError) failure = error;
       else throw error;
     }
-    expect(appliedCounts.missingAdvanced).toBe(1);
+    expect(appliedCounts.missingAdvanced).toBe(0);
     expect(failure?.execution.appliedOperations).toContainEqual({
       kind: "assignment-missing-evidence-update",
       target: "assignment-a",

@@ -340,7 +340,7 @@ export async function applyPlan(
         canvasMissingCount: update.canvasMissingCount,
       }),
     );
-    counts.missingAdvanced += 1;
+    if (update.transition === "advanced") counts.missingAdvanced += 1;
   }
 
   for (const assignment of plan.assignmentsToRemove.filter(

@@ -25,6 +25,14 @@ interface ManagedSectionReconciliation {
   replaced: boolean;
 }
 
+type CanonicalValue =
+  | null
+  | boolean
+  | number
+  | string
+  | CanonicalValue[]
+  | { [key: string]: CanonicalValue };
+
 export function blockText(block: Block): string {
   const type = block.type;
   if (typeof type !== "string") return "";
@@ -56,13 +64,128 @@ function toggle(title: string): Block {
   };
 }
 
+function canonicalValue(value: unknown): CanonicalValue {
+  if (
+    value === null ||
+    typeof value === "boolean" ||
+    typeof value === "number" ||
+    typeof value === "string"
+  ) {
+    return value;
+  }
+  if (Array.isArray(value)) return value.map(canonicalValue);
+  if (!value || typeof value !== "object") return null;
+
+  const result: { [key: string]: CanonicalValue } = {};
+  const record = value as Record<string, unknown>;
+  for (const key of Object.keys(record).sort()) {
+    const child = record[key];
+    if (child !== undefined) result[key] = canonicalValue(child);
+  }
+  return result;
+}
+
+function canonicalAnnotations(value: unknown): CanonicalValue {
+  const annotations = value && typeof value === "object" ? (value as Record<string, unknown>) : {};
+  return {
+    bold: annotations.bold === true,
+    italic: annotations.italic === true,
+    strikethrough: annotations.strikethrough === true,
+    underline: annotations.underline === true,
+    code: annotations.code === true,
+    color: typeof annotations.color === "string" ? annotations.color : "default",
+  };
+}
+
+function canonicalRichText(value: unknown): CanonicalValue[] {
+  if (!Array.isArray(value)) return [];
+  return value.map((item) => {
+    if (!item || typeof item !== "object") return { type: "invalid", value: canonicalValue(item) };
+    const record = item as Record<string, unknown>;
+    const type = typeof record.type === "string" ? record.type : "text";
+    const annotations = canonicalAnnotations(record.annotations);
+    if (type === "text") {
+      const text =
+        record.text && typeof record.text === "object"
+          ? (record.text as Record<string, unknown>)
+          : {};
+      const link =
+        text.link && typeof text.link === "object"
+          ? (text.link as Record<string, unknown>)
+          : undefined;
+      const content =
+        typeof text.content === "string"
+          ? text.content
+          : typeof record.plain_text === "string"
+            ? record.plain_text
+            : "";
+      return {
+        type,
+        text: {
+          content,
+          link: typeof link?.url === "string" ? { url: link.url } : null,
+        },
+        annotations,
+      };
+    }
+    return {
+      type,
+      payload: canonicalValue(record[type]),
+      annotations,
+    };
+  });
+}
+
+function canonicalPayload(block: Block, type: string): CanonicalValue {
+  const value = block[type];
+  const payload = value && typeof value === "object" ? (value as Record<string, unknown>) : {};
+  if (type === "paragraph" || type === "toggle" || /^heading_[123]$/.test(type)) {
+    return {
+      rich_text: canonicalRichText(payload.rich_text),
+      color: typeof payload.color === "string" ? payload.color : "default",
+      ...(/^heading_[123]$/.test(type) ? { is_toggleable: payload.is_toggleable === true } : {}),
+    };
+  }
+  const managedPayload = { ...payload };
+  delete managedPayload.children;
+  return canonicalValue(managedPayload);
+}
+
+function canonicalBlock(block: Block, includeChildren: boolean): CanonicalValue {
+  const type = typeof block.type === "string" ? block.type : "";
+  const payload = block[type];
+  const inlineChildren =
+    payload && typeof payload === "object"
+      ? (payload as Record<string, unknown>).children
+      : undefined;
+  return {
+    type,
+    payload: canonicalPayload(block, type),
+    ...(includeChildren
+      ? {
+          has_children:
+            block.has_children === true ||
+            (Array.isArray(inlineChildren) && inlineChildren.length > 0),
+        }
+      : {}),
+  };
+}
+
+export function managedBlockCanonicalRepresentation(blocks: Block[]): string {
+  return JSON.stringify(blocks.map((block) => canonicalBlock(block, true)));
+}
+
 function isToggle(block: Block, title: string): boolean {
-  return block.type === "toggle" && blockText(block) === title && typeof block.id === "string";
+  return (
+    block.type === "toggle" &&
+    typeof block.id === "string" &&
+    JSON.stringify(canonicalBlock(block, false)) ===
+      JSON.stringify(canonicalBlock(toggle(title), false))
+  );
 }
 
 function signature(block: Block): string {
-  const type = typeof block.type === "string" ? block.type : "";
-  return JSON.stringify([type, blockText(block)]);
+  return JSON.stringify(canonicalBlock(block, true));
 }
 
 function signaturesEqual(actual: string[], expected: string[]): boolean {

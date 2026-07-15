@@ -103,6 +103,30 @@ describe("optional JSON configuration", () => {
     });
   });
 
+  it.each([
+    ["punctuation", "EE-10", "EE 10"],
+    ["whitespace", "EE   10", " EE 10 "],
+    ["Unicode normalization", "Caf\u00e9", "Cafe\u0301"],
+    ["casing", "Engineering One", "engineering one"],
+  ])("rejects %s collisions between normalized alias sources", (_label, first, second) => {
+    const aliases = { [first]: "Target One", [second]: "Target Two" };
+    expect(() => parseCourseAliases(aliases)).toThrow(second);
+    expect(() => parseCourseAliases(aliases)).toThrow(first);
+    expect(() => parseCourseAliases(aliases)).toThrow("their targets differ");
+  });
+
+  it("rejects equivalent normalized alias mappings for clarity", () => {
+    const aliases = {
+      "EN-1": "Engineering-One",
+      " en 1 ": "engineering one",
+    };
+    expect(() => parseCourseAliases(aliases)).toThrow(" en 1 ");
+    expect(() => parseCourseAliases(aliases)).toThrow("EN-1");
+    expect(() => parseCourseAliases(aliases)).toThrow(
+      "equivalent mappings are rejected for clarity",
+    );
+  });
+
   const invalidRules: unknown[] = [
     [],
     [{ type: "Unsupported", patterns: ["quiz"] }],

@@ -3,6 +3,7 @@ import type { NotionGateway } from "./client.js";
 import {
   blockText,
   createManagedSectionSnapshot,
+  managedBlockCanonicalRepresentation,
   reconcileManagedSection,
   verifyManagedSection,
 } from "./managed-section.js";
@@ -10,7 +11,7 @@ import {
 export const MANAGED_DESCRIPTION_TITLE = "Canvas Description — managed by sync";
 export const PENDING_MANAGED_DESCRIPTION_TITLE =
   "Canvas Description — managed by sync [replacement pending]";
-export const DESCRIPTION_HASH_VERSION = "canvas-description:v1";
+export const DESCRIPTION_HASH_VERSION = "canvas-description:v2";
 export const DESCRIPTION_INTEGRITY_INTERVAL_DAYS = 30;
 
 function paragraph(content: string): Record<string, unknown> {
@@ -44,7 +45,7 @@ export function managedDescriptionHash(
   markdown: string | undefined,
   version = DESCRIPTION_HASH_VERSION,
 ): string {
-  const representation = JSON.stringify(descriptionBlocks(markdown ?? ""));
+  const representation = managedBlockCanonicalRepresentation(descriptionBlocks(markdown ?? ""));
   return `${version}:${createHash("sha256").update(representation).digest("hex")}`;
 }
 

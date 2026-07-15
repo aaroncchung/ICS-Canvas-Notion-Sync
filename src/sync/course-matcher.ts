@@ -5,6 +5,9 @@ import type {
   ExternalAssignment,
   PlanningOperationCounters,
 } from "../types.js";
+import { normalizeCourse } from "./course-normalization.js";
+
+export { normalizeCourse } from "./course-normalization.js";
 
 export type CourseMatch =
   | { kind: "matched"; course: CourseRecord; method: string; update?: CourseUpdate }
@@ -17,15 +20,6 @@ export type CourseMatch =
       fields: Array<"Canvas Course ID" | "Canvas URL">;
     }
   | { kind: "unidentified" };
-
-export function normalizeCourse(value: string): string {
-  return value
-    .normalize("NFKD")
-    .replace(/[\p{P}\p{S}]+/gu, " ")
-    .replace(/\s+/g, " ")
-    .trim()
-    .toLocaleLowerCase("en-US");
-}
 
 export interface IndexedCourse {
   readonly course: CourseRecord;

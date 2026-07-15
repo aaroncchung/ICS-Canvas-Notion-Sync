@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { z } from "zod";
+import { normalizeCourse } from "./sync/course-normalization.js";
 import { ASSIGNMENT_TYPES, type AssignmentType, type RunMode, type Trigger } from "./types.js";
 
 export const DEFAULT_MISSING_EVIDENCE_MINIMUM_HOURS = 6;
@@ -40,6 +41,7 @@ const configuredString = (maximum: number) =>
 const aliasesSchema = z
   .record(z.string(), configuredString(MAX_ALIAS_LENGTH))
   .superRefine((aliases, context) => {
+    const normalizedSources = new Map<string, { rawSource: string; normalizedTarget: string }>();
     for (const key of Object.keys(aliases)) {
       if (!key.trim()) {
         context.addIssue({ code: "custom", path: [key], message: "key must be nonempty" });
@@ -48,6 +50,24 @@ const aliasesSchema = z
           code: "custom",
           path: [key],
           message: `key must contain at most ${MAX_ALIAS_LENGTH} characters`,
+        });
+      }
+      const normalizedSource = normalizeCourse(key);
+      const previous = normalizedSources.get(normalizedSource);
+      if (previous) {
+        const normalizedTarget = normalizeCourse(aliases[key]!);
+        context.addIssue({
+          code: "custom",
+          path: [key],
+          message:
+            normalizedTarget === previous.normalizedTarget
+              ? `duplicates alias source ${JSON.stringify(previous.rawSource)} after normalization; equivalent mappings are rejected for clarity`
+              : `conflicts with alias source ${JSON.stringify(previous.rawSource)} after normalization because their targets differ`,
+        });
+      } else {
+        normalizedSources.set(normalizedSource, {
+          rawSource: key,
+          normalizedTarget: normalizeCourse(aliases[key]!),
         });
       }
     }

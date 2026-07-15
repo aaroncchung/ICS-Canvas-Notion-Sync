@@ -87,7 +87,7 @@ Aliases are optional. Copy `config/course-aliases.example.json` to `config/cours
 }
 ```
 
-The left side is the Canvas label; the right side is an existing Notion Course title or Course Code. An absent file means no aliases.
+The left side is the Canvas label; the right side is an existing Notion Course title or Course Code. An absent file means no aliases. Alias source keys must remain unique after the same Unicode, punctuation, whitespace, and casing normalization used for course matching; duplicate normalized sources are rejected even when their targets are equivalent, so configuration intent stays explicit.
 
 Both optional JSON files are structurally validated. Alias keys and values must be bounded nonempty strings. `config/assignment-type-rules.json`, when present, must be a nonempty list of supported types with nonempty, bounded phrase lists and no normalized duplicate type/phrase pair. Assignment-type patterns are literal phrases, not regular expressions; matcher construction escapes them.
 

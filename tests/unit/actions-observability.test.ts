@@ -73,6 +73,8 @@ describe("GitHub Actions observability", () => {
     expect(summary).toContain("Trigger: manual");
     expect(summary).toContain("Proposed Assignment pages: 2");
     expect(summary).toContain("Proposed Course pages: 1");
+    expect(summary).toContain("Newly observed missing candidates: 2");
+    expect(summary).toContain("Proposed Missing evidence advanced: 1");
     expect(summary).toContain("Removal inference safe: no");
   });
 
