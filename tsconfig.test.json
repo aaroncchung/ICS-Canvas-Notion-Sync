@@ -1,0 +1,10 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "composite": true,
+    "noEmit": true,
+    "tsBuildInfoFile": "dist/tsconfig.test.tsbuildinfo"
+  },
+  "include": ["tests", "eslint.config.js", "vitest.config.ts"],
+  "references": [{ "path": "./tsconfig.build.json" }]
+}
