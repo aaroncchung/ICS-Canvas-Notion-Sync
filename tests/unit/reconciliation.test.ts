@@ -163,6 +163,36 @@ function auditDateForReason(reason: "deferred" | "scheduled-slot", verifiedAt: s
   throw new Error(`No ${reason} audit date found`);
 }
 
+function courseConflictPlan(
+  ordering: "auditable-first" | "conflicting-first",
+  existing: AssignmentRecord,
+  now = new Date("2026-07-13T12:00:00Z"),
+) {
+  const auditable = source({ uid: existing.uid });
+  const conflicting = source({
+    uid: "conflicting",
+    title: "Conflicting metadata source",
+    canvasCourseId: "999",
+    canvasAssignmentId: "999",
+    canvasUrl: "https://canvas.example.edu/courses/999/assignments/999",
+    dueAt: "2026-08-30T20:00:00.000Z",
+  });
+  const assignments =
+    ordering === "auditable-first" ? [auditable, conflicting] : [conflicting, auditable];
+  const metrics = createRunMetrics();
+  const result = buildPlan(
+    feed(assignments),
+    [existing],
+    [{ pageId: "course-page", title: "EE 10", courseCode: "EE 10" }],
+    {},
+    false,
+    notionTimezone,
+    now,
+    metrics,
+  );
+  return { metrics, result };
+}
+
 describe("plan-first reconciliation", () => {
   it("a repeated run is unchanged and creates no duplicate", () => {
     const result = plan([source()]);
@@ -529,6 +559,70 @@ describe("plan-first reconciliation", () => {
     expect(result.warnings).toContainEqual(
       expect.objectContaining({ code: "course-metadata-conflict", details: ["course-page"] }),
     );
+  });
+
+  it("removes audit and create metrics pruned by a later course conflict", () => {
+    const existing = record({ uid: "auditable" });
+    delete existing.descriptionVerifiedAt;
+    const { metrics, result } = courseConflictPlan("auditable-first", existing);
+
+    expect(result.assignmentsToCreate).toEqual([]);
+    expect(result.assignmentsToUpdate).toEqual([]);
+    expect(metrics.descriptionIntegrityAuditsDue).toBe(0);
+    expect(metrics.descriptionIntegrityAuditsDeferred).toBe(0);
+  });
+
+  it("keeps finalized audit metrics independent of conflicting source order", () => {
+    const existing = record({ uid: "auditable" });
+    delete existing.descriptionVerifiedAt;
+    const forward = courseConflictPlan("auditable-first", existing);
+    const reversed = courseConflictPlan("conflicting-first", existing);
+
+    expect(reversed.result).toEqual(forward.result);
+    expect(reversed.metrics).toEqual(forward.metrics);
+    expect(forward.metrics.descriptionIntegrityAuditsDue).toBe(0);
+  });
+
+  it("does not count an audit when conflict pruning retains only lifecycle properties", () => {
+    const existing = record({ uid: "auditable", removed: true, canvasState: "Removed" });
+    delete existing.descriptionVerifiedAt;
+    const { metrics, result } = courseConflictPlan("auditable-first", existing);
+
+    expect(result.assignmentsToUpdate).toEqual([
+      expect.objectContaining({
+        pageId: existing.pageId,
+        properties: { removed: false, canvasState: "Active" },
+        verifyDescription: false,
+      }),
+    ]);
+    expect(metrics.descriptionIntegrityAuditsDue).toBe(0);
+    expect(metrics.descriptionIntegrityAuditsDeferred).toBe(0);
+  });
+
+  it("excludes conflict-blocked deferrals and avoidances in either source order", () => {
+    const verifiedAt = "2026-05-20T12:00:00.000Z";
+    const now = auditDateForReason("deferred", verifiedAt);
+    const existing = record({ uid: "auditable", descriptionVerifiedAt: verifiedAt });
+    const forward = courseConflictPlan("auditable-first", existing, now);
+    const reversed = courseConflictPlan("conflicting-first", existing, now);
+
+    expect({
+      coursesToCreate: reversed.result.coursesToCreate,
+      coursesToUpdate: reversed.result.coursesToUpdate,
+      assignmentsToCreate: reversed.result.assignmentsToCreate,
+      assignmentsToUpdate: reversed.result.assignmentsToUpdate,
+    }).toEqual({
+      coursesToCreate: forward.result.coursesToCreate,
+      coursesToUpdate: forward.result.coursesToUpdate,
+      assignmentsToCreate: forward.result.assignmentsToCreate,
+      assignmentsToUpdate: forward.result.assignmentsToUpdate,
+    });
+    for (const { metrics } of [forward, reversed]) {
+      expect(metrics.descriptionIntegrityAuditsDue).toBe(0);
+      expect(metrics.descriptionIntegrityAuditsDeferred).toBe(0);
+      expect(metrics.descriptionUpdatesAvoided).toBe(0);
+      expect(metrics.descriptionBodyReadsAvoided).toBe(0);
+    }
   });
 
   it("detects a Canvas URL conflict against metadata enriched earlier in the plan", () => {
