@@ -34,11 +34,15 @@ jobs:
           node-version: 24
           cache: npm
           cache-dependency-path: package-lock.json
-      - run: npm ci --no-audit --fund=false
-      - run: npm run lint
-      - run: npm run format:check
-      - run: npm run typecheck
-      - run: npm run test:unit
-      - run: npm run test:integration
-      - run: npm run build
-      - run: npm audit
+      - name: Install dependencies
+        run: npm ci --no-audit --fund=false
+      - name: Lint
+        run: npm run lint
+      - name: Check formatting
+        run: npm run format:check
+      - name: Type-check application and tests; build production
+        run: npm run check:types-and-build
+      - name: Run unit and integration tests
+        run: npm test
+      - name: Audit dependencies
+        run: npm audit
