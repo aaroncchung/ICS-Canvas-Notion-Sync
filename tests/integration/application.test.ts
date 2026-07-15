@@ -22,6 +22,9 @@ import { ApplyPlanError, applyPlan } from "../../src/sync/reconcile.js";
 import type {
   AssignmentCreate,
   AssignmentFeed,
+  AssignmentRecord,
+  CourseRecord,
+  ExternalAssignment,
   RunCounts,
   RunResult,
   SyncPlan,
@@ -171,6 +174,122 @@ describe("application modes and failure handling", () => {
     expect(result.counts.missingAdvanced).toBe(1);
     expect(result.counts.removed).toBe(0);
     expect(gateway.writes).toEqual([]);
+  });
+
+  it("applies exact-UID lifecycle recovery without changing an unresolved course relation", async () => {
+    const baseSource = (): ExternalAssignment => ({
+      uid: "uid-reappeared",
+      title: "Unsafe changed title",
+      courseName: "EE 10",
+      courseCode: "EE 10",
+      canvasCourseId: "123",
+      canvasUrl: "https://canvas.example.edu/courses/123/assignments/456",
+      dueAt: "2026-07-20T20:00:00.000Z",
+      descriptionMarkdown: "Unsafe changed description",
+      inferredType: "Homework",
+    });
+    const ambiguousSource = baseSource();
+    delete ambiguousSource.canvasCourseId;
+    const unidentifiedSource = baseSource();
+    delete unidentifiedSource.canvasCourseId;
+    delete unidentifiedSource.courseName;
+    delete unidentifiedSource.courseCode;
+    const cases: Array<{
+      name: string;
+      source: ExternalAssignment;
+      courses: CourseRecord[];
+      existingCoursePageId: string;
+      warning: string;
+    }> = [
+      {
+        name: "ambiguous",
+        source: ambiguousSource,
+        courses: [
+          { pageId: "course-one", title: "EE 10", courseCode: "EE 10" },
+          { pageId: "course-two", title: "EE 10", courseCode: "EE 10" },
+        ],
+        existingCoursePageId: "existing-course",
+        warning: "ambiguous-course",
+      },
+      {
+        name: "unidentified",
+        source: unidentifiedSource,
+        courses: [{ pageId: "course-one", title: "EE 10" }],
+        existingCoursePageId: "existing-course",
+        warning: "unidentified-course",
+      },
+      {
+        name: "conflicting",
+        source: baseSource(),
+        courses: [
+          {
+            pageId: "course-conflict",
+            title: "EE 10",
+            courseCode: "EE 10",
+            canvasCourseId: "999",
+          },
+        ],
+        existingCoursePageId: "course-conflict",
+        warning: "course-metadata-conflict",
+      },
+    ];
+
+    for (const testCase of cases) {
+      const gateway = new FakeGateway();
+      const relation = { relation: [{ id: testCase.existingCoursePageId }] };
+      gateway.seedPage("assignments", "assignment-page", { Course: relation });
+      const existing: AssignmentRecord = {
+        pageId: "assignment-page",
+        uid: testCase.source.uid,
+        title: "Original title",
+        coursePageIds: [testCase.existingCoursePageId],
+        canvasMissingSince: "2026-07-12T00:00:00.000Z",
+        canvasMissingCount: 2,
+        personalStatus: "In progress",
+        priority: "High",
+        assignmentType: "Quiz",
+        removed: true,
+        canvasState: "Removed",
+      };
+      const plan = buildPlan(
+        assignmentFeed({
+          assignments: [testCase.source],
+          diagnostics: {
+            ...emptyFeed.diagnostics,
+            totalEvents: 1,
+            sourceUids: [testCase.source.uid],
+            normalizedAssignmentUids: [testCase.source.uid],
+          },
+        }),
+        [existing],
+        testCase.courses,
+        {},
+        false,
+        "America/Los_Angeles",
+      );
+      expect(plan.warnings, testCase.name).toContainEqual(
+        expect.objectContaining({ code: testCase.warning }),
+      );
+      expect(plan.assignmentsToUpdate, testCase.name).toHaveLength(1);
+      expect(plan.assignmentsToUpdate[0]?.properties, testCase.name).toEqual({
+        removed: false,
+        canvasState: "Active",
+        canvasMissingSince: null,
+        canvasMissingCount: null,
+      });
+
+      await applyPlan(gateway, config(), plan, counts());
+      const write = gateway.writes.find(
+        (candidate) => candidate.kind === "update" && candidate.id === existing.pageId,
+      );
+      const writtenProperties = write?.value as Record<string, unknown>;
+      expect(writtenProperties, testCase.name).not.toHaveProperty("Course");
+      expect(writtenProperties, testCase.name).not.toHaveProperty("Assignment");
+      expect(writtenProperties, testCase.name).not.toHaveProperty("Canvas URL");
+      expect(writtenProperties, testCase.name).not.toHaveProperty("Canvas Due Date");
+      const storedProperties = gateway.assignments[0]?.properties as Record<string, unknown>;
+      expect(storedProperties.Course, testCase.name).toEqual(relation);
+    }
   });
 
   it("validate mode performs no data writes", async () => {
@@ -1008,6 +1127,7 @@ describe("managed descriptions", () => {
       [{ pageId: "course", title: "EE 10" }],
       {},
       false,
+      "America/Los_Angeles",
       new Date("2026-07-13T00:00:00Z"),
       gateway.metrics,
     );

@@ -233,6 +233,7 @@ export async function run(
         courses,
         config.aliases,
         config.disableRemovals,
+        config.NOTION_TIMEZONE,
         new Date(),
         metrics,
         config.trigger,

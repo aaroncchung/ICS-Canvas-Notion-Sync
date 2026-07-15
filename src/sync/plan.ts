@@ -21,6 +21,37 @@ function sameOptional(left?: string, right?: string): boolean {
   return (left ?? undefined) === (right ?? undefined);
 }
 
+function lifecycleProperties(existing: AssignmentRecord): {
+  properties: AssignmentPropertyUpdate;
+  missingEvidenceCleared: boolean;
+} {
+  const properties: AssignmentPropertyUpdate = {};
+  if (existing.removed || existing.canvasState !== "Active") {
+    properties.removed = false;
+    properties.canvasState = "Active";
+  }
+  const missingEvidenceCleared =
+    Boolean(existing.canvasMissingSince) || existing.canvasMissingCount !== undefined;
+  if (missingEvidenceCleared) {
+    properties.canvasMissingSince = null;
+    properties.canvasMissingCount = null;
+  }
+  return { properties, missingEvidenceCleared };
+}
+
+function lifecycleOnlyProperties(properties: AssignmentPropertyUpdate): AssignmentPropertyUpdate {
+  return {
+    ...(properties.removed !== undefined ? { removed: properties.removed } : {}),
+    ...(properties.canvasState !== undefined ? { canvasState: properties.canvasState } : {}),
+    ...(properties.canvasMissingSince !== undefined
+      ? { canvasMissingSince: properties.canvasMissingSince }
+      : {}),
+    ...(properties.canvasMissingCount !== undefined
+      ? { canvasMissingCount: properties.canvasMissingCount }
+      : {}),
+  };
+}
+
 function aggregateFeedDiagnostics(feed: AssignmentFeed): {
   ignored: number;
   suspiciousReasons: string[];
@@ -111,6 +142,7 @@ export function buildPlan(
   courses: CourseRecord[],
   aliases: Record<string, string>,
   disableRemovals: boolean,
+  notionTimezone: string,
   now = new Date(),
   metrics?: RunMetrics,
   trigger: Trigger = "scheduled",
@@ -119,7 +151,12 @@ export function buildPlan(
 ): SyncPlan {
   const planTimestamp = now.toISOString();
   const courseIndex = buildCourseIndex(courses, aliases, operationCounters);
-  const assignmentIndex = buildAssignmentIndex(existingAssignments, courseIndex, operationCounters);
+  const assignmentIndex = buildAssignmentIndex(
+    existingAssignments,
+    courseIndex,
+    notionTimezone,
+    operationCounters,
+  );
   const plan: SyncPlan = {
     coursesToCreate: [],
     coursesToUpdate: [],
@@ -136,8 +173,47 @@ export function buildPlan(
   const plannedCourseKeys = new Set<string>();
   const plannedCourseUpdates = new Map<string, SyncPlan["coursesToUpdate"][number]>();
   const conflictedCoursePageIds = new Set<string>();
+  const assignmentsAlreadySkippedForCourse = new Set<string>();
   const protectedPageIds = new Set<string>();
   const removalsByPageId = new Map<string, SyncPlan["assignmentsToRemove"][number]>();
+  const plannedAssignmentUpdates = new Map<string, SyncPlan["assignmentsToUpdate"][number]>();
+
+  function queueAssignmentUpdate(update: SyncPlan["assignmentsToUpdate"][number]): void {
+    const current = plannedAssignmentUpdates.get(update.pageId);
+    if (!current) {
+      plannedAssignmentUpdates.set(update.pageId, update);
+      return;
+    }
+    plannedAssignmentUpdates.set(update.pageId, {
+      ...current,
+      properties: { ...current.properties, ...update.properties },
+      verifyDescription: current.verifyDescription || update.verifyDescription,
+      descriptionHash: update.verifyDescription ? update.descriptionHash : current.descriptionHash,
+      descriptionHashNeedsUpdate: Boolean(
+        current.descriptionHashNeedsUpdate || update.descriptionHashNeedsUpdate,
+      ),
+      missingEvidenceCleared: current.missingEvidenceCleared || update.missingEvidenceCleared,
+    });
+  }
+
+  function queueLifecycleUpdate(
+    source: AssignmentFeed["assignments"][number],
+    existing: AssignmentRecord,
+  ): void {
+    const lifecycle = lifecycleProperties(existing);
+    if (!Object.keys(lifecycle.properties).length) return;
+    queueAssignmentUpdate({
+      pageId: existing.pageId,
+      source,
+      courseKey: `page:${existing.coursePageIds[0] ?? ""}`,
+      properties: lifecycle.properties,
+      verifyDescription: false,
+      descriptionHash:
+        existing.descriptionHash ?? managedDescriptionHash(source.descriptionMarkdown),
+      descriptionHashNeedsUpdate: false,
+      missingEvidenceCleared: lifecycle.missingEvidenceCleared,
+    });
+  }
 
   for (const source of feed.cancelledAssignments) {
     const uidMatches = byUid.get(source.uid) ?? [];
@@ -210,6 +286,7 @@ export function buildPlan(
       });
       continue;
     }
+    const existing = uidMatches[0];
     const match = matchCourseFromIndex(source, courseIndex, planTimestamp);
     if (uidMatches.length === 0) {
       const duplicates = possibleDuplicateFromIndex(
@@ -230,6 +307,7 @@ export function buildPlan(
     }
 
     if (match.kind === "ambiguous") {
+      if (existing) queueLifecycleUpdate(source, existing);
       plan.skipped += 1;
       for (const assignment of uidMatches) protectedPageIds.add(assignment.pageId);
       plan.warnings.push({
@@ -240,6 +318,7 @@ export function buildPlan(
       continue;
     }
     if (match.kind === "unidentified") {
+      if (existing) queueLifecycleUpdate(source, existing);
       plan.skipped += 1;
       for (const assignment of uidMatches) protectedPageIds.add(assignment.pageId);
       plan.warnings.push({
@@ -250,6 +329,10 @@ export function buildPlan(
       continue;
     }
     if (match.kind === "conflict") {
+      if (existing) {
+        queueLifecycleUpdate(source, existing);
+        assignmentsAlreadySkippedForCourse.add(existing.pageId);
+      }
       plan.skipped += 1;
       if (!conflictedCoursePageIds.has(match.course.pageId) && metrics) {
         metrics.coursesConflicted += 1;
@@ -265,6 +348,10 @@ export function buildPlan(
       continue;
     }
     if (match.kind === "matched" && conflictedCoursePageIds.has(match.course.pageId)) {
+      if (existing) {
+        queueLifecycleUpdate(source, existing);
+        assignmentsAlreadySkippedForCourse.add(existing.pageId);
+      }
       plan.skipped += 1;
       for (const assignment of uidMatches) protectedPageIds.add(assignment.pageId);
       continue;
@@ -285,6 +372,10 @@ export function buildPlan(
             current.canvasUrl !== match.update.canvasUrl,
         );
       if (conflictsWithPlannedUpdate) {
+        if (existing) {
+          queueLifecycleUpdate(source, existing);
+          assignmentsAlreadySkippedForCourse.add(existing.pageId);
+        }
         if (!conflictedCoursePageIds.has(match.course.pageId) && metrics) {
           metrics.coursesConflicted += 1;
         }
@@ -314,13 +405,13 @@ export function buildPlan(
       }
     }
 
-    const existing = uidMatches[0];
     if (!existing) {
       plan.assignmentsToCreate.push({ source, courseKey });
       continue;
     }
 
-    const properties: AssignmentPropertyUpdate = {};
+    const lifecycle = lifecycleProperties(existing);
+    const properties: AssignmentPropertyUpdate = { ...lifecycle.properties };
     const matchedPageId = match.kind === "matched" ? match.course.pageId : undefined;
     if (matchedPageId && !existing.coursePageIds.includes(matchedPageId)) {
       properties.coursePageId = matchedPageId;
@@ -332,11 +423,11 @@ export function buildPlan(
       properties.canvasUrl = source.canvasUrl ?? null;
     }
 
-    const dates = resolveDates(existing, source.dueAt);
-    if (!datesEqual(existing.canvasDueDate, source.dueAt)) {
+    const dates = resolveDates(existing, source.dueAt, notionTimezone);
+    if (!datesEqual(existing.canvasDueDate, source.dueAt, notionTimezone)) {
       properties.canvasDueDate = source.dueAt ?? null;
     }
-    if (!datesEqual(existing.effectiveDueDate, dates.effectiveDueDate)) {
+    if (!datesEqual(existing.effectiveDueDate, dates.effectiveDueDate, notionTimezone)) {
       properties.effectiveDueDate = dates.effectiveDueDate ?? null;
     }
     if (dates.overrideChanged) properties.overrideDueDate = dates.overrideDueDate ?? null;
@@ -353,19 +444,8 @@ export function buildPlan(
       metrics.descriptionBodyReadsAvoided += 1;
     }
     if (excerptChanged) properties.rawDescription = excerpt;
-    const needsReactivation = existing.removed || existing.canvasState !== "Active";
-    if (needsReactivation) {
-      properties.removed = false;
-      properties.canvasState = "Active";
-    }
-    const missingEvidenceCleared =
-      Boolean(existing.canvasMissingSince) || existing.canvasMissingCount !== undefined;
-    if (missingEvidenceCleared) {
-      properties.canvasMissingSince = null;
-      properties.canvasMissingCount = null;
-    }
     if (Object.keys(properties).length || verifyDescription) {
-      plan.assignmentsToUpdate.push({
+      queueAssignmentUpdate({
         pageId: existing.pageId,
         source,
         courseKey,
@@ -373,54 +453,44 @@ export function buildPlan(
         verifyDescription,
         descriptionHash,
         descriptionHashNeedsUpdate,
-        missingEvidenceCleared,
+        missingEvidenceCleared: lifecycle.missingEvidenceCleared,
       });
     } else {
       plan.unchanged += 1;
     }
   }
 
+  plan.assignmentsToUpdate = [...plannedAssignmentUpdates.values()];
+
   if (conflictedCoursePageIds.size) {
     const blockedCreates = plan.assignmentsToCreate.filter((assignment) =>
       conflictedCoursePageIds.has(assignment.courseKey.replace(/^page:/, "")),
     );
-    const blockedUpdates = plan.assignmentsToUpdate.filter((assignment) =>
-      conflictedCoursePageIds.has(assignment.courseKey.replace(/^page:/, "")),
-    );
-    for (const assignment of blockedUpdates) protectedPageIds.add(assignment.pageId);
-    plan.skipped += blockedCreates.length + blockedUpdates.length;
+    let blockedUpdatesNotAlreadySkipped = 0;
+    plan.assignmentsToUpdate = plan.assignmentsToUpdate.flatMap((assignment) => {
+      if (!conflictedCoursePageIds.has(assignment.courseKey.replace(/^page:/, ""))) {
+        return [assignment];
+      }
+      protectedPageIds.add(assignment.pageId);
+      if (!assignmentsAlreadySkippedForCourse.has(assignment.pageId)) {
+        blockedUpdatesNotAlreadySkipped += 1;
+      }
+      const properties = lifecycleOnlyProperties(assignment.properties);
+      return Object.keys(properties).length
+        ? [
+            {
+              ...assignment,
+              properties,
+              verifyDescription: false,
+              descriptionHashNeedsUpdate: false,
+            },
+          ]
+        : [];
+    });
+    plan.skipped += blockedCreates.length + blockedUpdatesNotAlreadySkipped;
     plan.assignmentsToCreate = plan.assignmentsToCreate.filter(
       (assignment) => !blockedCreates.includes(assignment),
     );
-    plan.assignmentsToUpdate = plan.assignmentsToUpdate.filter(
-      (assignment) => !blockedUpdates.includes(assignment),
-    );
-  }
-
-  const pagesWithPlannedUpdates = new Set(
-    plan.assignmentsToUpdate.map((assignment) => assignment.pageId),
-  );
-  for (const source of feed.assignments) {
-    const matches = byUid.get(source.uid) ?? [];
-    const existing = matches.length === 1 ? matches[0] : undefined;
-    if (
-      !existing ||
-      pagesWithPlannedUpdates.has(existing.pageId) ||
-      (!existing.canvasMissingSince && existing.canvasMissingCount === undefined)
-    ) {
-      continue;
-    }
-    plan.assignmentsToUpdate.push({
-      pageId: existing.pageId,
-      source,
-      courseKey: `page:${existing.coursePageIds[0] ?? ""}`,
-      properties: { canvasMissingSince: null, canvasMissingCount: null },
-      verifyDescription: false,
-      descriptionHash:
-        existing.descriptionHash ?? managedDescriptionHash(source.descriptionMarkdown),
-      descriptionHashNeedsUpdate: false,
-      missingEvidenceCleared: true,
-    });
   }
 
   const removal = detectRemovals(

@@ -1,6 +1,7 @@
 import type { AssignmentRecord, ExternalAssignment, PlanningOperationCounters } from "../types.js";
+import { canvasAssignmentUrlIdentity } from "../canvas/canvas-url.js";
 import { normalizeCourse, type CourseIndex } from "./course-matcher.js";
-import { datesEqual } from "./date-resolution.js";
+import { datesEqual, timestampCalendarDate } from "./date-resolution.js";
 
 function normalizeTitle(value: string, counters?: PlanningOperationCounters): string {
   if (counters) counters.assignmentNormalizations += 1;
@@ -15,19 +16,11 @@ function normalizedCanvasUrl(
   counters?: PlanningOperationCounters,
 ): string | undefined {
   if (counters) counters.assignmentNormalizations += 1;
-  try {
-    const url = new URL(value);
-    url.search = "";
-    url.hash = "";
-    url.pathname = url.pathname.replace(/\/+$/, "");
-    return url.toString();
-  } catch {
-    return;
-  }
+  return canvasAssignmentUrlIdentity(value)?.normalizedUrl;
 }
 
 function assignmentId(value: string | undefined): string | undefined {
-  return value?.match(/\/assignments\/(\d+)(?:\/|\?|#|$)/i)?.[1];
+  return value ? canvasAssignmentUrlIdentity(value)?.assignmentId : undefined;
 }
 
 interface IndexedAssignment {
@@ -35,7 +28,6 @@ interface IndexedAssignment {
   readonly position: number;
   readonly normalizedTitle: string;
   readonly normalizedUrl: string | undefined;
-  readonly hasCanvasUrl: boolean;
   readonly canvasAssignmentId?: string;
   readonly courseIds: ReadonlySet<string>;
   readonly courseNames: ReadonlySet<string>;
@@ -43,9 +35,10 @@ interface IndexedAssignment {
 
 export interface AssignmentIndex {
   readonly byUid: ReadonlyMap<string, readonly AssignmentRecord[]>;
-  readonly byNormalizedCanvasUrl: ReadonlyMap<string | undefined, readonly IndexedAssignment[]>;
+  readonly byNormalizedCanvasUrl: ReadonlyMap<string, readonly IndexedAssignment[]>;
   readonly byCanvasAssignmentId: ReadonlyMap<string, readonly IndexedAssignment[]>;
   readonly byTitleAndDueDate: ReadonlyMap<string, readonly IndexedAssignment[]>;
+  readonly timeZone: string;
   readonly counters?: PlanningOperationCounters;
 }
 
@@ -60,12 +53,13 @@ function freezeIndex<K, V>(map: Map<K, V[]>): ReadonlyMap<K, readonly V[]> {
   return map;
 }
 
-function dueDateKeys(value: string | undefined): string[] {
+function dueDateKeys(value: string | undefined, timeZone: string): string[] {
   if (value === undefined) return ["undefined"];
   if (/^\d{4}-\d{2}-\d{2}$/.test(value)) return [`date:${value}`];
   const keys: string[] = [];
-  const datePrefix = value.match(/^\d{4}-\d{2}-\d{2}/)?.[0];
-  if (datePrefix) keys.push(`date:${datePrefix}`);
+  const calendarDate =
+    timestampCalendarDate(value, timeZone) ?? value.match(/^\d{4}-\d{2}-\d{2}/)?.[0];
+  if (calendarDate) keys.push(`date:${calendarDate}`);
   const milliseconds = Date.parse(value);
   keys.push(Number.isNaN(milliseconds) ? `raw:${value}` : `time:${milliseconds}`);
   return keys;
@@ -78,10 +72,11 @@ function titleAndDateKey(title: string, date: string): string {
 export function buildAssignmentIndex(
   assignments: AssignmentRecord[],
   courses: CourseIndex,
+  timeZone: string,
   counters?: PlanningOperationCounters,
 ): AssignmentIndex {
   const byUid = new Map<string, AssignmentRecord[]>();
-  const byNormalizedCanvasUrl = new Map<string | undefined, IndexedAssignment[]>();
+  const byNormalizedCanvasUrl = new Map<string, IndexedAssignment[]>();
   const byCanvasAssignmentId = new Map<string, IndexedAssignment[]>();
   const byTitleAndDueDate = new Map<string, IndexedAssignment[]>();
 
@@ -108,18 +103,17 @@ export function buildAssignmentIndex(
       normalizedUrl: assignment.canvasUrl
         ? normalizedCanvasUrl(assignment.canvasUrl, counters)
         : undefined,
-      hasCanvasUrl: Boolean(assignment.canvasUrl),
       ...(candidateAssignmentId ? { canvasAssignmentId: candidateAssignmentId } : {}),
       courseIds,
       courseNames,
     });
-    if (indexed.hasCanvasUrl) {
+    if (indexed.normalizedUrl) {
       addToIndex(byNormalizedCanvasUrl, indexed.normalizedUrl, indexed);
     }
     if (indexed.canvasAssignmentId) {
       addToIndex(byCanvasAssignmentId, indexed.canvasAssignmentId, indexed);
     }
-    for (const dateKey of dueDateKeys(assignment.canvasDueDate)) {
+    for (const dateKey of dueDateKeys(assignment.canvasDueDate, timeZone)) {
       addToIndex(byTitleAndDueDate, titleAndDateKey(indexed.normalizedTitle, dateKey), indexed);
     }
   }
@@ -128,6 +122,7 @@ export function buildAssignmentIndex(
     byNormalizedCanvasUrl: freezeIndex(byNormalizedCanvasUrl),
     byCanvasAssignmentId: freezeIndex(byCanvasAssignmentId),
     byTitleAndDueDate: freezeIndex(byTitleAndDueDate),
+    timeZone,
     ...(counters ? { counters } : {}),
   });
 }
@@ -157,7 +152,7 @@ export function possibleDuplicateFromIndex(
   const sourceNormalizedUrl = source.canvasUrl
     ? normalizedCanvasUrl(source.canvasUrl, index.counters)
     : undefined;
-  if (source.canvasUrl) {
+  if (sourceNormalizedUrl) {
     for (const candidate of index.byNormalizedCanvasUrl.get(sourceNormalizedUrl) ?? []) {
       candidates.set(candidate.position, candidate);
     }
@@ -169,7 +164,7 @@ export function possibleDuplicateFromIndex(
     }
   }
   const sourceTitle = normalizeTitle(source.title, index.counters);
-  for (const dateKey of dueDateKeys(source.dueAt)) {
+  for (const dateKey of dueDateKeys(source.dueAt, index.timeZone)) {
     for (const candidate of index.byTitleAndDueDate.get(titleAndDateKey(sourceTitle, dateKey)) ??
       []) {
       candidates.set(candidate.position, candidate);
@@ -187,8 +182,8 @@ export function possibleDuplicateFromIndex(
     const assignment = candidate.assignment;
     if (assignment.uid === source.uid) return [];
     if (
-      source.canvasUrl &&
-      candidate.hasCanvasUrl &&
+      sourceNormalizedUrl &&
+      candidate.normalizedUrl &&
       candidate.normalizedUrl === sourceNormalizedUrl
     ) {
       return [assignment];
@@ -197,7 +192,7 @@ export function possibleDuplicateFromIndex(
       return [assignment];
     }
     return candidate.normalizedTitle === sourceTitle &&
-      datesEqual(assignment.canvasDueDate, source.dueAt) &&
+      datesEqual(assignment.canvasDueDate, source.dueAt, index.timeZone) &&
       compatibleCourse(source, candidate, sourceNames, resolvedCoursePageId)
       ? [assignment]
       : [];

@@ -3,6 +3,7 @@ import { parseIcs } from "../../src/canvas/parse-ics.js";
 import { createAssignment } from "../../src/notion/assignments.js";
 import { managedDescriptionHash } from "../../src/notion/descriptions.js";
 import { createRunMetrics } from "../../src/notion/client.js";
+import { datesEqual } from "../../src/sync/date-resolution.js";
 import { buildPlan, feedDiagnosticSummary, feedWarnings } from "../../src/sync/plan.js";
 import { MINIMUM_MISSING_EVIDENCE_INTERVAL_MS } from "../../src/sync/removal-detector.js";
 import type {
@@ -21,6 +22,7 @@ const course: CourseRecord = {
   courseCode: "EE 10",
   canvasCourseId: "123",
 };
+const notionTimezone = "America/Los_Angeles";
 
 function calendar(events: string): string {
   return `BEGIN:VCALENDAR\nVERSION:2.0\nPRODID:-//Test//EN\n${events}\nEND:VCALENDAR`;
@@ -117,7 +119,17 @@ function planFeed(
   trigger: Trigger = "scheduled",
   now = new Date("2026-07-13T12:00:00Z"),
 ) {
-  return buildPlan(value, existing, courses, aliases, false, now, undefined, trigger);
+  return buildPlan(
+    value,
+    existing,
+    courses,
+    aliases,
+    false,
+    notionTimezone,
+    now,
+    undefined,
+    trigger,
+  );
 }
 
 describe("plan-first reconciliation", () => {
@@ -136,6 +148,7 @@ describe("plan-first reconciliation", () => {
       [course],
       {},
       false,
+      notionTimezone,
       new Date("2026-07-13T12:00:00Z"),
       metrics,
     );
@@ -444,6 +457,53 @@ describe("plan-first reconciliation", () => {
     expect(normalized.assignmentsToUpdate).toHaveLength(0);
   });
 
+  it("compares mixed due dates in the configured Notion timezone across local midnight", () => {
+    const beforeMidnight = "2026-07-14T06:59:00.000Z";
+    const afterMidnight = "2026-07-14T07:01:00.000Z";
+    expect(datesEqual("2026-07-13", beforeMidnight, notionTimezone)).toBe(true);
+    expect(datesEqual(beforeMidnight, "2026-07-13", notionTimezone)).toBe(true);
+    expect(datesEqual("2026-07-14", beforeMidnight, notionTimezone)).toBe(false);
+    expect(datesEqual("2026-07-14", afterMidnight, notionTimezone)).toBe(true);
+    expect(datesEqual(afterMidnight, "2026-07-14", notionTimezone)).toBe(true);
+    expect(datesEqual("2026-07-13", afterMidnight, notionTimezone)).toBe(false);
+  });
+
+  it("handles DST, timestamp instants, and date-only equality independently", () => {
+    expect(datesEqual("2026-03-08", "2026-03-08T09:30:00.000Z", notionTimezone)).toBe(true);
+    expect(datesEqual("2026-03-08", "2026-03-08T10:30:00.000Z", notionTimezone)).toBe(true);
+    expect(
+      datesEqual("2026-07-14T06:30:00.000Z", "2026-07-13T23:30:00.000-07:00", notionTimezone),
+    ).toBe(true);
+    expect(datesEqual("2026-07-13", "2026-07-13", notionTimezone)).toBe(true);
+    expect(datesEqual("2026-07-13", "2026-07-14", notionTimezone)).toBe(false);
+  });
+
+  it("captures and clears overrides using timezone-aware mixed-date semantics", () => {
+    const captured = plan(
+      [source({ dueAt: "2026-07-14" })],
+      [
+        record({
+          canvasDueDate: "2026-07-14",
+          effectiveDueDate: "2026-07-14T06:30:00.000Z",
+        }),
+      ],
+    ).assignmentsToUpdate[0];
+    expect(captured?.properties.overrideDueDate).toBe("2026-07-14T06:30:00.000Z");
+
+    const cleared = plan(
+      [source({ dueAt: "2026-07-13" })],
+      [
+        record({
+          canvasDueDate: "2026-07-13",
+          effectiveDueDate: "2026-07-14T06:30:00.000Z",
+          overrideDueDate: "2026-07-15",
+        }),
+      ],
+    ).assignmentsToUpdate[0];
+    expect(cleared?.properties.overrideDueDate).toBeNull();
+    expect(cleared?.properties.effectiveDueDate).toBeUndefined();
+  });
+
   it("treats a first absent in-window assignment as a candidate", () => {
     const other = source({
       uid: "uid-other",
@@ -547,6 +607,48 @@ describe("plan-first reconciliation", () => {
     ).toBe(true);
   });
 
+  it.each([
+    ["different malformed URLs", "not a url", "also not a url"],
+    ["a malformed and a missing URL", "not a url", undefined],
+  ])("does not use %s as duplicate evidence", (_name, sourceUrl, candidateUrl) => {
+    const incoming = source({
+      uid: "new-uid",
+      title: "Different title",
+      dueAt: "2026-08-02T20:00:00.000Z",
+      canvasUrl: sourceUrl,
+    });
+    delete incoming.canvasAssignmentId;
+    const existing = record({
+      uid: "old-uid",
+      title: "Original title",
+      canvasDueDate: "2026-07-20T20:00:00.000Z",
+      ...(candidateUrl === undefined ? {} : { canvasUrl: candidateUrl }),
+    });
+    if (candidateUrl === undefined) delete existing.canvasUrl;
+    const result = plan([incoming], [existing]);
+    expect(result.assignmentsToCreate).toHaveLength(1);
+    expect(
+      result.warnings.some((warning) => warning.code === "possible-assignment-duplicate"),
+    ).toBe(false);
+  });
+
+  it("still uses an explicit assignment ID when URL evidence is omitted", () => {
+    const incoming = source({
+      uid: "new-uid",
+      title: "Different title",
+      dueAt: "2026-08-02T20:00:00.000Z",
+    });
+    delete incoming.canvasUrl;
+    const result = plan([incoming]);
+    expect(result.assignmentsToCreate).toEqual([]);
+    expect(result.warnings).toContainEqual(
+      expect.objectContaining({
+        code: "possible-assignment-duplicate",
+        details: ["assignment-page"],
+      }),
+    );
+  });
+
   it("uses a Canvas assignment ID as duplicate evidence independently of the URL", () => {
     const incoming = source({
       uid: "new-uid",
@@ -561,6 +663,25 @@ describe("plan-first reconciliation", () => {
       expect.objectContaining({
         code: "possible-assignment-duplicate",
         details: ["assignment-page"],
+      }),
+    );
+  });
+
+  it("uses timezone-aware mixed dates when protecting possible duplicates", () => {
+    const incoming = source({
+      uid: "new-uid",
+      dueAt: "2026-07-14T06:30:00.000Z",
+    });
+    delete incoming.canvasAssignmentId;
+    delete incoming.canvasUrl;
+    const existing = record({ uid: "old-uid", canvasDueDate: "2026-07-13" });
+    delete existing.canvasUrl;
+    const result = plan([incoming], [existing]);
+    expect(result.assignmentsToCreate).toEqual([]);
+    expect(result.warnings).toContainEqual(
+      expect.objectContaining({
+        code: "possible-assignment-duplicate",
+        details: [existing.pageId],
       }),
     );
   });
@@ -700,6 +821,7 @@ describe("plan-first reconciliation", () => {
       ],
       {},
       false,
+      notionTimezone,
       now,
     );
     expect(toISOString).toHaveBeenCalledTimes(1);
@@ -756,6 +878,7 @@ describe("plan-first reconciliation", () => {
       courses,
       {},
       false,
+      notionTimezone,
       new Date("2026-07-13T12:00:00Z"),
       undefined,
       "scheduled",
@@ -922,6 +1045,87 @@ describe("plan-first reconciliation", () => {
     expect(update?.properties.canvasMissingCount).toBeNull();
   });
 
+  it.each([
+    {
+      name: "an ambiguous course match",
+      incoming: (() => {
+        const value = source({ title: "Unsafe changed title" });
+        delete value.canvasCourseId;
+        return value;
+      })(),
+      courses: [course, { ...course, pageId: "course-page-2" }],
+      warning: "ambiguous-course",
+      existingCoursePageId: "existing-course",
+    },
+    {
+      name: "no usable course identity",
+      incoming: (() => {
+        const value = source({ title: "Unsafe changed title" });
+        delete value.canvasCourseId;
+        delete value.courseName;
+        delete value.courseCode;
+        return value;
+      })(),
+      courses: [course],
+      warning: "unidentified-course",
+      existingCoursePageId: "existing-course",
+    },
+    {
+      name: "conflicting course metadata",
+      incoming: source({ title: "Unsafe changed title" }),
+      courses: [{ ...course, canvasCourseId: "999" }],
+      warning: "course-metadata-conflict",
+      existingCoursePageId: "course-page",
+    },
+  ])("reactivates an exact UID despite $name without unsafe updates", (testCase) => {
+    const existing = record({
+      coursePageIds: [testCase.existingCoursePageId],
+      removed: true,
+      canvasState: "Removed",
+      canvasMissingSince: "2026-07-12T00:00:00.000Z",
+      canvasMissingCount: 2,
+      priority: "High",
+      assignmentType: "Quiz",
+    });
+    const result = plan([testCase.incoming], [existing], testCase.courses);
+    expect(result.assignmentsToUpdate).toHaveLength(1);
+    expect(result.assignmentsToUpdate[0]).toMatchObject({
+      pageId: existing.pageId,
+      courseKey: `page:${testCase.existingCoursePageId}`,
+      properties: {
+        removed: false,
+        canvasState: "Active",
+        canvasMissingSince: null,
+        canvasMissingCount: null,
+      },
+      verifyDescription: false,
+      missingEvidenceCleared: true,
+    });
+    expect(result.assignmentsToUpdate[0]?.properties).toEqual({
+      removed: false,
+      canvasState: "Active",
+      canvasMissingSince: null,
+      canvasMissingCount: null,
+    });
+    expect(result.warnings).toContainEqual(expect.objectContaining({ code: testCase.warning }));
+  });
+
+  it("does not reactivate duplicate Notion UID matches speculatively", () => {
+    const duplicateMatches = [
+      record({ pageId: "duplicate-one", removed: true, canvasState: "Removed" }),
+      record({ pageId: "duplicate-two", removed: true, canvasState: "Removed" }),
+    ];
+    const result = plan([source()], duplicateMatches);
+    expect(result.assignmentsToUpdate).toEqual([]);
+    expect(result.assignmentsToRemove).toEqual([]);
+    expect(result.warnings).toContainEqual(
+      expect.objectContaining({
+        code: "duplicate-notion-uid",
+        details: ["duplicate-one", "duplicate-two"],
+      }),
+    );
+  });
+
   it("clears missing evidence when an active assignment reappears", () => {
     const update = plan(
       [source()],
@@ -1036,6 +1240,7 @@ describe("plan-first reconciliation", () => {
       [course],
       {},
       false,
+      notionTimezone,
       new Date("2026-07-13T12:00:00Z"),
     );
     expect(result.assignmentsToRemove).toHaveLength(0);
@@ -1049,6 +1254,7 @@ describe("plan-first reconciliation", () => {
       [course],
       {},
       true,
+      notionTimezone,
       new Date("2026-07-13T12:00:00Z"),
     );
     expect(result.assignmentsToRemove).toHaveLength(0);
