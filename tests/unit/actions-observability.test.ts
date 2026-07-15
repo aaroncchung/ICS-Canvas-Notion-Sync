@@ -79,6 +79,7 @@ describe("GitHub Actions observability", () => {
     expect(summary).toContain("Proposed Missing evidence advanced: 1");
     expect(summary).toContain("Removal inference safe: no");
     expect(summary).toContain("Proposed description integrity audits: 2");
+    expect(summary).toContain("Description integrity audits due this run: 2");
     expect(summary).toContain("Description integrity audits deferred: 7");
   });
 

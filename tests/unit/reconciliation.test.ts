@@ -1,7 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import { parseIcs } from "../../src/canvas/parse-ics.js";
 import { createAssignment } from "../../src/notion/assignments.js";
-import { managedDescriptionHash } from "../../src/notion/descriptions.js";
+import {
+  descriptionIntegrityAuditDecision,
+  managedDescriptionHash,
+} from "../../src/notion/descriptions.js";
 import { createRunMetrics } from "../../src/notion/client.js";
 import { datesEqual } from "../../src/sync/date-resolution.js";
 import { buildPlan, feedDiagnosticSummary, feedWarnings } from "../../src/sync/plan.js";
@@ -23,6 +26,7 @@ const course: CourseRecord = {
   canvasCourseId: "123",
 };
 const notionTimezone = "America/Los_Angeles";
+const DAY_MS = 24 * 60 * 60 * 1000;
 
 function calendar(events: string): string {
   return `BEGIN:VCALENDAR\nVERSION:2.0\nPRODID:-//Test//EN\n${events}\nEND:VCALENDAR`;
@@ -132,6 +136,33 @@ function planFeed(
   );
 }
 
+function planWithMetrics(existing: AssignmentRecord, now = new Date("2026-07-13T12:00:00Z")) {
+  const metrics = createRunMetrics();
+  const result = buildPlan(
+    feed([source()]),
+    [existing],
+    [course],
+    {},
+    false,
+    notionTimezone,
+    now,
+    metrics,
+  );
+  return { metrics, result };
+}
+
+function auditDateForReason(reason: "deferred" | "scheduled-slot", verifiedAt: string): Date {
+  for (let age = 30; age < 60; age += 1) {
+    const now = new Date(Date.parse(verifiedAt) + age * DAY_MS);
+    if (
+      descriptionIntegrityAuditDecision("uid-1", verifiedAt, notionTimezone, now).reason === reason
+    ) {
+      return now;
+    }
+  }
+  throw new Error(`No ${reason} audit date found`);
+}
+
 describe("plan-first reconciliation", () => {
   it("a repeated run is unchanged and creates no duplicate", () => {
     const result = plan([source()]);
@@ -141,43 +172,59 @@ describe("plan-first reconciliation", () => {
   });
 
   it("matching description hashes avoid validation work and increment the avoidance metric", () => {
-    const metrics = createRunMetrics();
-    const result = buildPlan(
-      feed([source()]),
-      [record()],
-      [course],
-      {},
-      false,
-      notionTimezone,
-      new Date("2026-07-13T12:00:00Z"),
-      metrics,
-    );
+    const { metrics, result } = planWithMetrics(record());
     expect(result.assignmentsToUpdate).toEqual([]);
     expect(metrics.descriptionUpdatesAvoided).toBe(1);
     expect(metrics.descriptionBodyReadsAvoided).toBe(1);
     expect(metrics.descriptionIntegrityAuditsDue).toBe(0);
-    expect(metrics.descriptionIntegrityAuditsDeferred).toBe(1);
+    expect(metrics.descriptionIntegrityAuditsDeferred).toBe(0);
   });
 
-  it.each([undefined, "not-a-timestamp"])(
+  it.each([undefined, "not-a-timestamp", "2026-07-13T18:00:00.000Z"])(
     "schedules an immediate integrity audit for verification timestamp %s",
     (descriptionVerifiedAt) => {
       const existing = record();
       if (descriptionVerifiedAt === undefined) delete existing.descriptionVerifiedAt;
       else existing.descriptionVerifiedAt = descriptionVerifiedAt;
-      const result = plan([source()], [existing]);
+      const { metrics, result } = planWithMetrics(existing);
       expect(result.assignmentsToUpdate[0]).toMatchObject({
         verifyDescription: true,
         descriptionHashNeedsUpdate: false,
       });
+      expect(metrics.descriptionIntegrityAuditsDue).toBe(1);
+      expect(metrics.descriptionIntegrityAuditsDeferred).toBe(0);
     },
   );
 
-  it("schedules an integrity audit when a matching hash has stale verification", () => {
+  it("counts an eligible matching hash outside its slot as deferred exactly once", () => {
+    const verifiedAt = "2026-05-20T12:00:00.000Z";
+    const { metrics, result } = planWithMetrics(
+      record({ descriptionVerifiedAt: verifiedAt }),
+      auditDateForReason("deferred", verifiedAt),
+    );
+    expect(result.assignmentsToUpdate).toEqual([]);
+    expect(metrics.descriptionIntegrityAuditsDue).toBe(0);
+    expect(metrics.descriptionIntegrityAuditsDeferred).toBe(1);
+    expect(metrics.descriptionUpdatesAvoided).toBe(1);
+    expect(metrics.descriptionBodyReadsAvoided).toBe(1);
+  });
+
+  it("counts an eligible matching hash on its slot as due", () => {
+    const verifiedAt = "2026-05-20T12:00:00.000Z";
+    const { metrics, result } = planWithMetrics(
+      record({ descriptionVerifiedAt: verifiedAt }),
+      auditDateForReason("scheduled-slot", verifiedAt),
+    );
+    expect(result.assignmentsToUpdate[0]?.verifyDescription).toBe(true);
+    expect(metrics.descriptionIntegrityAuditsDue).toBe(1);
+    expect(metrics.descriptionIntegrityAuditsDeferred).toBe(0);
+  });
+
+  it("counts a matching hash at maximum age as due", () => {
     const metrics = createRunMetrics();
     const result = buildPlan(
       feed([source()]),
-      [record({ descriptionVerifiedAt: "2026-05-01T00:00:00.000Z" })],
+      [record({ descriptionVerifiedAt: "2026-05-14T12:00:00.000Z" })],
       [course],
       {},
       false,
@@ -223,9 +270,21 @@ describe("plan-first reconciliation", () => {
   });
 
   it("creates a new course and assignment", () => {
-    const result = plan([source()], [], []);
+    const metrics = createRunMetrics();
+    const result = buildPlan(
+      feed([source()]),
+      [],
+      [],
+      {},
+      false,
+      notionTimezone,
+      new Date("2026-07-13T12:00:00Z"),
+      metrics,
+    );
     expect(result.coursesToCreate).toHaveLength(1);
     expect(result.assignmentsToCreate).toHaveLength(1);
+    expect(metrics.descriptionIntegrityAuditsDue).toBe(1);
+    expect(metrics.descriptionIntegrityAuditsDeferred).toBe(0);
   });
 
   it.each(["rich-first", "name-first"] as const)(
@@ -493,8 +552,10 @@ describe("plan-first reconciliation", () => {
 
   it("a description hash version change deliberately schedules revalidation", () => {
     const oldVersion = managedDescriptionHash("Original description", "canvas-description:v0");
-    const result = plan([source()], [record({ descriptionHash: oldVersion })]);
+    const { metrics, result } = planWithMetrics(record({ descriptionHash: oldVersion }));
     expect(result.assignmentsToUpdate[0]?.verifyDescription).toBe(true);
+    expect(metrics.descriptionIntegrityAuditsDue).toBe(1);
+    expect(metrics.descriptionIntegrityAuditsDeferred).toBe(0);
   });
 
   it("updates Canvas-owned fields on Done assignments without status writes", () => {

@@ -22,6 +22,7 @@ const DATE_ONLY = /^(\d{4})-(\d{2})-(\d{2})$/;
 export type DescriptionIntegrityAuditReason =
   | "missing-verification"
   | "invalid-verification"
+  | "not-eligible"
   | "scheduled-slot"
   | "maximum-age"
   | "deferred";
@@ -95,6 +96,9 @@ export function descriptionIntegrityAuditDecision(
   if (!verifiedAt) return { due: true, reason: "missing-verification", slot };
   const timestamp = Date.parse(verifiedAt);
   if (!Number.isFinite(timestamp)) return { due: true, reason: "invalid-verification", slot };
+  if (!DATE_ONLY.test(verifiedAt) && timestamp > now.getTime()) {
+    return { due: true, reason: "invalid-verification", slot };
+  }
 
   const ageDays =
     calendarDayOrdinal(now, timeZone) - verifiedCalendarDayOrdinal(verifiedAt, timestamp, timeZone);
@@ -102,10 +106,11 @@ export function descriptionIntegrityAuditDecision(
   if (ageDays >= DESCRIPTION_INTEGRITY_MAXIMUM_AGE_DAYS) {
     return { due: true, reason: "maximum-age", slot, ageDays };
   }
-  if (ageDays >= DESCRIPTION_INTEGRITY_MINIMUM_AGE_DAYS) {
-    const currentSlot = modulo(calendarDayOrdinal(now, timeZone), DESCRIPTION_INTEGRITY_SLOT_COUNT);
-    if (currentSlot === slot) return { due: true, reason: "scheduled-slot", slot, ageDays };
+  if (ageDays < DESCRIPTION_INTEGRITY_MINIMUM_AGE_DAYS) {
+    return { due: false, reason: "not-eligible", slot, ageDays };
   }
+  const currentSlot = modulo(calendarDayOrdinal(now, timeZone), DESCRIPTION_INTEGRITY_SLOT_COUNT);
+  if (currentSlot === slot) return { due: true, reason: "scheduled-slot", slot, ageDays };
   return { due: false, reason: "deferred", slot, ageDays };
 }
 

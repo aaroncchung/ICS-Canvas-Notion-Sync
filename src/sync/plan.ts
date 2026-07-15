@@ -580,7 +580,9 @@ export function buildPlan(
       if (verifyDescription) {
         metrics.descriptionIntegrityAuditsDue += 1;
       } else {
-        metrics.descriptionIntegrityAuditsDeferred += 1;
+        if (auditDecision?.reason === "deferred") {
+          metrics.descriptionIntegrityAuditsDeferred += 1;
+        }
         metrics.descriptionUpdatesAvoided += 1;
         metrics.descriptionBodyReadsAvoided += 1;
       }

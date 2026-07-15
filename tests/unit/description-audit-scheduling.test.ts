@@ -56,7 +56,6 @@ describe("description integrity audit scheduling", () => {
   it.each([
     [undefined, "missing-verification"],
     ["not-a-timestamp", "invalid-verification"],
-    ["2029-01-01T00:00:00.000Z", "invalid-verification"],
   ] as const)("audits %s verification timestamps immediately", (verifiedAt, reason) => {
     expect(
       descriptionIntegrityAuditDecision(
@@ -66,6 +65,57 @@ describe("description integrity audit scheduling", () => {
         new Date("2028-02-01T12:00:00.000Z"),
       ),
     ).toMatchObject({ due: true, reason });
+  });
+
+  it("rejects a future timestamp later on the same local calendar date", () => {
+    expect(
+      descriptionIntegrityAuditDecision(
+        "uid-same-day-future",
+        "2028-02-01T18:00:00.000Z",
+        "America/Los_Angeles",
+        new Date("2028-02-01T12:00:00.000Z"),
+      ),
+    ).toMatchObject({ due: true, reason: "invalid-verification" });
+  });
+
+  it("rejects a future timestamp across a local calendar boundary", () => {
+    expect(
+      descriptionIntegrityAuditDecision(
+        "uid-boundary-future",
+        "2028-02-01T08:30:00.000Z",
+        "America/Los_Angeles",
+        new Date("2028-02-01T07:30:00.000Z"),
+      ),
+    ).toMatchObject({ due: true, reason: "invalid-verification" });
+  });
+
+  it("does not treat a timestamp exactly equal to now as future", () => {
+    const now = new Date("2028-02-01T12:00:00.000Z");
+    expect(
+      descriptionIntegrityAuditDecision("uid-equal", now.toISOString(), "America/Los_Angeles", now),
+    ).toMatchObject({ due: false, reason: "not-eligible", ageDays: 0 });
+  });
+
+  it("rejects a clearly future timestamp", () => {
+    expect(
+      descriptionIntegrityAuditDecision(
+        "uid-future",
+        "2029-01-01T00:00:00.000Z",
+        "America/Los_Angeles",
+        new Date("2028-02-01T12:00:00.000Z"),
+      ),
+    ).toMatchObject({ due: true, reason: "invalid-verification" });
+  });
+
+  it("marks a fresh timestamp as not yet eligible", () => {
+    expect(
+      descriptionIntegrityAuditDecision(
+        "uid-fresh",
+        "2028-01-20T12:00:00.000Z",
+        "UTC",
+        new Date("2028-02-01T12:00:00.000Z"),
+      ),
+    ).toMatchObject({ due: false, reason: "not-eligible", ageDays: 12 });
   });
 
   it("defers an unchanged description outside its stable slot", () => {

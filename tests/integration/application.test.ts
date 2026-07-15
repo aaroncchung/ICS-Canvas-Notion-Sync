@@ -2021,6 +2021,24 @@ describe("partial execution and Sync Log recovery", () => {
     ).toHaveLength(1);
   });
 
+  it("reports description audits due and deferred to later slots", async () => {
+    const gateway = new FakeGateway();
+    const logResult = result();
+    logResult.metrics.descriptionIntegrityAuditsDue = 2;
+    logResult.metrics.descriptionIntegrityAuditsDeferred = 7;
+    await writeSyncLog(
+      gateway,
+      config({ GITHUB_RUN_ID: "description-audit-metrics" }),
+      "start",
+      "finish",
+      logResult,
+    );
+    const pageId = gateway.pages.get("log")?.[0]?.id as string;
+    const body = (await managedChildren(gateway, pageId)).map(blockText).join(" ");
+    expect(body).toContain("Audits due this run: 2");
+    expect(body).toContain("Audits deferred to later slots: 7");
+  });
+
   it("reconciles a partial ambiguous Sync Log body append without duplicate sections", async () => {
     const gateway = new FakeGateway();
     seedLogPage(gateway, "log-page", "partial-append");
