@@ -93,7 +93,18 @@ function parseCourse(summary: string, description?: string): { name?: string; co
 
 function dueAt(event: RawCalendarEvent): string | undefined {
   if (!event.start || Number.isNaN(event.start.getTime())) return;
-  if (event.datetype === "date") return event.start.toISOString().slice(0, 10);
+  if (event.datetype === "date") {
+    // node-ical materializes VALUE=DATE starts at local midnight, so the calendar day must be read
+    // from the local components; reading UTC components moves it backwards east of UTC.
+    // Known limitation: on a calendar day the local zone skipped entirely (Pacific/Apia lost
+    // 2011-12-30), that midnight does not exist and rolls forward, so the next day is reported.
+    // Recovering the exact day needs the source DTSTART line, which cannot be re-associated with
+    // a parsed event reliably once the parser has normalized and deduplicated UIDs.
+    const year = `${event.start.getFullYear()}`.padStart(4, "0");
+    const month = `${event.start.getMonth() + 1}`.padStart(2, "0");
+    const day = `${event.start.getDate()}`.padStart(2, "0");
+    return `${year}-${month}-${day}`;
+  }
   return event.start.toISOString();
 }
 

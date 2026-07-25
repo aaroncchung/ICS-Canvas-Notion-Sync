@@ -200,6 +200,7 @@ export function buildPlan(
   const removalsByPageId = new Map<string, SyncPlan["assignmentsToRemove"][number]>();
   const plannedAssignmentUpdates = new Map<string, SyncPlan["assignmentsToUpdate"][number]>();
   const descriptionReadAvoidances = new Map<string, { courseKey: string; deferred: boolean }>();
+  let plannedCourseSequence = 0;
 
   function rebuildCourseIndex(): void {
     courseIndex = buildCourseIndex(
@@ -236,16 +237,31 @@ export function buildPlan(
     }
     const createIndex = plan.coursesToCreate.findIndex((course) => course.key === fromKey);
     if (createIndex >= 0) plan.coursesToCreate.splice(createIndex, 1);
-    for (const assignment of plan.assignmentsToCreate) {
-      if (assignment.courseKey === fromKey) assignment.courseKey = toKey;
-    }
-    for (const [pageId, assignment] of plannedAssignmentUpdates) {
-      if (assignment.courseKey === fromKey) {
-        plannedAssignmentUpdates.set(pageId, { ...assignment, courseKey: toKey });
+    // A conflicted course blocks every assignment that resolved to it, and that block is applied
+    // at the end of planning by matching on the conflicted key. Moving queued references onto the
+    // redirect target would carry them past that filter and write the relation this plan reports
+    // as blocked, so conflicted references deliberately stay on the key they are blocked by.
+    if (!conflictedCourseKeys.has(fromKey)) {
+      for (const assignment of plan.assignmentsToCreate) {
+        if (assignment.courseKey === fromKey) assignment.courseKey = toKey;
       }
-    }
-    for (const avoidance of descriptionReadAvoidances.values()) {
-      if (avoidance.courseKey === fromKey) avoidance.courseKey = toKey;
+      for (const [pageId, assignment] of plannedAssignmentUpdates) {
+        const redirectsCourseKey = assignment.courseKey === fromKey;
+        // The queued Course relation points at the same provisional key and must follow it too,
+        // otherwise apply cannot resolve a key whose planned create has just been removed.
+        const redirectsCoursePageId = assignment.properties.coursePageId === fromKey;
+        if (!redirectsCourseKey && !redirectsCoursePageId) continue;
+        plannedAssignmentUpdates.set(pageId, {
+          ...assignment,
+          ...(redirectsCourseKey ? { courseKey: toKey } : {}),
+          ...(redirectsCoursePageId
+            ? { properties: { ...assignment.properties, coursePageId: toKey } }
+            : {}),
+        });
+      }
+      for (const avoidance of descriptionReadAvoidances.values()) {
+        if (avoidance.courseKey === fromKey) avoidance.courseKey = toKey;
+      }
     }
     const warning = unnamedCourseWarnings.get(fromKey);
     if (warning) {
@@ -516,7 +532,10 @@ export function buildPlan(
     const courseKey = match.kind === "matched" ? match.courseKey : match.course.key;
     if (match.kind === "create") {
       plan.coursesToCreate.push(match.course);
-      const pageId = `planned-course:${plan.coursesToCreate.length}`;
+      // Conflicts and redirects remove entries from coursesToCreate, so its length is not
+      // monotonic; a sequence keeps synthetic IDs from colliding with surviving planned records.
+      plannedCourseSequence += 1;
+      const pageId = `planned-course:${plannedCourseSequence}`;
       plannedCourseRecords.push({
         pageId,
         title: match.course.title,
@@ -548,7 +567,8 @@ export function buildPlan(
         ? match.course.pageId
         : undefined;
     if (matchedPageId && !existing.coursePageIds.includes(matchedPageId)) {
-      properties.coursePageId = matchedPageId;
+      // Apply resolves course keys, never bare page IDs, so keep the `page:` prefix here.
+      properties.coursePageId = `page:${matchedPageId}`;
     } else if (match.kind === "create") {
       properties.coursePageId = courseKey;
     }

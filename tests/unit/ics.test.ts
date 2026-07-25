@@ -184,4 +184,30 @@ describe("RFC 5545 Canvas parsing", () => {
       "complete VCALENDAR",
     );
   });
+
+  it("keeps an all-day due date on its calendar day in every process timezone", () => {
+    const original = process.env.TZ;
+    const allDay = calendar(
+      event(
+        [
+          "UID:event-assignment-771@canvas.example.edu",
+          "DTSTART;VALUE=DATE:20260310",
+          "SUMMARY:All-day reading [EE 10]",
+          "URL:https://canvas.example.edu/courses/123/assignments/771",
+        ].join("\n"),
+      ),
+    );
+    try {
+      // node-ical builds VALUE=DATE starts at local midnight, so a process east of UTC used to
+      // report the previous calendar day.
+      for (const timeZone of ["UTC", "America/Los_Angeles", "Europe/Berlin", "Asia/Tokyo"]) {
+        process.env.TZ = timeZone;
+        const parsed = parseIcs(allDay, assignmentTypeMatcher);
+        expect(parsed.assignments[0]?.dueAt, `timezone ${timeZone}`).toBe("2026-03-10");
+      }
+    } finally {
+      if (original === undefined) delete process.env.TZ;
+      else process.env.TZ = original;
+    }
+  });
 });

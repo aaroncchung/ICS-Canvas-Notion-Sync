@@ -8,6 +8,7 @@ import {
 import { createRunMetrics } from "../../src/notion/client.js";
 import { datesEqual } from "../../src/sync/date-resolution.js";
 import { buildPlan, feedDiagnosticSummary, feedWarnings } from "../../src/sync/plan.js";
+import { applyPlan } from "../../src/sync/reconcile.js";
 import { MINIMUM_MISSING_EVIDENCE_INTERVAL_MS } from "../../src/sync/removal-detector.js";
 import type {
   AssignmentFeed,
@@ -17,7 +18,7 @@ import type {
   PlanningOperationCounters,
   Trigger,
 } from "../../src/types.js";
-import { assignmentTypeMatcher, FakeGateway } from "../helpers.js";
+import { assignmentTypeMatcher, config, FakeGateway, runCounts } from "../helpers.js";
 
 const course: CourseRecord = {
   pageId: "course-page",
@@ -1586,5 +1587,167 @@ describe("plan-first reconciliation", () => {
       priority: "High",
       assignmentType: "Quiz",
     });
+  });
+});
+
+describe("course keys survive apply", () => {
+  const applyOptions = { now: new Date("2026-07-13T12:00:00Z") };
+
+  // Course identity must come only from what each test states, so drop the defaults it omits.
+  function unlinkedSource(overrides: Partial<ExternalAssignment> = {}): ExternalAssignment {
+    const value = source(overrides);
+    delete value.canvasUrl;
+    if (overrides.canvasCourseId === undefined) delete value.canvasCourseId;
+    if (overrides.courseCode === undefined) delete value.courseCode;
+    return value;
+  }
+
+  it("relinks an assignment to another existing course using a resolvable key", async () => {
+    const otherCourse: CourseRecord = { pageId: "course-page-2", title: "PHYS 5" };
+    const moved = unlinkedSource({ courseName: "PHYS 5", courseCode: "PHYS 5" });
+    const result = buildPlan(
+      feed([moved]),
+      [record()],
+      [course, otherCourse],
+      {},
+      false,
+      notionTimezone,
+      new Date("2026-07-13T12:00:00Z"),
+    );
+
+    // A bare page ID here is not a course key, so apply cannot resolve it.
+    expect(result.assignmentsToUpdate[0]?.properties.coursePageId).toBe("page:course-page-2");
+
+    const gateway = new FakeGateway();
+    await applyPlan(gateway, config(), result, runCounts(), applyOptions);
+    const write = gateway.writes.find(
+      (entry) => entry.kind === "update" && entry.id === "assignment-page",
+    );
+    expect((write?.value as Record<string, unknown>).Course).toEqual({
+      relation: [{ id: "course-page-2" }],
+    });
+  });
+
+  it("rewrites a queued Course relation when its provisional course is redirected", async () => {
+    const provisional = unlinkedSource({ uid: "uid-1", courseName: "Bio" });
+    const resolving = unlinkedSource({
+      uid: "uid-2",
+      title: "Homework 2",
+      courseName: "Bio",
+      courseCode: "BIO101",
+    });
+    const result = buildPlan(
+      feed([provisional, resolving]),
+      [
+        record({ uid: "uid-1", coursePageIds: [] }),
+        record({ pageId: "assignment-page-2", uid: "uid-2", title: "Homework 2" }),
+      ],
+      [{ pageId: "course-page", title: "Biology 101", courseCode: "BIO101" }],
+      {},
+      false,
+      notionTimezone,
+      new Date("2026-07-13T12:00:00Z"),
+    );
+
+    // The provisional create is dropped, so a relation still pointing at it would strand apply.
+    expect(result.coursesToCreate).toHaveLength(0);
+    const relinked = result.assignmentsToUpdate.find(
+      (assignment) => assignment.pageId === "assignment-page",
+    );
+    expect(relinked?.properties.coursePageId).toBe("page:course-page");
+
+    const gateway = new FakeGateway();
+    await applyPlan(gateway, config(), result, runCounts(), applyOptions);
+    const write = gateway.writes.find(
+      (entry) => entry.kind === "update" && entry.id === "assignment-page",
+    );
+    expect((write?.value as Record<string, unknown>).Course).toEqual({
+      relation: [{ id: "course-page" }],
+    });
+  });
+
+  it("keeps a conflicted course blocked when its provisional key is redirected", async () => {
+    const conflicted = unlinkedSource({ uid: "uid-1", courseName: "Bio", canvasCourseId: "1" });
+    // Distinct assignment IDs so duplicate detection does not skip them before course matching.
+    const conflicting = unlinkedSource({
+      uid: "uid-2",
+      title: "Homework 2",
+      courseName: "Bio",
+      canvasCourseId: "2",
+      canvasAssignmentId: "457",
+    });
+    const redirecting = unlinkedSource({
+      uid: "uid-3",
+      title: "Homework 3",
+      courseName: "Bio",
+      courseCode: "BIO101",
+      canvasAssignmentId: "458",
+    });
+    const result = buildPlan(
+      feed([conflicted, conflicting, redirecting]),
+      [record({ uid: "uid-1", coursePageIds: [] })],
+      [{ pageId: "course-page", title: "Biology 101", courseCode: "BIO101" }],
+      {},
+      false,
+      notionTimezone,
+      new Date("2026-07-13T12:00:00Z"),
+    );
+
+    // The plan reports the course as conflicted, so it must not also write the relation.
+    expect(result.warnings.map((warning) => warning.code)).toContain("course-metadata-conflict");
+    const relinked = result.assignmentsToUpdate.find(
+      (assignment) => assignment.pageId === "assignment-page",
+    );
+    expect(relinked?.properties.coursePageId).toBeUndefined();
+
+    const gateway = new FakeGateway();
+    gateway.simulateDefaultTemplate = true;
+    await applyPlan(gateway, config(), result, runCounts(), {
+      ...applyOptions,
+      templateWait: { attempts: 2, sleep: async () => {} },
+    });
+    const courseWrites = gateway.writes.filter(
+      (entry) =>
+        entry.kind === "update" &&
+        entry.id === "assignment-page" &&
+        (entry.value as Record<string, unknown>).Course,
+    );
+    expect(courseWrites).toHaveLength(0);
+  });
+
+  // Built from scratch so course identity comes only from the fields under test.
+  function courseOnlySource(
+    uid: string,
+    overrides: Partial<ExternalAssignment>,
+  ): ExternalAssignment {
+    return { uid, title: `Assignment ${uid}`, inferredType: "Other", ...overrides };
+  }
+
+  it("does not reuse a planned course ID after a conflict drops a planned create", () => {
+    const result = buildPlan(
+      feed([
+        courseOnlySource("uid-a", { courseName: "Intro Bio", canvasCourseId: "1" }),
+        courseOnlySource("uid-b", { courseName: "Intro Bio", canvasCourseId: "2" }),
+        courseOnlySource("uid-c", { courseName: "Chemistry" }),
+        courseOnlySource("uid-d", { courseName: "Chemistry", canvasCourseId: "7" }),
+        courseOnlySource("uid-e", { canvasCourseId: "7" }),
+      ]),
+      [],
+      [],
+      {},
+      false,
+      notionTimezone,
+      new Date("2026-07-13T12:00:00Z"),
+    );
+
+    // Chemistry is planned once; a colliding synthetic ID used to strand its Canvas course ID
+    // and produce a second "Canvas Course 7" page for the same course.
+    expect(result.coursesToCreate.map((entry) => entry.key)).toEqual(["name:chemistry"]);
+    expect(result.coursesToCreate[0]?.canvasCourseId).toBe("7");
+    expect(
+      result.assignmentsToCreate
+        .filter((assignment) => ["uid-c", "uid-d", "uid-e"].includes(assignment.source.uid))
+        .map((assignment) => assignment.courseKey),
+    ).toEqual(["name:chemistry", "name:chemistry", "name:chemistry"]);
   });
 });
