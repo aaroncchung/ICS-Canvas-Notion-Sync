@@ -51,13 +51,24 @@ function descriptionBlocks(markdown: string): Array<Record<string, unknown>> {
   return result;
 }
 
+const calendarDayFormatters = new Map<string, Intl.DateTimeFormat>();
+
+function calendarDayFormatter(timeZone: string): Intl.DateTimeFormat {
+  let formatter = calendarDayFormatters.get(timeZone);
+  if (!formatter) {
+    formatter = new Intl.DateTimeFormat("en-US", {
+      timeZone,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    });
+    calendarDayFormatters.set(timeZone, formatter);
+  }
+  return formatter;
+}
+
 function calendarDayOrdinal(value: Date, timeZone: string): number {
-  const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).formatToParts(value);
+  const parts = calendarDayFormatter(timeZone).formatToParts(value);
   const year = Number(parts.find((part) => part.type === "year")?.value);
   const month = Number(parts.find((part) => part.type === "month")?.value);
   const day = Number(parts.find((part) => part.type === "day")?.value);
