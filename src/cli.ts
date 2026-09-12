@@ -18,6 +18,7 @@ export interface RunDependencies {
   gateway?: NotionGateway;
   provider?: AssignmentProvider;
   summaryAppender?: SummaryAppender;
+  now?: () => Date;
 }
 
 export type SummaryAppender = (path: string, data: string, encoding: "utf8") => Promise<void>;
@@ -191,7 +192,8 @@ export async function run(
     dependencies.gateway ?? new OfficialNotionGateway(config.NOTION_TOKEN, logger, defaultMetrics);
   const metrics = gateway.metrics ?? defaultMetrics;
   const provider = dependencies.provider ?? new CanvasIcsProvider(config, logger);
-  const startedAt = new Date().toISOString();
+  const now = dependencies.now ?? (() => new Date());
+  const startedAt = now().toISOString();
   const counts = emptyCounts();
   let result: RunResult = { status: "Failed", counts, warnings: [], errors: [], metrics };
   let syncLogAttempted = false;
@@ -236,7 +238,7 @@ export async function run(
         config.aliases,
         config.disableRemovals,
         config.NOTION_TIMEZONE,
-        new Date(),
+        now(),
         metrics,
         config.trigger,
         config.CANVAS_MISSING_EVIDENCE_MINIMUM_HOURS * 60 * 60 * 1000,
@@ -289,7 +291,7 @@ export async function run(
 
     if (config.mode === "sync") {
       syncLogAttempted = true;
-      await writeSyncLog(gateway, config, startedAt, new Date().toISOString(), result);
+      await writeSyncLog(gateway, config, startedAt, now().toISOString(), result);
     }
     logger.debug({ metrics }, "Notion and reconciliation metrics");
     logger.info({ status: result.status, counts: result.counts }, "Synchronization run complete");
@@ -305,7 +307,7 @@ export async function run(
     if (config.mode === "sync" && !syncLogAttempted) {
       try {
         syncLogAttempted = true;
-        await writeSyncLog(gateway, config, startedAt, new Date().toISOString(), result);
+        await writeSyncLog(gateway, config, startedAt, now().toISOString(), result);
       } catch (logError) {
         const logMessage = safeError(logError, secrets);
         result.errors.push(`Sync Log write failed: ${logMessage}`);

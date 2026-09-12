@@ -208,13 +208,13 @@ function indexedMatches(
   return matches;
 }
 
-function matchedCourse(
+export function matchCourseMetadata(
   assignment: ExternalAssignment,
-  indexed: IndexedCourse,
+  course: CourseRecord,
+  courseKey: string,
   method: string,
   now: string,
 ): CourseMatch {
-  const course = indexed.course;
   const sourceUrl = courseUrl(assignment);
   const fields: Array<"Canvas Course ID" | "Canvas URL"> = [];
   if (
@@ -228,7 +228,7 @@ function matchedCourse(
     fields.push("Canvas URL");
   }
   if (fields.length) {
-    return { kind: "conflict", course, courseKey: indexed.courseKey, method, fields };
+    return { kind: "conflict", course, courseKey, method, fields };
   }
 
   const update: CourseUpdate = { pageId: course.pageId };
@@ -239,8 +239,8 @@ function matchedCourse(
   const enrichesCanvasMetadata = Boolean(update.canvasCourseId || update.canvasUrl);
   if (enrichesCanvasMetadata) update.syncUpdatedAt = now;
   return Object.keys(update).length > 1
-    ? { kind: "matched", course, courseKey: indexed.courseKey, method, update }
-    : { kind: "matched", course, courseKey: indexed.courseKey, method };
+    ? { kind: "matched", course, courseKey, method, update }
+    : { kind: "matched", course, courseKey, method };
 }
 
 export function matchCourseFromIndex(
@@ -260,7 +260,10 @@ export function matchCourseFromIndex(
     method: string,
     matches: readonly IndexedCourse[],
   ): CourseMatch | undefined => {
-    if (matches.length === 1) return matchedCourse(assignment, matches[0]!, method, now);
+    if (matches.length === 1) {
+      const match = matches[0]!;
+      return matchCourseMetadata(assignment, match.course, match.courseKey, method, now);
+    }
     if (matches.length > 1) {
       return { kind: "ambiguous", courses: matches.map((match) => match.course), method };
     }

@@ -23,7 +23,7 @@
     "@notionhq/client": "5.23.0",
     "node-ical": "0.26.1",
     "pino": "9.7.0",
-    "sanitize-html": "2.17.0",
+    "sanitize-html": "2.17.7",
     "turndown": "7.2.0",
     "zod": "4.1.12"
   },
@@ -38,7 +38,7 @@
     "tsx": "4.21.0",
     "typescript": "5.9.3",
     "typescript-eslint": "8.63.0",
-    "vitest": "4.1.9"
+    "vitest": "4.1.11"
   },
   "overrides": {
     "esbuild": "0.28.1"

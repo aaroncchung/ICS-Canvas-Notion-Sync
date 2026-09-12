@@ -1,6 +1,6 @@
 # Canvas ICS → Notion Sync
 
-A strict TypeScript/Node.js service that imports Canvas assignments from a private Canvas ICS calendar feed into Notion. It is designed for institutions that do not permit students to create Canvas API tokens. It runs every four hours in GitHub Actions and also supports manual validation, dry-run, and live-sync runs.
+A strict TypeScript/Node.js service that imports Canvas assignments from a private Canvas ICS calendar feed into Notion. It is designed for institutions that do not permit students to create Canvas API tokens. It runs on a configured daily schedule in GitHub Actions and also supports manual validation, dry-run, and live-sync runs.
 
 The sync never uses Canvas OAuth, API tokens, scraping, or browser automation. Completion state belongs entirely to Notion.
 
@@ -25,6 +25,8 @@ Personal Status, Priority, Notes, Override Due Date, and an assignment's manuall
 6. Live runs write a detailed Canvas Sync Log page. Dry-run and validate modes make no data changes.
 
 The implementation uses an `AssignmentProvider` whose `fetchAssignments()` method returns one `AssignmentFeed` containing active assignments, cancelled assignments, and structured diagnostics. `CanvasIcsProvider` is the initial provider; a future authenticated provider can return the same normalized feed without mutable side channels or reconciliation changes.
+
+The synchronization core collects course evidence first, finalizes each assignment decision once, and then plans guarded removal evidence. Execution and Sync Log reporting share one ordered command sequence. See [the core architecture](docs/sync-core.md) for its boundaries and recovery invariants.
 
 ## Requirements
 
@@ -124,7 +126,7 @@ Add the two secrets, four required variables, and optional health-grace variable
 2. `dry-run`
 3. `sync`
 
-Scheduled runs execute at minute 17 every four hours. Manual runs can select any mode and disable removal detection. Concurrency prevents overlapping syncs.
+Scheduled runs execute at 01:30, 08:30, 12:30, 14:00, 15:30, and 17:30 in `America/New_York`. Manual runs can select any mode and disable removal detection. Concurrency prevents overlapping syncs.
 
 The health workflow opens or reuses a durable issue after three consecutive qualifying scheduled failures, after the no-success watchdog expires, or when the sync workflow is disabled. Manual runs do not affect scheduled health. See [docs/health-monitor.md](docs/health-monitor.md) for the authoritative run classification, timing, incident, recovery, and privacy policy.
 

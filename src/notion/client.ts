@@ -138,7 +138,8 @@ export class OfficialNotionGateway implements NotionGateway {
     private readonly logger: Logger,
     public readonly metrics: RunMetrics = createRunMetrics(),
   ) {
-    this.client = new Client({ auth: token, notionVersion: NOTION_API_VERSION });
+    // Recovery and physical request accounting belong to this gateway, including DELETE.
+    this.client = new Client({ auth: token, notionVersion: NOTION_API_VERSION, retry: false });
   }
 
   public async retrieveDataSource(id: string): Promise<Record<string, unknown>> {
