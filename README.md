@@ -26,6 +26,8 @@ Personal Status, Priority, Notes, Override Due Date, and an assignment's manuall
 
 The implementation uses an `AssignmentProvider` whose `fetchAssignments()` method returns one `AssignmentFeed` containing active assignments, cancelled assignments, and structured diagnostics. `CanvasIcsProvider` is the initial provider; a future authenticated provider can return the same normalized feed without mutable side channels or reconciliation changes.
 
+The synchronization core collects course evidence first, finalizes each assignment decision once, and then plans guarded removal evidence. Execution and Sync Log reporting share one ordered command sequence. See [the core architecture](docs/sync-core.md) for its boundaries and recovery invariants.
+
 ## Requirements
 
 - Node.js 24 LTS

@@ -3,7 +3,7 @@ import { readAssignments } from "../../src/notion/assignments.js";
 import { createRunMetrics } from "../../src/notion/client.js";
 import { managedDescriptionHash } from "../../src/notion/descriptions.js";
 import { buildPlan } from "../../src/sync/plan.js";
-import { applyPlan } from "../../src/sync/reconcile.js";
+import { ApplyPlanError, applyPlan, plannedOperations } from "../../src/sync/reconcile.js";
 import type { AssignmentRecord, CourseRecord, ExternalAssignment } from "../../src/types.js";
 import { assignmentFeed, config, FakeGateway, runCounts } from "../helpers.js";
 
@@ -229,5 +229,23 @@ describe("finalized reconciliation decisions", () => {
       templateWait: { attempts: 2, sleep: async () => {} },
     });
     expect(result).toEqual(before);
+  });
+});
+
+describe("execution ledger", () => {
+  it("accounts for a relation-resolution failure and withholds all remaining work", async () => {
+    const { result } = plan([source("one"), source("two")]);
+    result.assignmentsToCreate[0]!.courseKey = "unresolvable";
+    const gateway = new FakeGateway();
+    let failure: ApplyPlanError | undefined;
+    try {
+      await applyPlan(gateway, config(), result, runCounts());
+    } catch (error) {
+      if (!(error instanceof ApplyPlanError)) throw error;
+      failure = error;
+    }
+    expect(failure?.execution.failedOperation?.kind).toBe("assignment-page-create");
+    expect(failure?.execution.notAttempted).toEqual(plannedOperations(result).slice(2));
+    expect(gateway.assignments).toEqual([]);
   });
 });

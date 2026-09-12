@@ -12,7 +12,6 @@ import {
 import type {
   AppliedSyncOperation,
   AssignmentExecutionState,
-  AssignmentRemoval,
   FailedSyncOperation,
   RunCounts,
   SyncExecutionResult,
@@ -20,13 +19,7 @@ import type {
   SyncOperationKind,
   SyncPlan,
 } from "../types.js";
-
-function resolveCourseKey(key: string, created: Map<string, string>): string {
-  if (key.startsWith("page:")) return key.slice("page:".length);
-  const pageId = created.get(key);
-  if (!pageId) throw new Error("A planned course could not be resolved during apply");
-  return pageId;
-}
+import { compilePlan, operationOf, type AssignmentWork, type SyncCommand } from "./commands.js";
 
 function operationError(error: unknown): string {
   const status = errorStatus(error);
@@ -36,55 +29,7 @@ function operationError(error: unknown): string {
 }
 
 export function plannedOperations(plan: SyncPlan): SyncOperation[] {
-  const explicitRemovals = plan.assignmentsToRemove.filter(
-    (assignment) => assignment.reason === "explicit-cancellation",
-  );
-  const absenceRemovals = plan.assignmentsToRemove.filter(
-    (assignment) => assignment.reason === "persistent-absence",
-  );
-  return [
-    ...plan.coursesToCreate.map((course) => ({
-      kind: "course-create" as const,
-      target: course.key,
-    })),
-    ...plan.coursesToUpdate.map((course) => ({
-      kind: "course-update" as const,
-      target: course.pageId,
-    })),
-    ...plan.assignmentsToCreate.flatMap((assignment) => [
-      { kind: "assignment-page-create" as const, target: assignment.source.uid },
-      { kind: "assignment-template-wait" as const, target: assignment.source.uid },
-      { kind: "assignment-description-update" as const, target: assignment.source.uid },
-      { kind: "assignment-description-hash-update" as const, target: assignment.source.uid },
-    ]),
-    ...plan.assignmentsToUpdate.flatMap((assignment) => [
-      ...(Object.keys(assignment.properties).length
-        ? [{ kind: "assignment-property-update" as const, target: assignment.pageId }]
-        : []),
-      ...(assignment.verifyDescription
-        ? [{ kind: "assignment-description-update" as const, target: assignment.pageId }]
-        : []),
-      ...(assignment.verifyDescription
-        ? [{ kind: "assignment-description-hash-update" as const, target: assignment.pageId }]
-        : []),
-    ]),
-    ...explicitRemovals.map((assignment) => ({
-      kind: assignment.markRemoved
-        ? ("assignment-remove" as const)
-        : ("assignment-missing-evidence-update" as const),
-      target: assignment.pageId,
-    })),
-    ...plan.assignmentsMissingEvidenceToUpdate.map((assignment) => ({
-      kind: "assignment-missing-evidence-update" as const,
-      target: assignment.pageId,
-    })),
-    ...absenceRemovals.map((assignment) => ({
-      kind: assignment.markRemoved
-        ? ("assignment-remove" as const)
-        : ("assignment-missing-evidence-update" as const),
-      target: assignment.pageId,
-    })),
-  ];
+  return compilePlan(plan).map(operationOf);
 }
 
 export class ApplyPlanError extends Error {
@@ -115,6 +60,12 @@ export interface ApplyPlanOptions {
   now?: Date;
 }
 
+interface AssignmentProgress {
+  pageId?: string;
+  completed: SyncOperationKind[];
+  repaired: boolean;
+}
+
 export async function applyPlan(
   gateway: NotionGateway,
   config: AppConfig,
@@ -123,20 +74,151 @@ export async function applyPlan(
   options: ApplyPlanOptions = {},
 ): Promise<SyncExecutionResult> {
   const execution = emptyExecutionResult();
-  const operations = plannedOperations(plan);
-  let operationIndex = 0;
+  const commands = compilePlan(plan);
+  const createdCourses = new Map<string, string>();
+  const progress = new Map<AssignmentWork, AssignmentProgress>();
+  function coursePage(key: string): string {
+    const pageId = key.startsWith("page:") ? key.slice(5) : createdCourses.get(key);
+    if (!pageId) throw new Error("A planned course could not be resolved during apply");
+    return pageId;
+  }
+  function state(work: AssignmentWork): AssignmentProgress {
+    let value = progress.get(work);
+    if (!value) {
+      value = {
+        completed: [],
+        repaired: false,
+        ...(work.intent === "update" ? { pageId: work.value.pageId } : {}),
+      };
+      progress.set(work, value);
+    }
+    return value;
+  }
+  function assignmentState(
+    work: AssignmentWork,
+    failedSubstep?: FailedSyncOperation,
+  ): AssignmentExecutionState {
+    const value = state(work);
+    return {
+      target: work.intent === "create" ? work.value.source.uid : work.value.pageId,
+      pageId: value.pageId!,
+      intent: work.intent,
+      state: failedSubstep ? "requires-repair" : "synchronized",
+      completedSubsteps: [...value.completed],
+      ...(failedSubstep ? { failedSubstep } : {}),
+    };
+  }
+  async function execute(command: SyncCommand): Promise<Partial<AppliedSyncOperation>> {
+    switch (command.kind) {
+      case "course-create": {
+        const created = await createCourse(
+          gateway,
+          config.NOTION_COURSES_DATA_SOURCE_ID,
+          command.course,
+        );
+        createdCourses.set(command.course.key, created.pageId);
+        return created;
+      }
+      case "course-update":
+        await updateCourse(gateway, command.course);
+        counts.coursesUpdated += 1;
+        break;
+      case "assignment-page-create": {
+        const work = command.assignment;
+        const created = await createAssignment(
+          gateway,
+          config.NOTION_ASSIGNMENTS_DATA_SOURCE_ID,
+          work.value,
+          coursePage(work.value.courseKey),
+          config.NOTION_TIMEZONE,
+        );
+        state(work).pageId = created.pageId;
+        if (!created.recovered) counts.created += 1;
+        return created;
+      }
+      case "assignment-template-wait":
+        await waitForTemplate(gateway, state(command.assignment).pageId!, options.templateWait);
+        break;
+      case "assignment-property-update": {
+        const work = command.assignment;
+        const properties = { ...work.value.properties };
+        if (properties.coursePageId) properties.coursePageId = coursePage(properties.coursePageId);
+        await updateAssignment(gateway, work.value.pageId, properties);
+        if (work.value.missingEvidenceCleared) counts.missingCleared += 1;
+        break;
+      }
+      case "assignment-description-update": {
+        const value = state(command.assignment);
+        const integrity = await replaceManagedDescription(
+          gateway,
+          value.pageId!,
+          command.assignment.value.source.descriptionMarkdown,
+        );
+        value.repaired = integrity.repaired;
+        break;
+      }
+      case "assignment-description-hash-update": {
+        const work = command.assignment;
+        const value = state(work);
+        const descriptionHash =
+          work.intent === "create"
+            ? managedDescriptionHash(work.value.source.descriptionMarkdown)
+            : work.value.descriptionHash;
+        const writeHash =
+          work.intent === "create" ||
+          work.value.descriptionHashNeedsUpdate !== false ||
+          value.repaired;
+        await updateAssignment(gateway, value.pageId!, {
+          ...(writeHash ? { descriptionHash } : {}),
+          descriptionVerifiedAt: (options.now ?? new Date()).toISOString(),
+        });
+        break;
+      }
+      case "assignment-remove":
+      case "assignment-missing-evidence-update": {
+        const change = command.change;
+        if (change.type === "evidence") {
+          await updateAssignment(gateway, change.value.pageId, {
+            canvasMissingSince: change.value.canvasMissingSince,
+            canvasMissingCount: change.value.canvasMissingCount,
+          });
+          if (change.value.transition === "advanced") counts.missingAdvanced += 1;
+        } else {
+          const value = change.value;
+          await updateAssignment(gateway, value.pageId, {
+            removed: true,
+            canvasState: "Removed",
+            ...(value.clearMissingEvidence
+              ? { canvasMissingSince: null, canvasMissingCount: null }
+              : {}),
+            ...(value.canvasMissingCountAfter !== undefined
+              ? { canvasMissingCount: value.canvasMissingCountAfter }
+              : {}),
+          });
+          if (value.markRemoved) counts.removed += 1;
+          if (value.clearMissingEvidence) counts.missingCleared += 1;
+          if (value.canvasMissingCountAfter !== undefined) counts.missingAdvanced += 1;
+        }
+        break;
+      }
+    }
+    return {};
+  }
 
-  async function applyStep<T>(
-    operation: SyncOperation,
-    action: () => Promise<T>,
-    applied: (value: T) => Partial<AppliedSyncOperation> = () => ({}),
-    onFailure?: (failure: FailedSyncOperation) => void,
-  ): Promise<T> {
+  for (const [index, command] of commands.entries()) {
+    const operation = operationOf(command);
     try {
-      const value = await action();
-      execution.appliedOperations.push({ ...operation, ...applied(value) });
-      operationIndex += 1;
-      return value;
+      const applied = await execute(command);
+      execution.appliedOperations.push({ ...operation, ...applied });
+      if ("assignment" in command) {
+        const work = command.assignment;
+        state(work).completed.push(command.kind);
+        const next = commands[index + 1];
+        if (!next || !("assignment" in next) || next.assignment !== work) {
+          execution.assignmentsSynchronized.push(assignmentState(work));
+          if (work.intent === "update") counts.updated += 1;
+        }
+      }
     } catch (error) {
       const failed: FailedSyncOperation = {
         ...operation,
@@ -145,208 +227,21 @@ export async function applyPlan(
       };
       execution.failedOperation = failed;
       if (failed.outcome === "ambiguous") execution.ambiguousOperations.push(failed);
-      onFailure?.(failed);
-      execution.notAttempted = operations.slice(operationIndex + 1);
+      if ("assignment" in command) {
+        const value = state(command.assignment);
+        if (
+          value.pageId &&
+          (value.completed.length || command.kind === "assignment-description-update")
+        ) {
+          execution.partialAssignments.push(assignmentState(command.assignment, failed));
+        }
+      }
+      execution.notAttempted = commands.slice(index + 1).map(operationOf);
       throw new ApplyPlanError(
         execution,
         `${operation.kind} ${operation.target}: ${failed.message}`,
       );
     }
-  }
-
-  function assignmentState(
-    target: string,
-    pageId: string,
-    intent: "create" | "update",
-    completedSubsteps: SyncOperationKind[],
-    failedSubstep?: FailedSyncOperation,
-  ): AssignmentExecutionState {
-    return {
-      target,
-      pageId,
-      intent,
-      state: failedSubstep ? "requires-repair" : "synchronized",
-      completedSubsteps: [...completedSubsteps],
-      ...(failedSubstep ? { failedSubstep } : {}),
-    };
-  }
-
-  const createdCourses = new Map<string, string>();
-  for (const course of plan.coursesToCreate) {
-    const operation = operations[operationIndex]!;
-    const created = await applyStep(
-      operation,
-      () => createCourse(gateway, config.NOTION_COURSES_DATA_SOURCE_ID, course),
-      (value) => ({ pageId: value.pageId, recovered: value.recovered }),
-    );
-    createdCourses.set(course.key, created.pageId);
-  }
-
-  for (const course of plan.coursesToUpdate) {
-    const operation = operations[operationIndex]!;
-    await applyStep(operation, () => updateCourse(gateway, course));
-    counts.coursesUpdated += 1;
-  }
-
-  // Active creates and updates deliberately finish before any removal writes.
-  for (const create of plan.assignmentsToCreate) {
-    const target = create.source.uid;
-    const completed: SyncOperationKind[] = [];
-    const coursePageId = resolveCourseKey(create.courseKey, createdCourses);
-    const pageOperation = operations[operationIndex]!;
-    const created = await applyStep(
-      pageOperation,
-      () =>
-        createAssignment(
-          gateway,
-          config.NOTION_ASSIGNMENTS_DATA_SOURCE_ID,
-          create,
-          coursePageId,
-          config.NOTION_TIMEZONE,
-        ),
-      (value) => ({ pageId: value.pageId, recovered: value.recovered }),
-    );
-    completed.push(pageOperation.kind);
-    if (!created.recovered) counts.created += 1;
-
-    const recordPartial = (failure: FailedSyncOperation) => {
-      execution.partialAssignments.push(
-        assignmentState(target, created.pageId, "create", completed, failure),
-      );
-    };
-    const templateOperation = operations[operationIndex]!;
-    await applyStep(
-      templateOperation,
-      () => waitForTemplate(gateway, created.pageId, options.templateWait),
-      undefined,
-      recordPartial,
-    );
-    completed.push(templateOperation.kind);
-
-    const descriptionOperation = operations[operationIndex]!;
-    await applyStep(
-      descriptionOperation,
-      () => replaceManagedDescription(gateway, created.pageId, create.source.descriptionMarkdown),
-      undefined,
-      recordPartial,
-    );
-    completed.push(descriptionOperation.kind);
-    const hashOperation = operations[operationIndex]!;
-    await applyStep(
-      hashOperation,
-      () =>
-        updateAssignment(gateway, created.pageId, {
-          descriptionHash: managedDescriptionHash(create.source.descriptionMarkdown),
-          descriptionVerifiedAt: (options.now ?? new Date()).toISOString(),
-        }),
-      undefined,
-      recordPartial,
-    );
-    completed.push(hashOperation.kind);
-    execution.assignmentsSynchronized.push(
-      assignmentState(target, created.pageId, "create", completed),
-    );
-  }
-
-  for (const update of plan.assignmentsToUpdate) {
-    const completed: SyncOperationKind[] = [];
-    const recordPartial = (failure: FailedSyncOperation) => {
-      if (completed.length) {
-        execution.partialAssignments.push(
-          assignmentState(update.pageId, update.pageId, "update", completed, failure),
-        );
-      }
-    };
-    const recordRepair = (failure: FailedSyncOperation) => {
-      execution.partialAssignments.push(
-        assignmentState(update.pageId, update.pageId, "update", completed, failure),
-      );
-    };
-    const properties = { ...update.properties };
-    if (properties.coursePageId) {
-      properties.coursePageId = resolveCourseKey(properties.coursePageId, createdCourses);
-    }
-    if (Object.keys(properties).length) {
-      const propertyOperation = operations[operationIndex]!;
-      await applyStep(
-        propertyOperation,
-        () => updateAssignment(gateway, update.pageId, properties),
-        undefined,
-        recordPartial,
-      );
-      completed.push(propertyOperation.kind);
-      if (update.missingEvidenceCleared) counts.missingCleared += 1;
-    }
-    if (update.verifyDescription) {
-      const descriptionOperation = operations[operationIndex]!;
-      const integrity = await applyStep(
-        descriptionOperation,
-        () => replaceManagedDescription(gateway, update.pageId, update.source.descriptionMarkdown),
-        undefined,
-        recordRepair,
-      );
-      completed.push(descriptionOperation.kind);
-      const hashOperation = operations[operationIndex]!;
-      await applyStep(
-        hashOperation,
-        () =>
-          updateAssignment(gateway, update.pageId, {
-            ...(update.descriptionHashNeedsUpdate !== false || integrity.repaired
-              ? { descriptionHash: update.descriptionHash }
-              : {}),
-            descriptionVerifiedAt: (options.now ?? new Date()).toISOString(),
-          }),
-        undefined,
-        recordPartial,
-      );
-      completed.push(hashOperation.kind);
-    }
-    execution.assignmentsSynchronized.push(
-      assignmentState(update.pageId, update.pageId, "update", completed),
-    );
-    counts.updated += 1;
-  }
-
-  async function applyRemoval(assignment: AssignmentRemoval): Promise<void> {
-    const operation = operations[operationIndex]!;
-    await applyStep(operation, () =>
-      updateAssignment(gateway, assignment.pageId, {
-        removed: true,
-        canvasState: "Removed",
-        ...(assignment.clearMissingEvidence
-          ? { canvasMissingSince: null, canvasMissingCount: null }
-          : {}),
-        ...(assignment.canvasMissingCountAfter !== undefined
-          ? { canvasMissingCount: assignment.canvasMissingCountAfter }
-          : {}),
-      }),
-    );
-    if (assignment.markRemoved) counts.removed += 1;
-    if (assignment.clearMissingEvidence) counts.missingCleared += 1;
-    if (assignment.canvasMissingCountAfter !== undefined) counts.missingAdvanced += 1;
-  }
-
-  for (const assignment of plan.assignmentsToRemove.filter(
-    (item) => item.reason === "explicit-cancellation",
-  )) {
-    await applyRemoval(assignment);
-  }
-
-  for (const update of plan.assignmentsMissingEvidenceToUpdate) {
-    const operation = operations[operationIndex]!;
-    await applyStep(operation, () =>
-      updateAssignment(gateway, update.pageId, {
-        canvasMissingSince: update.canvasMissingSince,
-        canvasMissingCount: update.canvasMissingCount,
-      }),
-    );
-    if (update.transition === "advanced") counts.missingAdvanced += 1;
-  }
-
-  for (const assignment of plan.assignmentsToRemove.filter(
-    (item) => item.reason === "persistent-absence",
-  )) {
-    await applyRemoval(assignment);
   }
   return execution;
 }
