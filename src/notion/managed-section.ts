@@ -418,8 +418,13 @@ export async function reconcileManagedSection(
     }
     invalidateChild(snapshot, replacementId);
     actual = await childSignatures(gateway, snapshot, replacementId);
+    if (actual.length <= previousLength) {
+      throw new AmbiguousNotionWriteError(
+        "Managed section append made no visible progress; the previous section was preserved",
+      );
+    }
     if (ambiguousAppend) {
-      if (!isPrefix(actual, snapshot.expectedSignatures) || actual.length <= previousLength) {
+      if (!isPrefix(actual, snapshot.expectedSignatures)) {
         throw new AmbiguousNotionWriteError(
           "Managed section child append is ambiguous; the previous section was preserved",
         );
