@@ -229,6 +229,7 @@ describe("application modes and failure handling", () => {
     const result = await run(config({ mode: "dry-run" }), {
       gateway,
       provider: new FakeProvider(proposedFeed),
+      now: () => new Date("2026-07-13T12:00:00Z"),
     });
     expect(result.status).toBe("Dry Run");
     expect(result.counts.created).toBe(1);
@@ -276,6 +277,7 @@ describe("application modes and failure handling", () => {
     const result = await run(config({ mode: "dry-run", trigger: "scheduled" }), {
       gateway,
       provider: new FakeProvider(proposedFeed),
+      now: () => new Date("2026-07-13T12:00:00Z"),
     });
     expect(result.plan?.assignmentsMissingEvidenceToUpdate).toHaveLength(1);
     expect(result.counts.missingObserved).toBe(1);
