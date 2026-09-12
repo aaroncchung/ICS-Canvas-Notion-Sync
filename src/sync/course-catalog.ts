@@ -82,9 +82,19 @@ export class CourseCatalog {
   public match(source: ExternalAssignment): CourseMatch {
     const match = matchCourseFromIndex(source, this.index, this.timestamp);
     if (match.kind !== "matched" || match.courseKey.startsWith("page:")) return match;
+    // A provisional course must not shadow an existing one. The original index only identifies
+    // that course; its metadata is always checked against the live record, which may already
+    // carry a Canvas ID or URL planned earlier in this run.
     const original = matchCourseFromIndex(source, this.originalIndex, this.timestamp);
-    if (original.kind === "create" || original.kind === "unidentified") return match;
-    return original;
+    switch (original.kind) {
+      case "create":
+      case "unidentified":
+        return match;
+      case "ambiguous":
+        return original;
+      default:
+        return this.metadata(source, this.entries.get(original.courseKey)!, original.method);
+    }
   }
 
   /** Returns a deferred decision, evaluated only after all course evidence has been collected. */
@@ -118,7 +128,7 @@ export class CourseCatalog {
       addCourseToIndex(this.index, entry.record, entry.key);
     } else {
       entry = this.entries.get(match.courseKey)!;
-      this.observe(entry, match);
+      this.observe(entry, source);
     }
     const accepted = entry;
     entry.sources.push(source);
@@ -169,7 +179,7 @@ export class CourseCatalog {
       if (!destinations.size) continue;
       const target = [...destinations][0]!;
       // Validate all observations before redirecting; conflicting evidence remains blocked.
-      for (const source of entry.sources) this.observe(target, this.metadata(source, target));
+      for (const source of entry.sources) this.observe(target, source);
       entry.redirect = target;
     }
     // Enrichment can leave a provisional course and an existing one sharing a Canvas ID in the
@@ -182,22 +192,22 @@ export class CourseCatalog {
       }
       if (destinations.size !== 1) continue;
       const target = [...destinations][0]!;
-      this.observe(target, this.metadata(ambiguity.source, target));
+      this.observe(target, ambiguity.source);
       ambiguity.destination = target;
     }
   }
 
-  private metadata(source: ExternalAssignment, target: CourseEntry): CourseMatch {
-    return matchCourseMetadata(
-      source,
-      target.record,
-      target.key,
-      "resolved-course",
-      this.timestamp,
-    );
+  private metadata(
+    source: ExternalAssignment,
+    target: CourseEntry,
+    method = "resolved-course",
+  ): CourseMatch {
+    return matchCourseMetadata(source, target.record, target.key, method, this.timestamp);
   }
 
-  private observe(entry: CourseEntry, match: CourseMatch): void {
+  /** Every observation is judged against the live record so run-local evidence is never lost. */
+  private observe(entry: CourseEntry, source: ExternalAssignment): void {
+    const match = this.metadata(source, entry);
     if (match.kind === "conflict") entry.conflict ??= match;
     else if (match.kind === "matched" && match.update && !entry.conflict) {
       this.enrich(entry, match.update);
@@ -243,17 +253,25 @@ export class CourseCatalog {
     };
   }
 
+  /** Enrichment fills blank fields only; a differing value is a conflict, never a replacement. */
   private enrich(entry: CourseEntry, update: CourseUpdate): void {
+    const applied: CourseUpdate = { pageId: entry.record.pageId };
     if (update.canvasCourseId && !entry.record.canvasCourseId) {
       entry.record.canvasCourseId = update.canvasCourseId;
       addCanvasCourseIdToIndex(this.index, entry.record, update.canvasCourseId);
+      applied.canvasCourseId = update.canvasCourseId;
     }
-    if (update.canvasUrl) entry.record.url = update.canvasUrl;
+    if (update.canvasUrl && !entry.record.url) {
+      entry.record.url = update.canvasUrl;
+      applied.canvasUrl = update.canvasUrl;
+    }
+    if (!applied.canvasCourseId && !applied.canvasUrl) return;
+    if (update.syncUpdatedAt) applied.syncUpdatedAt = update.syncUpdatedAt;
     if (entry.create) {
-      if (update.canvasCourseId) entry.create.canvasCourseId = update.canvasCourseId;
-      if (update.canvasUrl) entry.create.canvasUrl = update.canvasUrl;
+      if (applied.canvasCourseId) entry.create.canvasCourseId = applied.canvasCourseId;
+      if (applied.canvasUrl) entry.create.canvasUrl = applied.canvasUrl;
     } else {
-      entry.update = { ...entry.update, ...update };
+      entry.update = { ...entry.update, ...applied };
     }
   }
 

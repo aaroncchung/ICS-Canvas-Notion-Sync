@@ -105,6 +105,25 @@ describe("finalized reconciliation decisions", () => {
     },
   );
 
+  it("rejects a Canvas ID that contradicts one planned earlier in the run", () => {
+    // "one" plans a provisional course by name; "two" and "three" both reach the existing
+    // course through that provisional name, and disagree about its Canvas ID.
+    const { result } = plan(
+      [
+        source("one"),
+        source("two", { canvasCourseId: "9", courseCode: "BIO101" }),
+        source("three", { canvasCourseId: "7", courseCode: "BIO101" }),
+      ],
+      [],
+      [biology],
+    );
+    expect(result.coursesToUpdate).toEqual([]);
+    expect(result.assignmentsToCreate).toEqual([]);
+    expect(
+      result.warnings.filter((value) => value.code === "course-metadata-conflict"),
+    ).toHaveLength(1);
+  });
+
   it("does not count conflict-blocked unchanged assignments or avoided reads", () => {
     const { result, metrics } = plan(
       [source("one", { canvasCourseId: "7" }), source("two", { canvasCourseId: "9" })],
