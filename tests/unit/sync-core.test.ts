@@ -65,7 +65,7 @@ describe("finalized reconciliation decisions", () => {
         "Canvas Description Verified At": { date: { start: value.descriptionVerifiedAt } },
         "Canvas State": { select: { name: "Active" } },
       });
-    await applyPlan(gateway, config(), result, runCounts(), { now });
+    await applyPlan(gateway, config(), result, runCounts(), { now: () => now });
     const updated = await readAssignments(gateway, "assignments");
     expect(updated.map((value) => value.coursePageIds)).toEqual([["courses-1"], ["courses-1"]]);
     const next = plan(sources, updated, [{ pageId: "courses-1", title: "Bio" }]).result;
@@ -244,7 +244,7 @@ describe("finalized reconciliation decisions", () => {
     const gateway = new FakeGateway();
     gateway.simulateDefaultTemplate = true;
     await applyPlan(gateway, config(), result, runCounts(), {
-      now,
+      now: () => now,
       templateWait: { attempts: 2, sleep: async () => {} },
     });
     expect(result).toEqual(before);

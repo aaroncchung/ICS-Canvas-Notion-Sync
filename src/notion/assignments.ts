@@ -2,6 +2,7 @@ import type {
   AssignmentCreate,
   AssignmentPropertyUpdate,
   AssignmentRecord,
+  Clock,
   ExternalAssignment,
   RecoveredCreate,
 } from "../types.js";
@@ -89,14 +90,21 @@ export async function readAssignments(
   return assignments;
 }
 
+export interface AssignmentCreateOptions extends VisibilityPollingOptions {
+  now?: Clock;
+}
+
+const systemClock: Clock = () => new Date();
+
 export async function createAssignment(
   gateway: NotionGateway,
   dataSourceId: string,
   create: AssignmentCreate,
   coursePageId: string,
   timezone: string,
-  recoveryOptions: VisibilityPollingOptions = {},
+  options: AssignmentCreateOptions = {},
 ): Promise<RecoveredCreate> {
+  const now = options.now ?? systemClock;
   const source = create.source;
   const properties: Record<string, unknown> = {
     Assignment: title(source.title),
@@ -108,7 +116,7 @@ export async function createAssignment(
     "Canvas State": select("Active"),
     "Removed from Canvas": checkbox(false),
     "Raw Description": text(descriptionExcerpt(source)),
-    "Last Synced": date(new Date().toISOString()),
+    "Last Synced": date(now().toISOString()),
   };
   if (source.canvasUrl) properties["Canvas URL"] = url(source.canvasUrl);
   if (source.dueAt) {
@@ -134,7 +142,7 @@ export async function createAssignment(
           rich_text: { equals: source.uid },
         }),
       (count) => `Assignment create is ambiguous: ${count} pages match the Canvas UID`,
-      recoveryOptions,
+      options,
     );
     if (match && typeof match.id === "string") {
       if (gateway.metrics) {
@@ -149,7 +157,10 @@ export async function createAssignment(
   }
 }
 
-export function buildUpdateProperties(update: AssignmentPropertyUpdate): Record<string, unknown> {
+export function buildUpdateProperties(
+  update: AssignmentPropertyUpdate,
+  now: Clock = systemClock,
+): Record<string, unknown> {
   const properties: Record<string, unknown> = {};
   if (update.title !== undefined) properties.Assignment = title(update.title);
   if (update.coursePageId !== undefined) properties.Course = relation(update.coursePageId);
@@ -181,7 +192,7 @@ export function buildUpdateProperties(update: AssignmentPropertyUpdate): Record<
   if (update.removed !== undefined) properties["Removed from Canvas"] = checkbox(update.removed);
   if (update.canvasState !== undefined) properties["Canvas State"] = select(update.canvasState);
   if (Object.keys(properties).some((name) => name !== "Canvas Description Verified At")) {
-    properties["Last Synced"] = date(new Date().toISOString());
+    properties["Last Synced"] = date(now().toISOString());
   }
   return properties;
 }
@@ -190,7 +201,8 @@ export async function updateAssignment(
   gateway: NotionGateway,
   pageIdValue: string,
   update: AssignmentPropertyUpdate,
+  now: Clock = systemClock,
 ): Promise<void> {
-  const properties = buildUpdateProperties(update);
+  const properties = buildUpdateProperties(update, now);
   if (Object.keys(properties).length) await gateway.updatePage(pageIdValue, properties);
 }

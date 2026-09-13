@@ -285,7 +285,7 @@ export async function run(
         plan,
       };
       if (config.mode === "sync") {
-        result.execution = await applyPlan(gateway, config, plan, counts);
+        result.execution = await applyPlan(gateway, config, plan, counts, { now });
       }
     }
 

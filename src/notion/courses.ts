@@ -1,4 +1,4 @@
-import type { CourseCreate, CourseRecord, CourseUpdate, RecoveredCreate } from "../types.js";
+import type { Clock, CourseCreate, CourseRecord, CourseUpdate, RecoveredCreate } from "../types.js";
 import { AmbiguousNotionWriteError, isAmbiguousWriteError, type NotionGateway } from "./client.js";
 import { normalizeCourse } from "../sync/course-matcher.js";
 import { pollForUniquePage, type VisibilityPollingOptions } from "./recovery.js";
@@ -38,16 +38,21 @@ export async function readCourses(
   });
 }
 
+export interface CourseCreateOptions extends VisibilityPollingOptions {
+  now?: Clock;
+}
+
 export async function createCourse(
   gateway: NotionGateway,
   dataSourceId: string,
   course: CourseCreate,
-  recoveryOptions: VisibilityPollingOptions = {},
+  options: CourseCreateOptions = {},
 ): Promise<RecoveredCreate> {
+  const now = options.now ?? (() => new Date());
   const properties: Record<string, unknown> = {
     Course: title(course.title),
     Active: checkbox(true),
-    "Sync Updated At": date(new Date().toISOString()),
+    "Sync Updated At": date(now().toISOString()),
   };
   if (course.courseCode) properties["Course Code"] = text(course.courseCode);
   if (course.canvasCourseId) properties["Canvas Course ID"] = text(course.canvasCourseId);
@@ -83,7 +88,7 @@ export async function createCourse(
             });
       },
       (count) => `Course create is ambiguous: ${count} pages match its deterministic key`,
-      recoveryOptions,
+      options,
     );
     if (match) {
       if (gateway.metrics) {
