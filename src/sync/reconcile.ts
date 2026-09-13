@@ -12,6 +12,7 @@ import {
 import type {
   AppliedSyncOperation,
   AssignmentExecutionState,
+  Clock,
   FailedSyncOperation,
   RunCounts,
   SyncExecutionResult,
@@ -57,7 +58,8 @@ export function emptyExecutionResult(): SyncExecutionResult {
 
 export interface ApplyPlanOptions {
   templateWait?: TemplateWaitOptions;
-  now?: Date;
+  /** Run clock; every timestamp written during apply is read from it. */
+  now?: Clock;
 }
 
 interface AssignmentProgress {
@@ -74,6 +76,7 @@ export async function applyPlan(
   options: ApplyPlanOptions = {},
 ): Promise<SyncExecutionResult> {
   const execution = emptyExecutionResult();
+  const now = options.now ?? (() => new Date());
   const commands = compilePlan(plan);
   const createdCourses = new Map<string, string>();
   const progress = new Map<AssignmentWork, AssignmentProgress>();
@@ -115,6 +118,7 @@ export async function applyPlan(
           gateway,
           config.NOTION_COURSES_DATA_SOURCE_ID,
           command.course,
+          { now },
         );
         createdCourses.set(command.course.key, created.pageId);
         return created;
@@ -131,6 +135,7 @@ export async function applyPlan(
           work.value,
           coursePage(work.value.courseKey),
           config.NOTION_TIMEZONE,
+          { now },
         );
         state(work).pageId = created.pageId;
         if (!created.recovered) counts.created += 1;
@@ -143,7 +148,7 @@ export async function applyPlan(
         const work = command.assignment;
         const properties = { ...work.value.properties };
         if (properties.coursePageId) properties.coursePageId = coursePage(properties.coursePageId);
-        await updateAssignment(gateway, work.value.pageId, properties);
+        await updateAssignment(gateway, work.value.pageId, properties, now);
         if (work.value.missingEvidenceCleared) counts.missingCleared += 1;
         break;
       }
@@ -168,33 +173,48 @@ export async function applyPlan(
           work.intent === "create" ||
           work.value.descriptionHashNeedsUpdate !== false ||
           value.repaired;
-        await updateAssignment(gateway, value.pageId!, {
-          ...(writeHash ? { descriptionHash } : {}),
-          descriptionVerifiedAt: (options.now ?? new Date()).toISOString(),
-        });
+        await updateAssignment(
+          gateway,
+          value.pageId!,
+          {
+            ...(writeHash ? { descriptionHash } : {}),
+            descriptionVerifiedAt: now().toISOString(),
+          },
+          now,
+        );
         break;
       }
       case "assignment-remove":
       case "assignment-missing-evidence-update": {
         const change = command.change;
         if (change.type === "evidence") {
-          await updateAssignment(gateway, change.value.pageId, {
-            canvasMissingSince: change.value.canvasMissingSince,
-            canvasMissingCount: change.value.canvasMissingCount,
-          });
+          await updateAssignment(
+            gateway,
+            change.value.pageId,
+            {
+              canvasMissingSince: change.value.canvasMissingSince,
+              canvasMissingCount: change.value.canvasMissingCount,
+            },
+            now,
+          );
           if (change.value.transition === "advanced") counts.missingAdvanced += 1;
         } else {
           const value = change.value;
-          await updateAssignment(gateway, value.pageId, {
-            removed: true,
-            canvasState: "Removed",
-            ...(value.clearMissingEvidence
-              ? { canvasMissingSince: null, canvasMissingCount: null }
-              : {}),
-            ...(value.canvasMissingCountAfter !== undefined
-              ? { canvasMissingCount: value.canvasMissingCountAfter }
-              : {}),
-          });
+          await updateAssignment(
+            gateway,
+            value.pageId,
+            {
+              removed: true,
+              canvasState: "Removed",
+              ...(value.clearMissingEvidence
+                ? { canvasMissingSince: null, canvasMissingCount: null }
+                : {}),
+              ...(value.canvasMissingCountAfter !== undefined
+                ? { canvasMissingCount: value.canvasMissingCountAfter }
+                : {}),
+            },
+            now,
+          );
           if (value.markRemoved) counts.removed += 1;
           if (value.clearMissingEvidence) counts.missingCleared += 1;
           if (value.canvasMissingCountAfter !== undefined) counts.missingAdvanced += 1;

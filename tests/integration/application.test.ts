@@ -205,6 +205,69 @@ describe("application modes and failure handling", () => {
     },
   );
 
+  it("writes every timestamp from the injected run clock", async () => {
+    const gateway = new FakeGateway();
+    gateway.simulateDefaultTemplate = true;
+    const feed: AssignmentFeed = {
+      assignments: [
+        {
+          uid: "uid-new",
+          title: "Homework 1",
+          courseName: "EE 10",
+          canvasCourseId: "123",
+          canvasUrl: "https://canvas.example.edu/courses/123/assignments/456",
+          inferredType: "Homework",
+          descriptionMarkdown: "Read chapter 1",
+        },
+      ],
+      cancelledAssignments: [],
+      diagnostics: {
+        ...emptyFeed.diagnostics,
+        totalEvents: 1,
+        sourceUids: ["uid-new"],
+        normalizedAssignmentUids: ["uid-new"],
+      },
+    };
+    // A clock far from wall-clock time that ticks on every read, so a timestamp can only
+    // match if it was taken from this clock rather than from Date.now().
+    const clockStart = Date.UTC(1999, 0, 1, 0, 0, 0);
+    const ticks: string[] = [];
+    const now = (): Date => {
+      const value = new Date(clockStart + ticks.length * 60_000);
+      ticks.push(value.toISOString());
+      return value;
+    };
+
+    const result = await run(config(), { gateway, provider: new FakeProvider(feed), now });
+
+    expect(result.status).toBe("Success");
+    const timestampProperties = [
+      "Last Synced",
+      "Sync Updated At",
+      "Canvas Description Verified At",
+      "Started At",
+      "Finished At",
+    ];
+    const written = new Map<string, string[]>();
+    for (const write of gateway.writes) {
+      if (write.kind !== "create" && write.kind !== "update") continue;
+      const properties = write.value as Record<string, { date?: { start?: string } | null }>;
+      for (const name of timestampProperties) {
+        const start = properties[name]?.date?.start;
+        if (start) written.set(name, [...(written.get(name) ?? []), start]);
+      }
+    }
+    expect([...written.keys()].sort()).toEqual([...timestampProperties].sort());
+    for (const [name, values] of written) {
+      for (const value of values) {
+        expect(ticks, `${name} was not read from the run clock`).toContain(value);
+        expect(Math.abs(Date.parse(value) - Date.now())).toBeGreaterThan(365 * 24 * 60 * 60 * 1000);
+      }
+    }
+    expect(written.get("Started At")).toEqual([ticks[0]]);
+    expect(written.get("Finished At")).toEqual([ticks[ticks.length - 1]]);
+  });
+
   it("dry-run performs complete reads but no writes", async () => {
     const gateway = new FakeGateway();
     const proposedFeed: AssignmentFeed = {
@@ -1578,7 +1641,7 @@ describe("managed descriptions", () => {
     const plan = descriptionPlan("Old description");
     plan.assignmentsToUpdate[0]!.descriptionHashNeedsUpdate = false;
     await applyPlan(gateway, config(), plan, counts(), {
-      now: new Date("2026-07-13T12:00:00.000Z"),
+      now: () => new Date("2026-07-13T12:00:00.000Z"),
     });
     const metadataWrite = gateway.writes.find(
       (write) =>
@@ -1614,7 +1677,7 @@ describe("managed descriptions", () => {
       warnings: [],
     };
     await applyPlan(gateway, config(), createPlan, counts(), {
-      now: new Date("2026-07-13T12:00:00.000Z"),
+      now: () => new Date("2026-07-13T12:00:00.000Z"),
       templateWait: { attempts: 2, delayMs: 0, sleep: () => Promise.resolve() },
     });
     const metadataIndex = gateway.writes.findIndex(

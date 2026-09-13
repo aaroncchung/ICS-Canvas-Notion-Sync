@@ -206,6 +206,9 @@ export interface RecoveredCreate {
   recovered: boolean;
 }
 
+/** Source of the current time for every timestamp a run writes; injected so tests can pin it. */
+export type Clock = () => Date;
+
 export type SyncOperationKind =
   | "course-create"
   | "course-update"

@@ -1591,7 +1591,7 @@ describe("plan-first reconciliation", () => {
 });
 
 describe("course keys survive apply", () => {
-  const applyOptions = { now: new Date("2026-07-13T12:00:00Z") };
+  const applyOptions = { now: () => new Date("2026-07-13T12:00:00Z") };
 
   // Course identity must come only from what each test states, so drop the defaults it omits.
   function unlinkedSource(overrides: Partial<ExternalAssignment> = {}): ExternalAssignment {
