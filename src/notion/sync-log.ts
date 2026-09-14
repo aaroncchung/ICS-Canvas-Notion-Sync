@@ -6,13 +6,13 @@ import { AmbiguousNotionWriteError, isAmbiguousWriteError, type NotionGateway } 
 import { createManagedSectionSnapshot, reconcileManagedSection } from "./managed-section.js";
 import { date, number, pageId, select, text, title, url } from "./property-helpers.js";
 import { pollForUniquePage, type VisibilityPollingOptions } from "./recovery.js";
-import { blockBatch, paragraph, toggle } from "./blocks.js";
+import { blockBatch, paragraphs, toggle, type Block } from "./blocks.js";
 
 export const MANAGED_SYNC_LOG_TITLE = "Canvas Sync Result — managed by sync";
 export const PENDING_MANAGED_SYNC_LOG_TITLE =
   "Canvas Sync Result — managed by sync [replacement pending]";
 
-function heading(value: string): Record<string, unknown> {
+function heading(value: string): Block {
   return {
     object: "block",
     type: "heading_2",
@@ -20,12 +20,8 @@ function heading(value: string): Record<string, unknown> {
   };
 }
 
-function section(titleValue: string, lines: string[]): Array<Record<string, unknown>> {
-  const content = lines.length ? lines.join("\n") : "None";
-  const blocks = [heading(titleValue)];
-  for (let offset = 0; offset < content.length; offset += 1900)
-    blocks.push(paragraph(content.slice(offset, offset + 1900)));
-  return blocks;
+function section(titleValue: string, lines: string[]): Block[] {
+  return [heading(titleValue), ...paragraphs(lines.length ? lines.join("\n") : "None")];
 }
 
 function runTitle(config: AppConfig, startedAt: string): string {
@@ -91,7 +87,7 @@ export async function writeSyncLog(
   }
 
   let logPageId = matches[0] ? pageId(matches[0]) : undefined;
-  let initialRootBlocks: Array<Record<string, unknown>> | undefined;
+  let initialRootBlocks: Block[] | undefined;
   if (logPageId) {
     await gateway.updatePage(logPageId, properties);
   } else {

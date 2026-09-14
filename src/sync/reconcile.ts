@@ -1,6 +1,7 @@
 import type { AppConfig } from "../config.js";
 import { safeError } from "../observability/redaction.js";
 import { createAssignment, updateAssignment } from "../notion/assignments.js";
+import type { Block } from "../notion/blocks.js";
 import { errorStatus, isAmbiguousWriteError, type NotionGateway } from "../notion/client.js";
 import { createCourse, updateCourse } from "../notion/courses.js";
 import {
@@ -66,7 +67,7 @@ interface AssignmentProgress {
   pageId?: string;
   completed: SyncOperationKind[];
   repaired: boolean;
-  templateBlocks?: Array<Record<string, unknown>>;
+  templateBlocks?: Block[];
 }
 
 export async function applyPlan(

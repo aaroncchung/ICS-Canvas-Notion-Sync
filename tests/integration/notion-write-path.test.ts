@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { pino } from "pino";
-import { blockBatch, paragraph, toggle, type Block } from "../../src/notion/blocks.js";
+import { blockBatch, paragraph, paragraphs, toggle, type Block } from "../../src/notion/blocks.js";
 import { OfficialNotionGateway } from "../../src/notion/client.js";
 import {
   MANAGED_DESCRIPTION_TITLE,
@@ -328,6 +328,21 @@ describe("batched write safety", () => {
     await replaceManagedDescription(gateway, "page", "Description", undefined, roots);
     expect(gateway.listBlocksCallCount("page") - reads).toBe(1); // promotion only
     expect(gateway.blocks.get("template")!.map(blockText)).toEqual(["First", "Second"]);
+  });
+
+  it("never splits a surrogate pair across paragraph chunks", () => {
+    const text = `${"a".repeat(1899)}😀${"b".repeat(1899)}😀`;
+    const chunks = paragraphs(text).map(blockText);
+    expect(chunks.join("")).toBe(text);
+    for (const chunk of chunks) {
+      expect(chunk.length).toBeLessThanOrEqual(1900);
+      expect(chunk).not.toMatch(/\p{Surrogate}/u);
+    }
+    expect(paragraphs("")).toEqual([]);
+    expect(paragraphs("x".repeat(3800)).map(blockText)).toEqual([
+      "x".repeat(1900),
+      "x".repeat(1900),
+    ]);
   });
 
   it("keeps Unicode batches within byte and block limits", () => {

@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
-import { paragraph, type Block } from "./blocks.js";
+import { paragraph, paragraphs, type Block } from "./blocks.js";
 import type { NotionGateway } from "./client.js";
 import {
   blockText,
@@ -36,13 +36,8 @@ export interface DescriptionIntegrityAuditDecision {
   ageDays?: number;
 }
 
-function descriptionBlocks(markdown: string): Array<Record<string, unknown>> {
-  if (!markdown) return [paragraph("No description provided.")];
-  const result: Array<Record<string, unknown>> = [];
-  for (let offset = 0; offset < markdown.length; offset += 1900) {
-    result.push(paragraph(markdown.slice(offset, offset + 1900)));
-  }
-  return result;
+function descriptionBlocks(markdown: string): Block[] {
+  return markdown ? paragraphs(markdown) : [paragraph("No description provided.")];
 }
 
 const calendarDayFormatters = new Map<string, Intl.DateTimeFormat>();
