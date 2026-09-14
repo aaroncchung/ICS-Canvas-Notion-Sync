@@ -1,6 +1,7 @@
 import type { AppConfig } from "../config.js";
 import { safeError } from "../observability/redaction.js";
 import { createAssignment, updateAssignment } from "../notion/assignments.js";
+import type { Block } from "../notion/blocks.js";
 import { errorStatus, isAmbiguousWriteError, type NotionGateway } from "../notion/client.js";
 import { createCourse, updateCourse } from "../notion/courses.js";
 import {
@@ -12,6 +13,7 @@ import {
 import type {
   AppliedSyncOperation,
   AssignmentExecutionState,
+  AssignmentPropertyUpdate,
   Clock,
   FailedSyncOperation,
   SyncExecutionResult,
@@ -65,6 +67,7 @@ interface AssignmentProgress {
   pageId?: string;
   completed: SyncOperationKind[];
   repaired: boolean;
+  templateBlocks?: Block[];
 }
 
 export async function applyPlan(
@@ -109,6 +112,27 @@ export async function applyPlan(
       ...(failedSubstep ? { failedSubstep } : {}),
     };
   }
+  function descriptionMetadata(work: AssignmentWork): AssignmentPropertyUpdate {
+    const descriptionHash =
+      work.intent === "create"
+        ? managedDescriptionHash(work.value.source.descriptionMarkdown)
+        : work.value.descriptionHash;
+    const writeHash =
+      work.intent === "create" ||
+      work.value.descriptionHashNeedsUpdate !== false ||
+      state(work).repaired;
+    return {
+      ...(writeHash ? { descriptionHash } : {}),
+      descriptionVerifiedAt: now().toISOString(),
+    };
+  }
+  function assignmentProperties(
+    work: Extract<AssignmentWork, { intent: "update" }>,
+  ): AssignmentPropertyUpdate {
+    const properties = { ...work.value.properties };
+    if (properties.coursePageId) properties.coursePageId = coursePage(properties.coursePageId);
+    return properties;
+  }
   async function execute(command: SyncCommand): Promise<Partial<AppliedSyncOperation>> {
     switch (command.kind) {
       case "course-create": {
@@ -138,13 +162,15 @@ export async function applyPlan(
         return created;
       }
       case "assignment-template-wait":
-        await waitForTemplate(gateway, state(command.assignment).pageId!, options.templateWait);
+        state(command.assignment).templateBlocks = await waitForTemplate(
+          gateway,
+          state(command.assignment).pageId!,
+          options.templateWait,
+        );
         break;
       case "assignment-property-update": {
         const work = command.assignment;
-        const properties = { ...work.value.properties };
-        if (properties.coursePageId) properties.coursePageId = coursePage(properties.coursePageId);
-        await updateAssignment(gateway, work.value.pageId, properties, now);
+        await updateAssignment(gateway, work.value.pageId, assignmentProperties(work), now);
         break;
       }
       case "assignment-description-update": {
@@ -156,6 +182,7 @@ export async function applyPlan(
           () => {
             execution.ambiguousWriteRecoveries += 1;
           },
+          value.templateBlocks,
         );
         value.repaired = integrity.repaired;
         return { description: integrity };
@@ -163,23 +190,7 @@ export async function applyPlan(
       case "assignment-description-hash-update": {
         const work = command.assignment;
         const value = state(work);
-        const descriptionHash =
-          work.intent === "create"
-            ? managedDescriptionHash(work.value.source.descriptionMarkdown)
-            : work.value.descriptionHash;
-        const writeHash =
-          work.intent === "create" ||
-          work.value.descriptionHashNeedsUpdate !== false ||
-          value.repaired;
-        await updateAssignment(
-          gateway,
-          value.pageId!,
-          {
-            ...(writeHash ? { descriptionHash } : {}),
-            descriptionVerifiedAt: now().toISOString(),
-          },
-          now,
-        );
+        await updateAssignment(gateway, value.pageId!, descriptionMetadata(work), now);
         break;
       }
       case "assignment-remove":
@@ -219,40 +230,98 @@ export async function applyPlan(
     return {};
   }
 
-  for (const [index, command] of commands.entries()) {
-    const operation = operationOf(command);
+  const attempted = new Set<SyncCommand>();
+  function record(command: SyncCommand, applied: Partial<AppliedSyncOperation> = {}): void {
+    execution.appliedOperations.push({ ...operationOf(command), ...applied });
+    if ("assignment" in command) state(command.assignment).completed.push(command.kind);
+  }
+  function fail(command: SyncCommand, error: unknown): void {
+    const failed: FailedSyncOperation = {
+      ...operationOf(command),
+      outcome: isAmbiguousWriteError(error) ? "ambiguous" : "failed",
+      message: operationError(error),
+    };
+    if (!execution.failedOperation) execution.failedOperation = failed;
+    else (execution.additionalFailures ??= []).push(failed);
+  }
+  async function perform(command: SyncCommand): Promise<boolean> {
+    attempted.add(command);
     try {
-      const applied = await execute(command);
-      execution.appliedOperations.push({ ...operation, ...applied });
-      if ("assignment" in command) {
-        const work = command.assignment;
-        state(work).completed.push(command.kind);
-        const next = commands[index + 1];
-        if (!next || !("assignment" in next) || next.assignment !== work) {
-          execution.assignmentsSynchronized.push(assignmentState(work));
-        }
-      }
+      record(command, await execute(command));
+      return true;
     } catch (error) {
-      const failed: FailedSyncOperation = {
-        ...operation,
-        outcome: isAmbiguousWriteError(error) ? "ambiguous" : "failed",
-        message: operationError(error),
-      };
-      execution.failedOperation = failed;
+      fail(command, error);
+      return false;
+    }
+  }
+
+  for (let index = 0; index < commands.length; index += 1) {
+    const command = commands[index]!;
+    const property = commands[index + 1];
+    const metadata = commands[index + 2];
+    if (
+      command.kind === "assignment-description-update" &&
+      property?.kind === "assignment-property-update" &&
+      metadata?.kind === "assignment-description-hash-update" &&
+      property.assignment === command.assignment &&
+      metadata.assignment === command.assignment
+    ) {
+      const work = property.assignment;
+      let properties: AssignmentPropertyUpdate | undefined;
+      try {
+        properties = assignmentProperties(work);
+      } catch (error) {
+        attempted.add(property);
+        fail(property, error);
+      }
+      if (properties && (await perform(command))) {
+        attempted.add(property);
+        attempted.add(metadata);
+        try {
+          await updateAssignment(
+            gateway,
+            work.value.pageId,
+            {
+              ...properties,
+              ...descriptionMetadata(work),
+            },
+            now,
+          );
+          record(property);
+          record(metadata);
+        } catch (error) {
+          // Metadata errors must not prevent independent due-date/lifecycle updates.
+          // This idempotent fallback never resends the metadata or any block writes.
+          fail(metadata, error);
+          await perform(property);
+        }
+      } else if (properties) {
+        await perform(property);
+      }
+      index += 2;
+    } else {
+      await perform(command);
+    }
+    if (execution.failedOperation) {
+      const failed = execution.failedOperation;
       if ("assignment" in command) {
         const value = state(command.assignment);
         if (
           value.pageId &&
-          (value.completed.length || command.kind === "assignment-description-update")
+          (value.completed.length ||
+            (command.kind === "assignment-description-update" && attempted.has(command)))
         ) {
           execution.partialAssignments.push(assignmentState(command.assignment, failed));
         }
       }
-      execution.notAttempted = commands.slice(index + 1).map(operationOf);
-      throw new ApplyPlanError(
-        execution,
-        `${operation.kind} ${operation.target}: ${failed.message}`,
-      );
+      execution.notAttempted = commands.filter((value) => !attempted.has(value)).map(operationOf);
+      throw new ApplyPlanError(execution, `${failed.kind} ${failed.target}: ${failed.message}`);
+    }
+    if ("assignment" in command) {
+      const work = command.assignment;
+      const next = commands[index + 1];
+      if (!next || !("assignment" in next) || next.assignment !== work)
+        execution.assignmentsSynchronized.push(assignmentState(work));
     }
   }
   return execution;

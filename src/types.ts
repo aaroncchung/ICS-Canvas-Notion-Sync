@@ -260,6 +260,8 @@ export interface SyncExecutionResult {
   notAttempted: SyncOperation[];
   ambiguousWriteRecoveries: number;
   failedOperation?: FailedSyncOperation;
+  /** Other failed substeps when an independent property fallback also fails. */
+  additionalFailures?: FailedSyncOperation[];
 }
 
 export interface RunCounts {

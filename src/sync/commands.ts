@@ -66,10 +66,12 @@ export function compilePlan(plan: SyncPlan): SyncCommand[] {
   }
   for (const value of plan.assignmentsToUpdate) {
     const assignment: AssignmentUpdateWork = { intent: "update", value };
+    if (value.verifyDescription) {
+      commands.push({ kind: "assignment-description-update", target: value.pageId, assignment });
+    }
     if (Object.keys(value.properties).length)
       commands.push({ kind: "assignment-property-update", target: value.pageId, assignment });
     if (value.verifyDescription) {
-      commands.push({ kind: "assignment-description-update", target: value.pageId, assignment });
       commands.push({
         kind: "assignment-description-hash-update",
         target: value.pageId,

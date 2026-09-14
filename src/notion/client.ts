@@ -1,4 +1,5 @@
 import { createRequestMetrics } from "../observability/run-report.js";
+import { setTimeout as sleep } from "node:timers/promises";
 import { Client } from "@notionhq/client";
 import type { Logger } from "pino";
 import type { RequestMetrics } from "../types.js";
@@ -29,6 +30,7 @@ export interface NotionGateway {
       useDefaultTemplate?: boolean;
       templateTimezone?: string;
       operation?: "page-create" | "sync-log-create";
+      children?: Array<Record<string, unknown>>;
     },
   ): Promise<string>;
   updatePage(pageId: string, properties: Record<string, unknown>): Promise<void>;
@@ -81,8 +83,7 @@ export async function withRetry<T>(
 ): Promise<T> {
   const attempts = options.attempts ?? 4;
   const baseDelayMs = options.baseDelayMs ?? 350;
-  const sleep =
-    options.sleep ?? ((ms: number) => new Promise((resolve) => setTimeout(resolve, ms)));
+  const pause = options.sleep ?? sleep;
   const operationType = options.operation ?? "read";
   const retriesAmbiguousFailures = ["read", "property-update"].includes(operationType);
   for (let attempt = 0; attempt < attempts; attempt += 1) {
@@ -108,7 +109,7 @@ export async function withRetry<T>(
       }
       options.onRetry?.(operationType);
       const jitter = Math.floor(Math.random() * baseDelayMs);
-      await sleep(baseDelayMs * 2 ** attempt + jitter);
+      await pause(baseDelayMs * 2 ** attempt + jitter);
     }
   }
   throw new Error("Retry attempts exhausted");
@@ -166,11 +167,22 @@ export class OfficialNotionGateway implements NotionGateway {
       useDefaultTemplate?: boolean;
       templateTimezone?: string;
       operation?: "page-create" | "sync-log-create";
+      children?: Array<Record<string, unknown>>;
     } = {},
   ): Promise<string> {
+    if (options.useDefaultTemplate && options.children) {
+      throw new Error("Notion templates cannot be combined with initial children");
+    }
     const request = {
       parent: { type: "data_source_id" as const, data_source_id: id },
       properties: properties as NonNullable<Parameters<Client["pages"]["create"]>[0]["properties"]>,
+      ...(options.children
+        ? {
+            children: options.children as NonNullable<
+              Parameters<Client["pages"]["create"]>[0]["children"]
+            >,
+          }
+        : {}),
       ...(options.useDefaultTemplate
         ? {
             template: {
@@ -255,7 +267,7 @@ export class OfficialNotionGateway implements NotionGateway {
         const delay = scheduledAt - now;
         if (delay > 0) {
           this.logger.debug({ delay }, "Applying conservative Notion request pacing");
-          await new Promise((resolve) => setTimeout(resolve, delay));
+          await sleep(delay);
         }
         return operation();
       },

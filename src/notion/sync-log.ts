@@ -6,12 +6,13 @@ import { AmbiguousNotionWriteError, isAmbiguousWriteError, type NotionGateway } 
 import { createManagedSectionSnapshot, reconcileManagedSection } from "./managed-section.js";
 import { date, number, pageId, select, text, title, url } from "./property-helpers.js";
 import { pollForUniquePage, type VisibilityPollingOptions } from "./recovery.js";
+import { blockBatch, paragraphs, toggle, type Block } from "./blocks.js";
 
 export const MANAGED_SYNC_LOG_TITLE = "Canvas Sync Result — managed by sync";
 export const PENDING_MANAGED_SYNC_LOG_TITLE =
   "Canvas Sync Result — managed by sync [replacement pending]";
 
-function heading(value: string): Record<string, unknown> {
+function heading(value: string): Block {
   return {
     object: "block",
     type: "heading_2",
@@ -19,18 +20,8 @@ function heading(value: string): Record<string, unknown> {
   };
 }
 
-function paragraph(value: string): Record<string, unknown> {
-  return {
-    object: "block",
-    type: "paragraph",
-    paragraph: {
-      rich_text: [{ type: "text", text: { content: value.slice(0, 2000) } }],
-    },
-  };
-}
-
-function section(titleValue: string, lines: string[]): Array<Record<string, unknown>> {
-  return [heading(titleValue), ...(lines.length ? lines : ["None"]).map(paragraph)];
+function section(titleValue: string, lines: string[]): Block[] {
+  return [heading(titleValue), ...paragraphs(lines.length ? lines.join("\n") : "None")];
 }
 
 function runTitle(config: AppConfig, startedAt: string): string {
@@ -79,6 +70,10 @@ export async function writeSyncLog(
   recoveryOptions: VisibilityPollingOptions = {},
 ): Promise<void> {
   const properties = logProperties(config, startedAt, finishedAt, result);
+  const blocks = reportSections(config, result).flatMap((value) =>
+    section(value.title, value.lines),
+  );
+  const fitsCreate = blockBatch(blocks).length === blocks.length;
   const query = () =>
     gateway.queryDataSource(config.NOTION_SYNC_LOG_DATA_SOURCE_ID, {
       property: "Run",
@@ -92,13 +87,19 @@ export async function writeSyncLog(
   }
 
   let logPageId = matches[0] ? pageId(matches[0]) : undefined;
+  let initialRootBlocks: Block[] | undefined;
   if (logPageId) {
     await gateway.updatePage(logPageId, properties);
   } else {
     try {
       logPageId = await gateway.createPage(config.NOTION_SYNC_LOG_DATA_SOURCE_ID, properties, {
         operation: "sync-log-create",
+        ...(fitsCreate ? { children: [toggle(MANAGED_SYNC_LOG_TITLE, blocks)] } : {}),
       });
+      // The acknowledged create includes the complete body. Only reused or
+      // ambiguously-created pages need observation and replacement recovery.
+      if (fitsCreate) return;
+      initialRootBlocks = [];
     } catch (error) {
       if (!isAmbiguousWriteError(error)) throw error;
       const recovered = await pollForUniquePage(
@@ -120,7 +121,8 @@ export async function writeSyncLog(
     gateway,
     logPageId,
     { managed: MANAGED_SYNC_LOG_TITLE, pending: PENDING_MANAGED_SYNC_LOG_TITLE },
-    reportSections(config, result).flatMap((value) => section(value.title, value.lines)),
+    blocks,
+    initialRootBlocks,
   );
   await reconcileManagedSection(gateway, snapshot);
 }
