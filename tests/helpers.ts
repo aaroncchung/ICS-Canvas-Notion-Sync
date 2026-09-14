@@ -279,7 +279,15 @@ export class FakeGateway implements NotionGateway {
   public seedBlock(parentId: string, block: Record<string, unknown>): void {
     const values = this.blocks.get(parentId) ?? [];
     const id = typeof block.id === "string" ? block.id : `block-${++this.sequence}`;
-    values.push(materializeBlock(id, block));
+    const payload = block[block.type as string] as Record<string, unknown> | undefined;
+    const children = payload?.children;
+    const stored = materializeBlock(id, structuredClone(block));
+    if (Array.isArray(children)) {
+      delete (stored[block.type as string] as Record<string, unknown>).children;
+      stored.has_children = children.length > 0;
+      for (const child of children) this.seedBlock(id, child as Record<string, unknown>);
+    }
+    values.push(stored);
     this.blocks.set(parentId, values);
   }
 
@@ -316,7 +324,11 @@ export class FakeGateway implements NotionGateway {
     );
   }
 
-  public async createPage(id: string, properties: Record<string, unknown>): Promise<string> {
+  public async createPage(
+    id: string,
+    properties: Record<string, unknown>,
+    options: Parameters<NotionGateway["createPage"]>[2] = {},
+  ): Promise<string> {
     if (this.failOnAssignmentWrite && id === "assignments") {
       throw Object.assign(new Error("write failed"), { status: 400 });
     }
@@ -326,6 +338,7 @@ export class FakeGateway implements NotionGateway {
     this.writes.push({ kind: "create", id, value: properties });
     if (!failure || failure.applied) {
       this.seedPage(id, newPageId, properties);
+      for (const child of options.children ?? []) this.seedBlock(newPageId, child);
       if (id === "assignments" && this.simulateDefaultTemplate) {
         this.seedBlock(newPageId, {
           id: `${newPageId}-template`,
@@ -390,10 +403,9 @@ export class FakeGateway implements NotionGateway {
     const ids = children.map(() => `${parentId}-block-${++this.sequence}`);
     this.writes.push({ kind: "append", id: parentId, value: children });
     if (!failure || failure.applied) {
-      const values = this.blocks.get(parentId) ?? [];
       const appliedChildren = children.slice(0, failure?.appliedCount ?? children.length);
-      values.push(...appliedChildren.map((child, index) => materializeBlock(ids[index]!, child)));
-      this.blocks.set(parentId, values);
+      for (const [index, child] of appliedChildren.entries())
+        this.seedBlock(parentId, { ...child, id: ids[index]! });
     }
     if (failure) throw simulatedFailure("simulated append failure", failure);
     return Promise.resolve(ids);

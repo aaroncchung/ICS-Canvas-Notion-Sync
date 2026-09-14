@@ -5,7 +5,7 @@ import {
   type NotionGateway,
 } from "./client.js";
 
-type Block = Record<string, unknown>;
+import { blockBatch, toggle, type Block } from "./blocks.js";
 
 interface ManagedSectionTitles {
   managed: string;
@@ -52,17 +52,6 @@ export function blockText(block: Block): string {
       return typeof contentValue === "string" ? contentValue : "";
     })
     .join("");
-}
-
-function toggle(title: string): Block {
-  return {
-    object: "block",
-    type: "toggle",
-    toggle: {
-      rich_text: [{ type: "text", text: { content: title } }],
-      color: "default",
-    },
-  };
 }
 
 function canonicalValue(value: unknown): CanonicalValue {
@@ -300,14 +289,6 @@ async function deleteBlockWithObservation(
   }
 }
 
-export async function deleteBlockReconciled(
-  gateway: NotionGateway,
-  parentId: string,
-  blockId: string,
-): Promise<void> {
-  await deleteBlockWithObservation(gateway, parentId, blockId);
-}
-
 async function deleteSnapshotBlock(
   gateway: NotionGateway,
   snapshot: ManagedSectionSnapshot,
@@ -379,18 +360,20 @@ export async function reconcileManagedSection(
   }
   await deleteBlocks(gateway, snapshot, pending, replacement?.id as string | undefined);
 
+  let appendedLength: number | undefined;
   if (!replacement) {
-    const marker = toggle(snapshot.titles.pending);
+    const first = blockBatch(snapshot.expectedBlocks);
+    const marker = toggle(snapshot.titles.pending, first);
     root = await rootBlocks(gateway, snapshot);
     try {
       const [replacementId] = await gateway.appendBlocks(snapshot.pageId, [marker]);
       if (!replacementId) {
         invalidateRoot(snapshot);
-        throw new Error("Notion did not return the managed section ID");
+        throw new AmbiguousNotionWriteError("Notion did not return the managed section ID");
       }
       replacement = { ...marker, id: replacementId };
       snapshot.rootBlocks = [...root, replacement];
-      snapshot.childSignatures.set(replacementId, []);
+      appendedLength = first.length;
     } catch (error) {
       if (!isAmbiguousWriteError(error)) throw error;
       invalidateRoot(snapshot);
@@ -402,6 +385,12 @@ export async function reconcileManagedSection(
         );
       }
       replacement = recovered[0];
+      const observed = await childSignatures(gateway, snapshot, replacement!.id as string);
+      if (!isPrefix(observed, snapshot.expectedSignatures) || (first.length && !observed.length)) {
+        throw new AmbiguousNotionWriteError(
+          "Managed section marker append has no verified child progress; the previous section was preserved",
+        );
+      }
       snapshot.onRecovery?.();
     }
   }
@@ -410,20 +399,31 @@ export async function reconcileManagedSection(
     throw new Error("Notion did not return the managed section ID");
   }
   const replacementId = replacement.id;
-  let actual = await childSignatures(gateway, snapshot, replacementId);
+  let actual =
+    appendedLength === undefined
+      ? await childSignatures(gateway, snapshot, replacementId)
+      : snapshot.expectedSignatures.slice(0, appendedLength);
   if (!isPrefix(actual, snapshot.expectedSignatures)) {
     throw new AmbiguousNotionWriteError("Managed section replacement has unexpected content");
   }
 
-  while (actual.length < snapshot.expectedSignatures.length) {
-    const next = snapshot.expectedBlocks.slice(actual.length, actual.length + 100);
-    const previousLength = actual.length;
-    let ambiguousAppend = false;
+  // Acknowledged writes advance a cursor, not a verified snapshot. Observe once at
+  // the end, or immediately after ambiguity before deciding what is safe to append.
+  let length = actual.length;
+  let needsVerification = appendedLength !== undefined;
+  while (length < snapshot.expectedSignatures.length) {
+    const next = blockBatch(snapshot.expectedBlocks, length);
+    const previousLength = length;
     try {
-      await gateway.appendBlocks(replacementId, next);
+      const ids = await gateway.appendBlocks(replacementId, next);
+      if (ids.length !== next.length) {
+        throw new AmbiguousNotionWriteError("Notion returned an incomplete append response");
+      }
+      length += next.length;
+      needsVerification = true;
+      continue;
     } catch (error) {
       if (!isAmbiguousWriteError(error)) throw error;
-      ambiguousAppend = true;
     }
     invalidateChild(snapshot, replacementId);
     actual = await childSignatures(gateway, snapshot, replacementId);
@@ -432,16 +432,22 @@ export async function reconcileManagedSection(
         "Managed section append made no visible progress; the previous section was preserved",
       );
     }
-    if (ambiguousAppend) {
-      if (!isPrefix(actual, snapshot.expectedSignatures)) {
-        throw new AmbiguousNotionWriteError(
-          "Managed section child append is ambiguous; the previous section was preserved",
-        );
-      }
-      snapshot.onRecovery?.();
-    }
     if (!isPrefix(actual, snapshot.expectedSignatures)) {
-      throw new AmbiguousNotionWriteError("Managed section replacement could not be verified");
+      throw new AmbiguousNotionWriteError(
+        "Managed section child append is ambiguous; the previous section was preserved",
+      );
+    }
+    snapshot.onRecovery?.();
+    length = actual.length;
+    needsVerification = false;
+  }
+  if (needsVerification) {
+    invalidateChild(snapshot, replacementId);
+    actual = await childSignatures(gateway, snapshot, replacementId);
+    if (!actual.length && snapshot.expectedSignatures.length) {
+      throw new AmbiguousNotionWriteError(
+        "Managed section append made no visible progress; the previous section was preserved",
+      );
     }
   }
   if (!signaturesEqual(actual, snapshot.expectedSignatures)) {

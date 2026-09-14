@@ -11,7 +11,7 @@ import {
   replaceManagedDescription,
   waitForTemplate,
 } from "../../src/notion/descriptions.js";
-import { blockText, deleteBlockReconciled } from "../../src/notion/managed-section.js";
+import { blockText } from "../../src/notion/managed-section.js";
 import {
   MANAGED_SYNC_LOG_TITLE,
   PENDING_MANAGED_SYNC_LOG_TITLE,
@@ -874,7 +874,7 @@ describe("removal evidence reporting", () => {
     });
     const logPageId = gateway.pages.get("log")?.[0]?.id;
     expect(typeof logPageId).toBe("string");
-    const logText = (await managedChildren(gateway, logPageId as string)).map(blockText);
+    const logText = (await managedChildren(gateway, logPageId as string)).map(blockText).join("\n");
     expect(logText).toContain("Newly observed missing candidates: 1");
     expect(logText).toContain("Missing evidence advanced: 0");
   });
@@ -1693,7 +1693,7 @@ describe("managed descriptions", () => {
     await replaceManagedDescription(gateway, "page", "New description");
     expect(gateway.listBlocksCallCount("page")).toBe(3);
     expect(gateway.listBlocksCallCount("managed")).toBe(1);
-    expect(gateway.totalListBlocksCalls()).toBe(6);
+    expect(gateway.totalListBlocksCalls()).toBe(5);
     const blocks = await gateway.listBlocks("page");
     expect(blocks.filter((block) => blockText(block) === MANAGED_DESCRIPTION_TITLE)).toHaveLength(
       1,
@@ -1738,21 +1738,29 @@ describe("managed descriptions", () => {
 });
 
 describe("ambiguity-safe block deletion", () => {
+  async function deletePendingSection(gateway: FakeGateway): Promise<void> {
+    gateway.seedBlock("page", toggle("keeper", MANAGED_DESCRIPTION_TITLE));
+    gateway.seedBlock("keeper", {
+      type: "paragraph",
+      paragraph: { rich_text: [{ plain_text: "Keep" }] },
+    });
+    await replaceManagedDescription(gateway, "page", "Keep");
+  }
   it("accepts a statusless delete when observation shows the block is absent", async () => {
     const gateway = new FakeGateway();
-    gateway.seedBlock("page", templateBlock("target"));
+    gateway.seedBlock("page", toggle("target", PENDING_MANAGED_DESCRIPTION_TITLE));
     gateway.failDelete({ id: "target", code: "ECONNRESET", applied: true });
-    await deleteBlockReconciled(gateway, "page", "target");
-    expect(await gateway.listBlocks("page")).toHaveLength(0);
+    await deletePendingSection(gateway);
+    expect((await gateway.listBlocks("page")).map((block) => block.id)).toEqual(["keeper"]);
     expect(gateway.writes.filter((write) => write.kind === "delete")).toHaveLength(1);
   });
 
   it("performs one justified follow-up after a statusless unapplied delete", async () => {
     const gateway = new FakeGateway();
-    gateway.seedBlock("page", templateBlock("target"));
+    gateway.seedBlock("page", toggle("target", PENDING_MANAGED_DESCRIPTION_TITLE));
     gateway.failDelete({ id: "target", code: "ETIMEDOUT", applied: false });
-    await deleteBlockReconciled(gateway, "page", "target");
-    expect(await gateway.listBlocks("page")).toHaveLength(0);
+    await deletePendingSection(gateway);
+    expect((await gateway.listBlocks("page")).map((block) => block.id)).toEqual(["keeper"]);
     expect(gateway.writes.filter((write) => write.kind === "delete")).toHaveLength(2);
   });
 
@@ -1762,20 +1770,20 @@ describe("ambiguity-safe block deletion", () => {
 
       public override async listBlocks(pageId: string): Promise<Array<Record<string, unknown>>> {
         const blocks = await super.listBlocks(pageId);
-        if (pageId === "page" && this.stale && blocks.length === 0) {
+        if (pageId === "page" && this.stale && !blocks.some((block) => block.id === "target")) {
           this.stale = false;
-          return [templateBlock("target")];
+          return [...blocks, toggle("target", PENDING_MANAGED_DESCRIPTION_TITLE)];
         }
         return blocks;
       }
     }
     const gateway = new StaleObservationGateway();
-    gateway.seedBlock("page", templateBlock("target"));
+    gateway.seedBlock("page", toggle("target", PENDING_MANAGED_DESCRIPTION_TITLE));
     gateway.failDelete(
       { id: "target", status: 503, applied: true },
       { id: "target", status: 404, applied: false },
     );
-    await deleteBlockReconciled(gateway, "page", "target");
+    await deletePendingSection(gateway);
     expect(gateway.writes.filter((write) => write.kind === "delete")).toHaveLength(2);
   });
 
@@ -1783,12 +1791,12 @@ describe("ambiguity-safe block deletion", () => {
     "keeps definite validation and authorization failures fatal (%s)",
     async (status) => {
       const gateway = new FakeGateway();
-      gateway.seedBlock("page", templateBlock("target"));
+      gateway.seedBlock("page", toggle("target", PENDING_MANAGED_DESCRIPTION_TITLE));
       gateway.failDelete({ id: "target", status, applied: false });
-      await expect(deleteBlockReconciled(gateway, "page", "target")).rejects.toMatchObject({
+      await expect(deletePendingSection(gateway)).rejects.toMatchObject({
         status,
       });
-      expect(await gateway.listBlocks("page")).toHaveLength(1);
+      expect((await gateway.listBlocks("page")).some((block) => block.id === "target")).toBe(true);
     },
   );
 });

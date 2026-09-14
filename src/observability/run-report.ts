@@ -79,7 +79,7 @@ export function emptyCounts(): RunCounts {
   };
 }
 
-/** One reducer for planned commands and the successfully applied prefix. */
+/** One reducer for planned commands and confirmed logical effects, including fallbacks. */
 export function workCounts(
   plan?: SyncPlan,
   execution?: SyncExecutionResult,
@@ -92,14 +92,23 @@ export function workCounts(
   counts.warningCount = plan.warnings.length;
   counts.missingObserved = plan.missingCandidatesObserved;
   const commands = compilePlan(plan);
-  const applied = planned ? commands : commands.slice(0, execution?.appliedOperations.length ?? 0);
-  for (const [index, command] of applied.entries()) {
+  const appliedByKind = new Map<string, Set<string>>();
+  const recoveredCreates = new Set<string>();
+  for (const operation of execution?.appliedOperations ?? []) {
+    const targets = appliedByKind.get(operation.kind) ?? new Set<string>();
+    targets.add(operation.target);
+    appliedByKind.set(operation.kind, targets);
+    if (operation.kind === "assignment-page-create" && operation.recovered)
+      recoveredCreates.add(operation.target);
+  }
+  for (const command of commands) {
+    if (!planned && !appliedByKind.get(command.kind)?.has(command.target)) continue;
     switch (command.kind) {
       case "course-update":
         counts.coursesUpdated += 1;
         break;
       case "assignment-page-create":
-        if (!execution?.appliedOperations[index]?.recovered || planned) counts.created += 1;
+        if (planned || !recoveredCreates.has(command.target)) counts.created += 1;
         break;
       case "assignment-property-update":
         if (command.assignment.value.missingEvidenceCleared) counts.missingCleared += 1;

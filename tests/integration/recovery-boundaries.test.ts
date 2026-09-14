@@ -81,10 +81,10 @@ describe("recovery boundaries", () => {
       "no visible progress",
     );
     expect(await readManagedDescription(gateway, "page")).toBe("Original");
-    expect(gateway.writes.filter((value) => value.kind === "append")).toHaveLength(2);
+    expect(gateway.writes.filter((value) => value.kind === "append")).toHaveLength(1);
     hideReplacement = false;
     await replaceManagedDescription(gateway, "page", "New description");
     expect(await readManagedDescription(gateway, "page")).toBe("New description");
-    expect(gateway.writes.filter((value) => value.kind === "append")).toHaveLength(2);
+    expect(gateway.writes.filter((value) => value.kind === "append")).toHaveLength(1);
   });
 });

@@ -174,12 +174,12 @@ describe("run reporting sources of truth", () => {
         observe(FakeGateway.prototype.listBlocks.bind(gateway)),
       );
       const create = gateway.createPage.bind(gateway);
-      vi.spyOn(gateway, "createPage").mockImplementation(async (id, properties) => {
+      vi.spyOn(gateway, "createPage").mockImplementation(async (id, properties, options) => {
         gateway.requestMetrics.notionRequests += 1;
         gateway.requestMetrics.requestsByOperation["sync-log-create"] =
           (gateway.requestMetrics.requestsByOperation["sync-log-create"] ?? 0) + 1;
         if (failLog) throw Object.assign(new Error("log failed"), { status: 400 });
-        return create(id, properties);
+        return create(id, properties, options);
       });
       const dependencies = {
         gateway,

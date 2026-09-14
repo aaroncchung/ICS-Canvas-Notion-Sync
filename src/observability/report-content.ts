@@ -164,11 +164,31 @@ function operation(value: SyncOperation): string {
   return `${value.kind}: ${value.target}`;
 }
 
+function operationLines<T extends SyncOperation>(
+  values: T[],
+  format: (value: T) => string,
+): string[] {
+  if (values.length <= 20) return values.map(format);
+  const counts = new Map<string, number>();
+  for (const value of values) counts.set(value.kind, (counts.get(value.kind) ?? 0) + 1);
+  return [
+    `${values.length} operations total; ${values.length - 10} individual entries omitted.`,
+    ...Array.from(counts, ([kind, count]) => `${kind}: ${count}`),
+    "First 5:",
+    ...values.slice(0, 5).map(format),
+    "Last 5:",
+    ...values.slice(-5).map(format),
+  ];
+}
+
 export function operationSections(result: RunResult): ReportSection[] {
   const execution = result.execution;
-  const planned = result.plan ? compilePlan(result.plan).map(operationOf).map(operation) : [];
+  const planned = result.plan
+    ? operationLines(compilePlan(result.plan).map(operationOf), operation)
+    : [];
   const applied = execution
-    ? execution.appliedOperations.map(
+    ? operationLines(
+        execution.appliedOperations,
         (item) =>
           `${operation(item)}${item.pageId ? ` -> ${item.pageId}` : ""}${item.recovered ? " (recovered)" : ""}`,
       )
@@ -178,17 +198,19 @@ export function operationSections(result: RunResult): ReportSection[] {
       (item) =>
         `${item.intent} ${item.target} -> ${item.pageId}: completed ${item.completedSubsteps.join(", ")}; requires repair at ${item.failedSubstep?.kind ?? "unknown substep"}`,
     ) ?? [];
-  const failed = execution?.failedOperation
-    ? [
-        `${operation(execution.failedOperation)} [${execution.failedOperation.outcome}]: ${execution.failedOperation.message}`,
-      ]
-    : [];
+  const failed = [
+    ...(execution?.failedOperation ? [execution.failedOperation] : []),
+    ...(execution?.additionalFailures ?? []),
+  ].map((value) => `${operation(value)} [${value.outcome}]: ${value.message}`);
   return [
     { title: "Planned operations", lines: planned },
     { title: "Applied operations", lines: applied },
     { title: "Partial operations", lines: partial },
     { title: "Failed or ambiguous operation", lines: failed },
-    { title: "Operations not attempted", lines: execution?.notAttempted.map(operation) ?? planned },
+    {
+      title: "Operations not attempted",
+      lines: execution ? operationLines(execution.notAttempted, operation) : planned,
+    },
     {
       title: "Warnings",
       lines: result.warnings.map((warning) => `${warning.code}: ${warning.message}`),
