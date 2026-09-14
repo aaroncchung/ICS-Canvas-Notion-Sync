@@ -141,6 +141,25 @@ export function reportLines(config: AppConfig, result: RunResult): string[] {
   return reportFields(config, result).map((field) => `${field.label}: ${field.value}`);
 }
 
+export function warningSummary(result: RunResult): string | undefined {
+  if (!result.warnings.length) return;
+  const counts = new Map<string, number>();
+  for (const warning of result.warnings) {
+    counts.set(warning.code, (counts.get(warning.code) ?? 0) + 1);
+  }
+  return Array.from(counts, ([code, count]) => `${code} (${count})`).join(", ");
+}
+
+export function failureSummary(result: RunResult): string | undefined {
+  if (result.status !== "Failed") return;
+  const failed = result.execution?.failedOperation;
+  if (failed) {
+    const remaining = result.execution?.notAttempted.length ?? 0;
+    return `${failed.kind} ${failed.outcome}; ${remaining} later operation(s) not attempted. See workflow logs for details.`;
+  }
+  return `${result.errors.length || 1} error(s) recorded. See workflow logs for details.`;
+}
+
 function operation(value: SyncOperation): string {
   return `${value.kind}: ${value.target}`;
 }

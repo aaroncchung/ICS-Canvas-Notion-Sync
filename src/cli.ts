@@ -1,4 +1,4 @@
-import { reportLines, operationSections } from "./observability/report-content.js";
+import { failureSummary, reportLines, warningSummary } from "./observability/report-content.js";
 import {
   createRunMetrics,
   createRequestMetrics,
@@ -32,10 +32,8 @@ export interface RunDependencies {
 export type SummaryAppender = (path: string, data: string, encoding: "utf8") => Promise<void>;
 
 export function buildJobSummary(config: AppConfig, result: RunResult): string {
-  const secrets = [config.CANVAS_ICS_URL, config.NOTION_TOKEN];
-  const details = operationSections(result).filter(
-    (section) => !["Warnings", "Errors"].includes(section.title),
-  );
+  const warnings = warningSummary(result);
+  const failure = failureSummary(result);
   return [
     "## Canvas–Notion sync",
     "",
@@ -43,22 +41,8 @@ export function buildJobSummary(config: AppConfig, result: RunResult): string {
     `- Mode: ${config.mode}`,
     `- Trigger: ${config.trigger}`,
     ...reportLines(config, result).map((line) => `- ${line}`),
-    ...details.flatMap((section) => [
-      "",
-      `### ${section.title}`,
-      ...(section.lines.length ? section.lines : ["None"]).map(
-        (line) => `- ${redactText(line, secrets)}`,
-      ),
-    ]),
-    ...(result.errors.length
-      ? [
-          "",
-          `Failure summary: ${result.errors
-            .slice(0, 3)
-            .map((error) => redactText(error, secrets).split(/\r?\n/, 1)[0])
-            .join("; ")}`,
-        ]
-      : []),
+    ...(warnings ? ["", `Warning summary: ${warnings}`] : []),
+    ...(failure ? ["", `Failure summary: ${failure}`] : []),
     "",
   ].join("\n");
 }
