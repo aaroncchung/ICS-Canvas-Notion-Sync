@@ -4,7 +4,6 @@ import type {
   CourseRecord,
   ExternalAssignment,
   PlanningOperationCounters,
-  RunMetrics,
   SyncPlan,
   Trigger,
 } from "../types.js";
@@ -35,11 +34,15 @@ export function buildPlan(
   disableRemovals: boolean,
   notionTimezone: string,
   now = new Date(),
-  metrics?: RunMetrics,
   trigger: Trigger = "scheduled",
   minimumMissingIntervalMs?: number,
-  operationCounters?: PlanningOperationCounters,
 ): SyncPlan {
+  const operationCounters: PlanningOperationCounters = {
+    courseNormalizations: 0,
+    courseCandidatesExamined: 0,
+    assignmentNormalizations: 0,
+    assignmentCandidatesExamined: 0,
+  };
   const timestamp = now.toISOString();
   const courseIndex = buildCourseIndex(courses, aliases);
   const assignments = buildAssignmentIndex(
@@ -215,14 +218,11 @@ export function buildPlan(
   plan.assignmentsToRemove.push(...removal.removals);
   plan.missingCandidatesObserved = removal.newlyObserved;
   plan.warnings.push(...removal.warnings);
-  if (metrics) {
-    metrics.coursesConflicted = coursePlan.conflicts;
-    metrics.descriptionIntegrityAuditsDue =
-      plan.assignmentsToCreate.length +
-      plan.assignmentsToUpdate.filter((update) => update.verifyDescription).length;
-    metrics.descriptionIntegrityAuditsDeferred = deferred;
-    metrics.descriptionUpdatesAvoided = avoided;
-    metrics.descriptionBodyReadsAvoided = avoided;
-  }
+  plan.planning = {
+    coursesConflicted: coursePlan.conflicts,
+    descriptionIntegrityAuditsDeferred: deferred,
+    descriptionUpdatesAvoided: avoided,
+    operations: operationCounters,
+  };
   return plan;
 }

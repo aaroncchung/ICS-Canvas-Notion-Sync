@@ -1,7 +1,7 @@
 import type { AppConfig } from "../config.js";
 import { workflowUrl } from "../config.js";
-import { plannedOperations } from "../sync/reconcile.js";
-import type { RunResult, SyncOperation } from "../types.js";
+import { reportSections } from "../observability/report-content.js";
+import type { RunResult } from "../types.js";
 import { AmbiguousNotionWriteError, isAmbiguousWriteError, type NotionGateway } from "./client.js";
 import { createManagedSectionSnapshot, reconcileManagedSection } from "./managed-section.js";
 import { date, number, pageId, select, text, title, url } from "./property-helpers.js";
@@ -31,66 +31,6 @@ function paragraph(value: string): Record<string, unknown> {
 
 function section(titleValue: string, lines: string[]): Array<Record<string, unknown>> {
   return [heading(titleValue), ...(lines.length ? lines : ["None"]).map(paragraph)];
-}
-
-function operation(value: SyncOperation): string {
-  return `${value.kind}: ${value.target}`;
-}
-
-function resultBlocks(result: RunResult): Array<Record<string, unknown>> {
-  const execution = result.execution;
-  const planned = result.plan ? plannedOperations(result.plan).map(operation) : [];
-  const applied = execution
-    ? execution.appliedOperations.map(
-        (item) =>
-          `${operation(item)}${item.pageId ? ` -> ${item.pageId}` : ""}${item.recovered ? " (recovered)" : ""}`,
-      )
-    : [];
-  const partial =
-    execution?.partialAssignments.map(
-      (item) =>
-        `${item.intent} ${item.target} -> ${item.pageId}: completed ${item.completedSubsteps.join(", ")}; requires repair at ${item.failedSubstep?.kind ?? "unknown substep"}`,
-    ) ?? [];
-  const failed = execution?.failedOperation
-    ? [
-        `${operation(execution.failedOperation)} [${execution.failedOperation.outcome}]: ${execution.failedOperation.message}`,
-      ]
-    : [];
-  return [
-    ...section("Create metrics", [
-      `Assignment pages added: ${result.metrics.assignmentPagesCreated + result.metrics.assignmentPagesRecovered}`,
-      `Assignment pages created: ${result.metrics.assignmentPagesCreated}`,
-      `Assignment pages recovered: ${result.metrics.assignmentPagesRecovered}`,
-      `Course pages added: ${result.metrics.coursesCreated + result.metrics.coursesRecovered}`,
-      `Course pages created: ${result.metrics.coursesCreated}`,
-      `Course pages recovered: ${result.metrics.coursesRecovered}`,
-    ]),
-    ...section("Description integrity", [
-      `Audits due this run: ${result.metrics.descriptionIntegrityAuditsDue}`,
-      `Audits deferred to later slots: ${result.metrics.descriptionIntegrityAuditsDeferred}`,
-      `Audits run: ${result.metrics.descriptionIntegrityAuditsRun}`,
-      `Audits passed without repair: ${result.metrics.descriptionIntegrityAuditsPassed}`,
-      `Repairs performed: ${result.metrics.descriptionIntegrityRepairs}`,
-      `Managed-section replacements: ${result.metrics.descriptionReplacements}`,
-      `Body reads avoided: ${result.metrics.descriptionBodyReadsAvoided}`,
-    ]),
-    ...section("Removal evidence", [
-      `Newly observed missing candidates: ${result.counts.missingObserved}`,
-      `Missing evidence advanced: ${result.counts.missingAdvanced}`,
-      `Missing evidence cleared: ${result.counts.missingCleared}`,
-      `Assignments marked removed: ${result.counts.removed}`,
-    ]),
-    ...section("Planned operations", planned),
-    ...section("Applied operations", applied),
-    ...section("Partial operations", partial),
-    ...section("Failed or ambiguous operation", failed),
-    ...section("Operations not attempted", execution?.notAttempted.map(operation) ?? []),
-    ...section(
-      "Warnings",
-      result.warnings.map((warning) => `${warning.code}: ${warning.message}`),
-    ),
-    ...section("Errors", result.errors),
-  ];
 }
 
 function runTitle(config: AppConfig, startedAt: string): string {
@@ -172,7 +112,6 @@ export async function writeSyncLog(
         );
       }
       logPageId = pageId(recovered);
-      if (gateway.metrics) gateway.metrics.ambiguousWriteRecoveries += 1;
       await gateway.updatePage(logPageId, properties);
     }
   }
@@ -181,7 +120,7 @@ export async function writeSyncLog(
     gateway,
     logPageId,
     { managed: MANAGED_SYNC_LOG_TITLE, pending: PENDING_MANAGED_SYNC_LOG_TITLE },
-    resultBlocks(result),
+    reportSections(config, result).flatMap((value) => section(value.title, value.lines)),
   );
   await reconcileManagedSection(gateway, snapshot);
 }

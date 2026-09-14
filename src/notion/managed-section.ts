@@ -13,6 +13,7 @@ interface ManagedSectionTitles {
 }
 
 interface ManagedSectionSnapshot {
+  readonly onRecovery?: (() => void) | undefined;
   readonly pageId: string;
   readonly titles: ManagedSectionTitles;
   readonly expectedBlocks: Block[];
@@ -238,9 +239,11 @@ export async function createManagedSectionSnapshot(
   titles: ManagedSectionTitles,
   expectedBlocks: Block[],
   initialRootBlocks?: Block[],
+  onRecovery?: () => void,
 ): Promise<ManagedSectionSnapshot> {
   return {
     pageId,
+    onRecovery,
     titles,
     expectedBlocks,
     expectedSignatures: expectedBlocks.map(signature),
@@ -266,6 +269,7 @@ async function deleteBlockWithObservation(
   gateway: NotionGateway,
   parentId: string,
   blockId: string,
+  onRecovery?: () => void,
 ): Promise<Block[] | undefined> {
   try {
     await gateway.deleteBlock(blockId);
@@ -277,7 +281,7 @@ async function deleteBlockWithObservation(
 
   const observed = await gateway.listBlocks(parentId);
   if (!observed.some((block) => block.id === blockId)) {
-    if (gateway.metrics) gateway.metrics.ambiguousWriteRecoveries += 1;
+    onRecovery?.();
     return observed;
   }
 
@@ -289,7 +293,7 @@ async function deleteBlockWithObservation(
     if (!isAmbiguousWriteError(error)) throw error;
     const recovered = await gateway.listBlocks(parentId);
     if (!recovered.some((block) => block.id === blockId)) {
-      if (gateway.metrics) gateway.metrics.ambiguousWriteRecoveries += 1;
+      onRecovery?.();
       return recovered;
     }
     throw error;
@@ -310,7 +314,12 @@ async function deleteSnapshotBlock(
   blockId: string,
 ): Promise<void> {
   const root = await rootBlocks(gateway, snapshot);
-  const observed = await deleteBlockWithObservation(gateway, snapshot.pageId, blockId);
+  const observed = await deleteBlockWithObservation(
+    gateway,
+    snapshot.pageId,
+    blockId,
+    snapshot.onRecovery,
+  );
   snapshot.rootBlocks = observed ?? root.filter((block) => block.id !== blockId);
   invalidateChild(snapshot, blockId);
 }
@@ -393,7 +402,7 @@ export async function reconcileManagedSection(
         );
       }
       replacement = recovered[0];
-      if (gateway.metrics) gateway.metrics.ambiguousWriteRecoveries += 1;
+      snapshot.onRecovery?.();
     }
   }
 
@@ -429,7 +438,7 @@ export async function reconcileManagedSection(
           "Managed section child append is ambiguous; the previous section was preserved",
         );
       }
-      if (gateway.metrics) gateway.metrics.ambiguousWriteRecoveries += 1;
+      snapshot.onRecovery?.();
     }
     if (!isPrefix(actual, snapshot.expectedSignatures)) {
       throw new AmbiguousNotionWriteError("Managed section replacement could not be verified");

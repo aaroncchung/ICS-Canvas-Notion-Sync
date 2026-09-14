@@ -1,6 +1,7 @@
+import { createRunMetrics, createRequestMetrics } from "../src/observability/run-report.js";
 import type { AppConfig } from "../src/config.js";
 import type { AssignmentFeed, AssignmentProvider, RunCounts, RunResult } from "../src/types.js";
-import { createRunMetrics, type NotionGateway } from "../src/notion/client.js";
+import { type NotionGateway } from "../src/notion/client.js";
 import {
   compileAssignmentTypeMatcher,
   type AssignmentTypeMatcher,
@@ -228,7 +229,7 @@ function materializeBlock(id: string, source: Record<string, unknown>): Record<s
 }
 
 export class FakeGateway implements NotionGateway {
-  public readonly metrics = createRunMetrics();
+  public readonly requestMetrics = createRequestMetrics();
   public readonly pages = new Map<string, Array<Record<string, unknown>>>();
   public readonly blocks = new Map<string, Array<Record<string, unknown>>>();
   public readonly assignments: Array<Record<string, unknown>> = [];
@@ -427,7 +428,6 @@ export async function readManagedDescription(
   gateway: NotionGateway,
   pageId: string,
 ): Promise<string | undefined> {
-  if (gateway.metrics) gateway.metrics.assignmentBodyReads += 1;
   const blocks = await gateway.listBlocks(pageId);
   const marker = blocks.find(
     (block) => block.type === "toggle" && blockText(block) === MANAGED_DESCRIPTION_TITLE,

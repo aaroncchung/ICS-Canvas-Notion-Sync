@@ -119,6 +119,51 @@ describe("GitHub Actions observability", () => {
     expect(summary).toContain("Course pages recovered: 2");
   });
 
+  it("keeps the job summary aggregate and omits operation and personal details", () => {
+    const value = result("Failed");
+    value.warnings = [
+      {
+        code: "course-metadata-conflict",
+        message: "Private Course Name conflicted",
+        details: ["notion-course-page-id"],
+      },
+    ];
+    value.errors = ["assignment-property-update private-assignment-uid: private failure"];
+    value.execution = {
+      appliedOperations: [
+        {
+          kind: "assignment-page-create",
+          target: "Private Assignment Name (private-assignment-uid)",
+          pageId: "notion-assignment-page-id",
+        },
+      ],
+      assignmentsSynchronized: [],
+      partialAssignments: [],
+      failedOperation: {
+        kind: "assignment-property-update",
+        target: "Private Assignment Name (private-assignment-uid)",
+        outcome: "failed",
+        message: "private failure for notion-assignment-page-id",
+      },
+      notAttempted: [{ kind: "assignment-description-update", target: "Private Assignment Name" }],
+      ambiguousWriteRecoveries: 0,
+    };
+
+    const summary = buildJobSummary(config(), value);
+    expect(summary).toContain("Status: Failed");
+    expect(summary).toContain("Warnings: 1");
+    expect(summary).toContain("Warning summary: course-metadata-conflict (1)");
+    expect(summary).toContain(
+      "Failure summary: assignment-property-update failed; 1 later operation(s) not attempted.",
+    );
+    expect(summary).not.toMatch(
+      /Planned operations|Applied operations|Partial operations|Failed or ambiguous operation|Operations not attempted/,
+    );
+    expect(summary).not.toMatch(
+      /Private Assignment Name|private-assignment-uid|notion-assignment-page-id|Private Course Name|notion-course-page-id|private failure/,
+    );
+  });
+
   it("does not fail a successful sync after an append failure", async () => {
     const value = await run(config({ GITHUB_STEP_SUMMARY: "summary.md" }), {
       gateway: new FakeGateway(),

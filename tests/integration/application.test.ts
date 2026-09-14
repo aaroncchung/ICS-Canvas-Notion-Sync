@@ -1,7 +1,8 @@
+import { createRunMetrics, runMetrics, workCounts } from "../../src/observability/run-report.js";
 import { describe, expect, it } from "vitest";
 import { run } from "../../src/cli.js";
 import { createAssignment, readAssignments } from "../../src/notion/assignments.js";
-import { createRunMetrics, withRetry } from "../../src/notion/client.js";
+import { withRetry } from "../../src/notion/client.js";
 import { createCourse } from "../../src/notion/courses.js";
 import {
   MANAGED_DESCRIPTION_TITLE,
@@ -25,7 +26,6 @@ import type {
   AssignmentRecord,
   CourseRecord,
   ExternalAssignment,
-  RunCounts,
   RunResult,
   SyncPlan,
 } from "../../src/types.js";
@@ -191,7 +191,7 @@ describe("application modes and failure handling", () => {
       const gateway = new FakeGateway();
       gateway.simulateDefaultTemplate = true;
 
-      await applyPlan(gateway, config(), plan, counts());
+      await applyPlan(gateway, config(), plan);
 
       expect(gateway.courses).toHaveLength(1);
       expect(gateway.assignments).toHaveLength(2);
@@ -451,7 +451,7 @@ describe("application modes and failure handling", () => {
         canvasMissingCount: null,
       });
 
-      await applyPlan(gateway, config(), plan, counts());
+      await applyPlan(gateway, config(), plan);
       const write = gateway.writes.find(
         (candidate) => candidate.kind === "update" && candidate.id === existing.pageId,
       );
@@ -727,29 +727,16 @@ describe("application modes and failure handling", () => {
       skipped: 0,
       warnings: [],
     };
-    const counts: RunCounts = {
-      feedItems: 1,
-      assignmentsParsed: 1,
-      cancelledAssignments: 0,
-      ignoredEvents: 0,
-      suspiciousEvents: 0,
-      malformedEvents: 0,
-      duplicateUids: 0,
-      quarantinedUids: 0,
-      created: 0,
-      updated: 0,
-      coursesUpdated: 0,
-      removed: 0,
-      missingObserved: 0,
-      missingAdvanced: 0,
-      missingCleared: 0,
-      unchanged: 0,
-      skipped: 0,
-      warningCount: 0,
-    };
-    await expect(applyPlan(gateway, config(), plan, counts)).rejects.toThrow("write failed");
+    let failure: ApplyPlanError | undefined;
+    try {
+      await applyPlan(gateway, config(), plan);
+    } catch (error) {
+      if (!(error instanceof ApplyPlanError)) throw error;
+      failure = error;
+    }
+    expect(failure?.message).toContain("write failed");
     expect(gateway.writes.some((write) => write.id === "assignment-remove")).toBe(false);
-    expect(counts.removed).toBe(0);
+    expect(workCounts(plan, failure?.execution).removed).toBe(0);
   });
 
   it("tracks a partial course-enrichment failure separately from assignment updates", async () => {
@@ -769,14 +756,14 @@ describe("application modes and failure handling", () => {
       skipped: 0,
       warnings: [],
     };
-    const appliedCounts = counts();
     let failure: ApplyPlanError | undefined;
     try {
-      await applyPlan(gateway, config(), plan, appliedCounts);
+      await applyPlan(gateway, config(), plan);
     } catch (error) {
       if (error instanceof ApplyPlanError) failure = error;
       else throw error;
     }
+    const appliedCounts = workCounts(plan, failure?.execution);
     expect(failure?.execution.failedOperation).toMatchObject({ kind: "course-update" });
     expect(appliedCounts.coursesUpdated).toBe(0);
     expect(appliedCounts.updated).toBe(0);
@@ -814,27 +801,7 @@ describe("application modes and failure handling", () => {
       skipped: 0,
       warnings: [],
     };
-    const counts: RunCounts = {
-      feedItems: 1,
-      assignmentsParsed: 0,
-      cancelledAssignments: 1,
-      ignoredEvents: 0,
-      suspiciousEvents: 0,
-      malformedEvents: 0,
-      duplicateUids: 0,
-      quarantinedUids: 0,
-      created: 0,
-      updated: 0,
-      coursesUpdated: 0,
-      removed: 0,
-      missingObserved: 0,
-      missingAdvanced: 0,
-      missingCleared: 0,
-      unchanged: 0,
-      skipped: 0,
-      warningCount: 0,
-    };
-    await applyPlan(gateway, config(), plan, counts);
+    const execution = await applyPlan(gateway, config(), plan);
     const properties = gateway.writes[0]?.value as Record<string, unknown>;
     expect(properties).toHaveProperty("Removed from Canvas");
     expect(properties).toHaveProperty("Canvas State");
@@ -844,7 +811,7 @@ describe("application modes and failure handling", () => {
     expect(properties).not.toHaveProperty("Priority");
     expect(properties).not.toHaveProperty("Assignment Type");
     expect(properties).not.toHaveProperty("Override Due Date");
-    expect(counts.removed).toBe(1);
+    expect(workCounts(plan, execution).removed).toBe(1);
   });
 
   it("redacts exact secrets, bearer tokens, and feed query parameters", () => {
@@ -1044,8 +1011,6 @@ describe("ambiguous create recovery", () => {
       "America/Los_Angeles",
     );
     expect(result.recovered).toBe(true);
-    expect(gateway.metrics.ambiguousWriteRecoveries).toBe(1);
-    expect(gateway.metrics.assignmentPagesRecovered).toBe(1);
     expect(gateway.writes.filter((write) => write.kind === "create")).toHaveLength(1);
   });
 
@@ -1075,13 +1040,12 @@ describe("ambiguous create recovery", () => {
       canvasCourseId: "123",
     });
     expect(result.recovered).toBe(true);
-    expect(gateway.metrics.coursesRecovered).toBe(1);
     expect(gateway.writes.filter((write) => write.kind === "create")).toHaveLength(1);
   });
 
   it("keeps confirmed and recovered create metrics disjoint", async () => {
     const gateway = new FakeGateway();
-    await createAssignment(
+    const confirmedAssignment = await createAssignment(
       gateway,
       "assignments",
       assignmentCreate("uid-normal"),
@@ -1089,26 +1053,30 @@ describe("ambiguous create recovery", () => {
       "America/Los_Angeles",
     );
     gateway.failCreate({ id: "assignments", code: "ECONNRESET", applied: true });
-    await createAssignment(
+    const recoveredAssignment = await createAssignment(
       gateway,
       "assignments",
       assignmentCreate("uid-recovered"),
       "course",
       "America/Los_Angeles",
     );
-    await createCourse(gateway, "courses", { key: "id:1", title: "Course 1", canvasCourseId: "1" });
-    gateway.failCreate({ id: "courses", code: "ETIMEDOUT", applied: true });
-    await createCourse(gateway, "courses", { key: "id:2", title: "Course 2", canvasCourseId: "2" });
-    expect(gateway.metrics).toMatchObject({
-      assignmentPagesCreated: 1,
-      assignmentPagesRecovered: 1,
-      coursesCreated: 1,
-      coursesRecovered: 1,
+    const confirmedCourse = await createCourse(gateway, "courses", {
+      key: "id:1",
+      title: "Course 1",
+      canvasCourseId: "1",
     });
-    expect(gateway.metrics.assignmentPagesCreated + gateway.metrics.assignmentPagesRecovered).toBe(
-      2,
-    );
-    expect(gateway.metrics.coursesCreated + gateway.metrics.coursesRecovered).toBe(2);
+    gateway.failCreate({ id: "courses", code: "ETIMEDOUT", applied: true });
+    const recoveredCourse = await createCourse(gateway, "courses", {
+      key: "id:2",
+      title: "Course 2",
+      canvasCourseId: "2",
+    });
+    expect([
+      confirmedAssignment.recovered,
+      recoveredAssignment.recovered,
+      confirmedCourse.recovered,
+      recoveredCourse.recovered,
+    ]).toEqual([false, true, false, true]);
   });
 
   it("counts physical recovery polls without changing logical create metrics", async () => {
@@ -1117,9 +1085,9 @@ describe("ambiguous create recovery", () => {
         id: string,
         properties: Record<string, unknown>,
       ): Promise<string> {
-        this.metrics.notionRequests += 1;
-        this.metrics.requestsByOperation["page-create"] =
-          (this.metrics.requestsByOperation["page-create"] ?? 0) + 1;
+        this.requestMetrics.notionRequests += 1;
+        this.requestMetrics.requestsByOperation["page-create"] =
+          (this.requestMetrics.requestsByOperation["page-create"] ?? 0) + 1;
         return super.createPage(id, properties);
       }
 
@@ -1127,8 +1095,9 @@ describe("ambiguous create recovery", () => {
         id: string,
         filter?: Record<string, unknown>,
       ): Promise<Array<Record<string, unknown>>> {
-        this.metrics.notionRequests += 1;
-        this.metrics.requestsByOperation.read = (this.metrics.requestsByOperation.read ?? 0) + 1;
+        this.requestMetrics.notionRequests += 1;
+        this.requestMetrics.requestsByOperation.read =
+          (this.requestMetrics.requestsByOperation.read ?? 0) + 1;
         return super.queryDataSource(id, filter);
       }
     }
@@ -1143,10 +1112,8 @@ describe("ambiguous create recovery", () => {
       "America/Los_Angeles",
       { attempts: 2, delayMs: 0, sleep: () => Promise.resolve() },
     );
-    expect(gateway.metrics.notionRequests).toBe(3);
-    expect(gateway.metrics.requestsByOperation).toEqual({ "page-create": 1, read: 2 });
-    expect(gateway.metrics.assignmentPagesCreated).toBe(0);
-    expect(gateway.metrics.assignmentPagesRecovered).toBe(1);
+    expect(gateway.requestMetrics.notionRequests).toBe(3);
+    expect(gateway.requestMetrics.requestsByOperation).toEqual({ "page-create": 1, read: 2 });
   });
 
   it("does not increment the live confirmed-create count for a recovered assignment", async () => {
@@ -1160,8 +1127,7 @@ describe("ambiguous create recovery", () => {
     }
     const gateway = new RecoveredAssignmentGateway();
     gateway.failCreate({ id: "assignments", code: "ECONNRESET", applied: true });
-    const appliedCounts = counts();
-    await applyPlan(
+    const executionForMetrics = await applyPlan(
       gateway,
       config(),
       {
@@ -1176,12 +1142,11 @@ describe("ambiguous create recovery", () => {
         skipped: 0,
         warnings: [],
       },
-      appliedCounts,
       { templateWait: { attempts: 2, delayMs: 0, sleep: () => Promise.resolve() } },
     );
-    expect(appliedCounts.created).toBe(0);
-    expect(gateway.metrics.assignmentPagesCreated).toBe(0);
-    expect(gateway.metrics.assignmentPagesRecovered).toBe(1);
+    expect(runMetrics(undefined, executionForMetrics).assignmentPagesCreated).toBe(0);
+    expect(runMetrics(undefined, executionForMetrics).assignmentPagesCreated).toBe(0);
+    expect(runMetrics(undefined, executionForMetrics).assignmentPagesRecovered).toBe(1);
   });
 
   it("recovers an assignment that becomes visible on a later observation poll", async () => {
@@ -1286,16 +1251,16 @@ describe("template stabilization and recoverable initialization", () => {
       skipped: 0,
       warnings: [],
     };
-    const appliedCounts = counts();
     let failure: ApplyPlanError | undefined;
     try {
-      await applyPlan(gateway, config(), plan, appliedCounts, {
+      await applyPlan(gateway, config(), plan, {
         templateWait: { attempts: 2, delayMs: 0, sleep: () => Promise.resolve() },
       });
     } catch (error) {
       if (error instanceof ApplyPlanError) failure = error;
       else throw error;
     }
+    const appliedCounts = workCounts(plan, failure?.execution);
     const matches = await gateway.queryDataSource("assignments", {
       property: "Canvas UID",
       rich_text: { equals: "uid-new" },
@@ -1324,7 +1289,7 @@ describe("template stabilization and recoverable initialization", () => {
       warnings: [],
     };
     await expect(
-      applyPlan(gateway, config(), createPlan, counts(), {
+      applyPlan(gateway, config(), createPlan, {
         templateWait: { attempts: 2, delayMs: 0, sleep: () => Promise.resolve() },
       }),
     ).rejects.toThrow("assignment-template-wait");
@@ -1352,10 +1317,9 @@ describe("template stabilization and recoverable initialization", () => {
       skipped: 0,
       warnings: [],
     };
-    const laterCounts = counts();
-    const execution = await applyPlan(gateway, config(), updatePlan, laterCounts);
+    const execution = await applyPlan(gateway, config(), updatePlan);
     expect(execution.assignmentsSynchronized).toHaveLength(1);
-    expect(laterCounts.updated).toBe(1);
+    expect(workCounts(updatePlan, execution).updated).toBe(1);
     expect(await readManagedDescription(gateway, pageId)).toBe("Recovered description");
   });
 });
@@ -1447,21 +1411,24 @@ describe("managed descriptions", () => {
       false,
       "America/Los_Angeles",
       new Date("2026-07-13T00:00:00Z"),
-      gateway.metrics,
     );
     expect(plan.assignmentsToUpdate).toEqual([]);
-    await applyPlan(gateway, config(), plan, counts());
-    expect(gateway.metrics.assignmentBodyReads).toBe(0);
+    const executionForMetrics = await applyPlan(gateway, config(), plan);
+    expect(runMetrics(undefined, executionForMetrics).assignmentBodyReads).toBe(0);
   });
 
   it("migrates a missing hash with one read and no replacement when the body matches", async () => {
     const gateway = descriptionGateway();
-    await applyPlan(gateway, config(), descriptionPlan("Old description"), counts());
+    const executionForMetrics = await applyPlan(
+      gateway,
+      config(),
+      descriptionPlan("Old description"),
+    );
     expect(gateway.listBlocksCallCount("page")).toBe(1);
     expect(gateway.listBlocksCallCount("managed")).toBe(1);
     expect(gateway.totalListBlocksCalls()).toBe(2);
-    expect(gateway.metrics.assignmentBodyReads).toBe(1);
-    expect(gateway.metrics.descriptionReplacements).toBe(0);
+    expect(runMetrics(undefined, executionForMetrics).assignmentBodyReads).toBe(1);
+    expect(runMetrics(undefined, executionForMetrics).descriptionReplacements).toBe(0);
     expect(gateway.writes.filter((write) => write.kind === "append")).toEqual([]);
     expect(JSON.stringify(gateway.writes)).toContain(managedDescriptionHash("Old description"));
   });
@@ -1550,7 +1517,11 @@ describe("managed descriptions", () => {
       type: "heading_2",
       heading_2: { rich_text: [{ plain_text: "Notes" }] },
     });
-    await applyPlan(gateway, config(), descriptionPlan("New description"), counts());
+    const executionForMetrics = await applyPlan(
+      gateway,
+      config(),
+      descriptionPlan("New description"),
+    );
     expect(gateway.listBlocksCallCount("page")).toBe(2);
     expect(gateway.totalListBlocksCalls()).toBe(3);
     const blocks = await gateway.listBlocks("page");
@@ -1558,17 +1529,21 @@ describe("managed descriptions", () => {
     expect(blocks.filter((block) => blockText(block) === MANAGED_DESCRIPTION_TITLE)).toHaveLength(
       1,
     );
-    expect(gateway.metrics.descriptionIntegrityRepairs).toBe(1);
+    expect(runMetrics(undefined, executionForMetrics).descriptionIntegrityRepairs).toBe(1);
   });
 
   it("replaces a mismatched body before committing its hash", async () => {
     const gateway = descriptionGateway();
-    await applyPlan(gateway, config(), descriptionPlan("New description"), counts());
+    const executionForMetrics = await applyPlan(
+      gateway,
+      config(),
+      descriptionPlan("New description"),
+    );
     expect(gateway.listBlocksCallCount("page")).toBe(2);
     expect(gateway.listBlocksCallCount("managed")).toBe(1);
     expect(gateway.totalListBlocksCalls()).toBe(4);
     expect(await readManagedDescription(gateway, "page")).toBe("New description");
-    expect(gateway.metrics.descriptionReplacements).toBe(1);
+    expect(runMetrics(undefined, executionForMetrics).descriptionReplacements).toBe(1);
     expect(JSON.stringify(gateway.writes)).toContain(managedDescriptionHash("New description"));
   });
 
@@ -1578,7 +1553,7 @@ describe("managed descriptions", () => {
     const plan = descriptionPlan("New description");
     let failed: ApplyPlanError | undefined;
     try {
-      await applyPlan(gateway, config(), plan, counts());
+      await applyPlan(gateway, config(), plan);
     } catch (error) {
       if (error instanceof ApplyPlanError) failed = error;
     }
@@ -1595,7 +1570,7 @@ describe("managed descriptions", () => {
             JSON.stringify(write.value).includes("Canvas Description Verified At")),
       ),
     ).toBe(false);
-    await applyPlan(gateway, config(), plan, counts());
+    await applyPlan(gateway, config(), plan);
     expect(await readManagedDescription(gateway, "page")).toBe("New description");
     expect(JSON.stringify(gateway.writes)).toContain(managedDescriptionHash("New description"));
   });
@@ -1608,7 +1583,11 @@ describe("managed descriptions", () => {
       type: "paragraph",
       paragraph: { rich_text: [{ plain_text: "Old description" }] },
     });
-    await applyPlan(gateway, config(), descriptionPlan("Old description"), counts());
+    const executionForMetrics = await applyPlan(
+      gateway,
+      config(),
+      descriptionPlan("Old description"),
+    );
     expect(gateway.listBlocksCallCount("page")).toBe(1);
     expect(gateway.listBlocksCallCount("managed")).toBe(1);
     expect(gateway.totalListBlocksCalls()).toBe(2);
@@ -1616,15 +1595,19 @@ describe("managed descriptions", () => {
     expect(blocks.filter((block) => blockText(block) === MANAGED_DESCRIPTION_TITLE)).toHaveLength(
       1,
     );
-    expect(gateway.metrics.descriptionIntegrityRepairs).toBe(1);
-    expect(gateway.metrics.descriptionReplacements).toBe(0);
+    expect(runMetrics(undefined, executionForMetrics).descriptionIntegrityRepairs).toBe(1);
+    expect(runMetrics(undefined, executionForMetrics).descriptionReplacements).toBe(0);
   });
 
   it("cleans pending replacement toggles before advancing verification metadata", async () => {
     const gateway = descriptionGateway();
     gateway.seedBlock("page", toggle("pending", PENDING_MANAGED_DESCRIPTION_TITLE));
     gateway.seedBlock("page", toggle("pending-duplicate", PENDING_MANAGED_DESCRIPTION_TITLE));
-    await applyPlan(gateway, config(), descriptionPlan("Old description"), counts());
+    const executionForMetrics = await applyPlan(
+      gateway,
+      config(),
+      descriptionPlan("Old description"),
+    );
     expect(gateway.listBlocksCallCount("page")).toBe(1);
     expect(gateway.listBlocksCallCount("managed")).toBe(1);
     expect(gateway.totalListBlocksCalls()).toBe(2);
@@ -1633,14 +1616,14 @@ describe("managed descriptions", () => {
         (block) => blockText(block) === PENDING_MANAGED_DESCRIPTION_TITLE,
       ),
     ).toHaveLength(0);
-    expect(gateway.metrics.descriptionIntegrityRepairs).toBe(1);
+    expect(runMetrics(undefined, executionForMetrics).descriptionIntegrityRepairs).toBe(1);
   });
 
   it("updates only the verification timestamp when a due audit finds a valid body", async () => {
     const gateway = descriptionGateway();
     const plan = descriptionPlan("Old description");
     plan.assignmentsToUpdate[0]!.descriptionHashNeedsUpdate = false;
-    await applyPlan(gateway, config(), plan, counts(), {
+    const executionForMetrics = await applyPlan(gateway, config(), plan, {
       now: () => new Date("2026-07-13T12:00:00.000Z"),
     });
     const metadataWrite = gateway.writes.find(
@@ -1651,10 +1634,10 @@ describe("managed descriptions", () => {
     expect(metadataWrite).toBeDefined();
     expect(JSON.stringify(metadataWrite?.value)).not.toContain("Canvas Description Hash");
     expect(JSON.stringify(metadataWrite?.value)).not.toContain("Last Synced");
-    expect(gateway.metrics.descriptionIntegrityAuditsRun).toBe(1);
-    expect(gateway.metrics.descriptionIntegrityAuditsPassed).toBe(1);
-    expect(gateway.metrics.descriptionIntegrityRepairs).toBe(0);
-    expect(gateway.metrics.descriptionReplacements).toBe(0);
+    expect(runMetrics(undefined, executionForMetrics).descriptionIntegrityAuditsRun).toBe(1);
+    expect(runMetrics(undefined, executionForMetrics).descriptionIntegrityAuditsPassed).toBe(1);
+    expect(runMetrics(undefined, executionForMetrics).descriptionIntegrityRepairs).toBe(0);
+    expect(runMetrics(undefined, executionForMetrics).descriptionReplacements).toBe(0);
   });
 
   it("writes a new page hash and verification timestamp only after body verification", async () => {
@@ -1676,7 +1659,7 @@ describe("managed descriptions", () => {
       skipped: 0,
       warnings: [],
     };
-    await applyPlan(gateway, config(), createPlan, counts(), {
+    await applyPlan(gateway, config(), createPlan, {
       now: () => new Date("2026-07-13T12:00:00.000Z"),
       templateWait: { attempts: 2, delayMs: 0, sleep: () => Promise.resolve() },
     });
@@ -1831,14 +1814,14 @@ describe("partial execution and Sync Log recovery", () => {
       skipped: 0,
       warnings: [],
     };
-    const appliedCounts = counts();
     let failure: ApplyPlanError | undefined;
     try {
-      await applyPlan(gateway, config(), plan, appliedCounts);
+      await applyPlan(gateway, config(), plan);
     } catch (error) {
       if (error instanceof ApplyPlanError) failure = error;
       else throw error;
     }
+    const appliedCounts = workCounts(plan, failure?.execution);
     expect(appliedCounts.missingAdvanced).toBe(0);
     expect(failure?.execution.appliedOperations).toContainEqual({
       kind: "assignment-missing-evidence-update",
@@ -1888,14 +1871,14 @@ describe("partial execution and Sync Log recovery", () => {
       skipped: 0,
       warnings: [],
     };
-    const appliedCounts = counts();
     let failure: ApplyPlanError | undefined;
     try {
-      await applyPlan(gateway, config(), plan, appliedCounts);
+      await applyPlan(gateway, config(), plan);
     } catch (error) {
       if (error instanceof ApplyPlanError) failure = error;
       else throw error;
     }
+    const appliedCounts = workCounts(plan, failure?.execution);
     expect(
       failure?.execution.appliedOperations
         .filter((item) => item.kind === "assignment-property-update")
@@ -1961,16 +1944,16 @@ describe("partial execution and Sync Log recovery", () => {
       skipped: 0,
       warnings: [],
     };
-    const appliedCounts = counts();
     let failure: ApplyPlanError | undefined;
     try {
-      await applyPlan(gateway, config(), plan, appliedCounts, {
+      await applyPlan(gateway, config(), plan, {
         templateWait: { attempts: 2, delayMs: 0, sleep: () => Promise.resolve() },
       });
     } catch (error) {
       if (error instanceof ApplyPlanError) failure = error;
       else throw error;
     }
+    const appliedCounts = workCounts(plan, failure?.execution);
     expect(appliedCounts.created).toBe(1);
     expect(failure?.execution.partialAssignments[0]).toMatchObject({
       completedSubsteps: ["assignment-page-create", "assignment-template-wait"],
@@ -2031,14 +2014,14 @@ describe("partial execution and Sync Log recovery", () => {
       skipped: 0,
       warnings: [],
     };
-    const appliedCounts = counts();
     let failure: ApplyPlanError | undefined;
     try {
-      await applyPlan(gateway, config(), plan, appliedCounts);
+      await applyPlan(gateway, config(), plan);
     } catch (error) {
       if (error instanceof ApplyPlanError) failure = error;
       else throw error;
     }
+    const appliedCounts = workCounts(plan, failure?.execution);
     expect(appliedCounts.updated).toBe(0);
     expect(failure?.execution.partialAssignments[0]).toMatchObject({
       intent: "update",

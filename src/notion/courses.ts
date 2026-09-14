@@ -62,7 +62,6 @@ export async function createCourse(
       pageId: await gateway.createPage(dataSourceId, properties),
       recovered: false,
     };
-    if (gateway.metrics) gateway.metrics.coursesCreated += 1;
     return created;
   } catch (error) {
     if (!isAmbiguousWriteError(error)) throw error;
@@ -91,10 +90,6 @@ export async function createCourse(
       options,
     );
     if (match) {
-      if (gateway.metrics) {
-        gateway.metrics.ambiguousWriteRecoveries += 1;
-        gateway.metrics.coursesRecovered += 1;
-      }
       return { pageId: courseRecord(match).pageId, recovered: true };
     }
     throw new AmbiguousNotionWriteError(
@@ -114,7 +109,6 @@ export async function updateCourse(gateway: NotionGateway, update: CourseUpdate)
   }
   if (!Object.keys(properties).length) return;
   await gateway.updatePage(update.pageId, properties);
-  if (gateway.metrics) gateway.metrics.coursesEnriched += 1;
 }
 
 function courseRecord(page: Record<string, unknown>): CourseRecord {

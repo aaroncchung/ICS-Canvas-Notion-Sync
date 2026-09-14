@@ -1,11 +1,11 @@
+import { runMetrics } from "../../src/observability/run-report.js";
 import { describe, expect, it } from "vitest";
 import { readAssignments } from "../../src/notion/assignments.js";
-import { createRunMetrics } from "../../src/notion/client.js";
 import { managedDescriptionHash } from "../../src/notion/descriptions.js";
 import { buildPlan } from "../../src/sync/plan.js";
 import { ApplyPlanError, applyPlan, plannedOperations } from "../../src/sync/reconcile.js";
 import type { AssignmentRecord, CourseRecord, ExternalAssignment } from "../../src/types.js";
-import { assignmentFeed, config, FakeGateway, runCounts } from "../helpers.js";
+import { assignmentFeed, config, FakeGateway } from "../helpers.js";
 
 const now = new Date("2026-07-13T12:00:00Z");
 const timezone = "America/Los_Angeles";
@@ -31,7 +31,6 @@ function plan(
   records: AssignmentRecord[] = [],
   courses: CourseRecord[] = [],
 ) {
-  const metrics = createRunMetrics();
   const feed = assignmentFeed({
     assignments: sources,
     diagnostics: {
@@ -43,7 +42,8 @@ function plan(
       complete: true,
     },
   });
-  return { result: buildPlan(feed, records, courses, {}, false, timezone, now, metrics), metrics };
+  const result = buildPlan(feed, records, courses, {}, false, timezone, now);
+  return { result, metrics: runMetrics(result) };
 }
 
 describe("finalized reconciliation decisions", () => {
@@ -65,7 +65,7 @@ describe("finalized reconciliation decisions", () => {
         "Canvas Description Verified At": { date: { start: value.descriptionVerifiedAt } },
         "Canvas State": { select: { name: "Active" } },
       });
-    await applyPlan(gateway, config(), result, runCounts(), { now: () => now });
+    await applyPlan(gateway, config(), result, { now: () => now });
     const updated = await readAssignments(gateway, "assignments");
     expect(updated.map((value) => value.coursePageIds)).toEqual([["courses-1"], ["courses-1"]]);
     const next = plan(sources, updated, [{ pageId: "courses-1", title: "Bio" }]).result;
@@ -243,7 +243,7 @@ describe("finalized reconciliation decisions", () => {
     const before = structuredClone(result);
     const gateway = new FakeGateway();
     gateway.simulateDefaultTemplate = true;
-    await applyPlan(gateway, config(), result, runCounts(), {
+    await applyPlan(gateway, config(), result, {
       now: () => now,
       templateWait: { attempts: 2, sleep: async () => {} },
     });
@@ -258,7 +258,7 @@ describe("execution ledger", () => {
     const gateway = new FakeGateway();
     let failure: ApplyPlanError | undefined;
     try {
-      await applyPlan(gateway, config(), result, runCounts());
+      await applyPlan(gateway, config(), result);
     } catch (error) {
       if (!(error instanceof ApplyPlanError)) throw error;
       failure = error;

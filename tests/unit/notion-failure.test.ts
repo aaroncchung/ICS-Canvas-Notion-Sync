@@ -1,11 +1,12 @@
+import { createRequestMetrics } from "../../src/observability/run-report.js";
 import { describe, expect, it } from "vitest";
-import { createRunMetrics, withRetry } from "../../src/notion/client.js";
+import { withRetry } from "../../src/notion/client.js";
 import { classifyNotionFailure } from "../../src/notion/failure.js";
 import { safeDiagnostic } from "../../src/observability/redaction.js";
 
 describe("Notion failure classification and retry policy", () => {
   it("retries a statusless read transport failure and succeeds", async () => {
-    const metrics = createRunMetrics();
+    const metrics = createRequestMetrics();
     let attempts = 0;
     const value = await withRetry(
       () => {
@@ -22,7 +23,7 @@ describe("Notion failure classification and retry policy", () => {
   });
 
   it("exhausts bounded statusless read retries with a classified diagnostic", async () => {
-    const metrics = createRunMetrics();
+    const metrics = createRequestMetrics();
     const error = Object.assign(new Error("request timed out"), { code: "ETIMEDOUT" });
     await expect(
       withRetry(() => Promise.reject(error), {
@@ -43,7 +44,7 @@ describe("Notion failure classification and retry policy", () => {
   });
 
   it("retries a deterministic property update after a transport failure", async () => {
-    const metrics = createRunMetrics();
+    const metrics = createRequestMetrics();
     let attempts = 0;
     await withRetry(
       () => {

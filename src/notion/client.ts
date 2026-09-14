@@ -1,6 +1,7 @@
+import { createRequestMetrics } from "../observability/run-report.js";
 import { Client } from "@notionhq/client";
 import type { Logger } from "pino";
-import type { RunMetrics } from "../types.js";
+import type { RequestMetrics } from "../types.js";
 import { classifyNotionFailure } from "./failure.js";
 export { AmbiguousNotionWriteError } from "./failure.js";
 
@@ -15,7 +16,7 @@ export type NotionOperation =
   | "sync-log-create";
 
 export interface NotionGateway {
-  readonly metrics?: RunMetrics;
+  readonly requestMetrics: RequestMetrics;
   retrieveDataSource(id: string): Promise<Record<string, unknown>>;
   queryDataSource(
     id: string,
@@ -37,29 +38,13 @@ export interface NotionGateway {
   deleteBlock(blockId: string): Promise<void>;
 }
 
-export function createRunMetrics(): RunMetrics {
-  return {
-    notionRequests: 0,
-    requestsByOperation: {},
-    readRetries: 0,
-    propertyUpdateRetries: 0,
-    ambiguousWriteRecoveries: 0,
-    assignmentBodyReads: 0,
-    descriptionReplacements: 0,
-    descriptionUpdatesAvoided: 0,
-    descriptionIntegrityAuditsDue: 0,
-    descriptionIntegrityAuditsDeferred: 0,
-    descriptionIntegrityAuditsRun: 0,
-    descriptionIntegrityAuditsPassed: 0,
-    descriptionIntegrityRepairs: 0,
-    descriptionBodyReadsAvoided: 0,
-    coursesCreated: 0,
-    coursesRecovered: 0,
-    coursesEnriched: 0,
-    coursesConflicted: 0,
-    assignmentPagesCreated: 0,
-    assignmentPagesRecovered: 0,
-  };
+/** Drain concurrent reads before reporting a failure, so no sync requests leak into logging. */
+export async function settleReads<T extends unknown[]>(reads: {
+  [K in keyof T]: Promise<T[K]>;
+}): Promise<T> {
+  const settled = await Promise.allSettled(reads);
+  for (const result of settled) if (result.status === "rejected") throw result.reason;
+  return settled.map((result) => (result.status === "fulfilled" ? result.value : undefined)) as T;
 }
 
 export function errorStatus(error: unknown): number | undefined {
@@ -91,7 +76,7 @@ export async function withRetry<T>(
     sleep?: (ms: number) => Promise<void>;
     operation?: NotionOperation;
     onRetry?: (operation: NotionOperation) => void;
-    metrics?: RunMetrics;
+    metrics?: RequestMetrics;
   } = {},
 ): Promise<T> {
   const attempts = options.attempts ?? 4;
@@ -136,7 +121,7 @@ export class OfficialNotionGateway implements NotionGateway {
   public constructor(
     token: string,
     private readonly logger: Logger,
-    public readonly metrics: RunMetrics = createRunMetrics(),
+    public readonly requestMetrics: RequestMetrics = createRequestMetrics(),
   ) {
     // Recovery and physical request accounting belong to this gateway, including DELETE.
     this.client = new Client({ auth: token, notionVersion: NOTION_API_VERSION, retry: false });
@@ -276,7 +261,7 @@ export class OfficialNotionGateway implements NotionGateway {
       },
       {
         operation: operationType,
-        metrics: this.metrics,
+        metrics: this.requestMetrics,
       },
     );
   }

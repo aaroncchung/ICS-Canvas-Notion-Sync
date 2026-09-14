@@ -1,5 +1,5 @@
 import type { AppConfig } from "../config.js";
-import type { NotionGateway } from "./client.js";
+import { settleReads, type NotionGateway } from "./client.js";
 
 type Expected = Record<string, string | string[]>;
 
@@ -106,7 +106,7 @@ export async function validateNotionSchemas(
   gateway: NotionGateway,
   config: AppConfig,
 ): Promise<void> {
-  const [assignments, courses, syncLog] = await Promise.all([
+  const [assignments, courses, syncLog] = await settleReads([
     gateway.retrieveDataSource(config.NOTION_ASSIGNMENTS_DATA_SOURCE_ID),
     gateway.retrieveDataSource(config.NOTION_COURSES_DATA_SOURCE_ID),
     gateway.retrieveDataSource(config.NOTION_SYNC_LOG_DATA_SOURCE_ID),
