@@ -1,10 +1,18 @@
+import { reportLines, operationSections } from "./observability/report-content.js";
+import {
+  createRunMetrics,
+  createRequestMetrics,
+  emptyCounts,
+  finalizeRun,
+  requestDifference,
+} from "./observability/run-report.js";
 import { appendFile } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
 import type { Logger } from "pino";
 import { loadConfig, type AppConfig } from "./config.js";
 import { CanvasIcsProvider } from "./canvas/provider.js";
 import { readAssignments } from "./notion/assignments.js";
-import { createRunMetrics, OfficialNotionGateway, type NotionGateway } from "./notion/client.js";
+import { OfficialNotionGateway, settleReads, type NotionGateway } from "./notion/client.js";
 import { readCourses } from "./notion/courses.js";
 import { validateNotionSchemas } from "./notion/schema-validator.js";
 import { writeSyncLog } from "./notion/sync-log.js";
@@ -12,7 +20,7 @@ import { createLogger } from "./observability/logger.js";
 import { redactText, safeDiagnostic, safeError } from "./observability/redaction.js";
 import { buildPlan, feedDiagnosticSummary, feedWarnings } from "./sync/plan.js";
 import { ApplyPlanError, applyPlan } from "./sync/reconcile.js";
-import type { AssignmentProvider, RunCounts, RunResult } from "./types.js";
+import type { AssignmentProvider, RunResult } from "./types.js";
 
 export interface RunDependencies {
   gateway?: NotionGateway;
@@ -23,96 +31,25 @@ export interface RunDependencies {
 
 export type SummaryAppender = (path: string, data: string, encoding: "utf8") => Promise<void>;
 
-function emptyCounts(): RunCounts {
-  return {
-    feedItems: 0,
-    assignmentsParsed: 0,
-    cancelledAssignments: 0,
-    ignoredEvents: 0,
-    suspiciousEvents: 0,
-    malformedEvents: 0,
-    duplicateUids: 0,
-    quarantinedUids: 0,
-    created: 0,
-    updated: 0,
-    coursesUpdated: 0,
-    removed: 0,
-    missingObserved: 0,
-    missingAdvanced: 0,
-    missingCleared: 0,
-    unchanged: 0,
-    skipped: 0,
-    warningCount: 0,
-  };
-}
-
 export function buildJobSummary(config: AppConfig, result: RunResult): string {
   const secrets = [config.CANVAS_ICS_URL, config.NOTION_TOKEN];
-  const dryRun = config.mode === "dry-run";
-  const assignmentPagesAdded =
-    result.metrics.assignmentPagesCreated + result.metrics.assignmentPagesRecovered;
-  const coursePagesAdded = result.metrics.coursesCreated + result.metrics.coursesRecovered;
-  const removalEnabled = !config.disableRemovals;
-  const removalSafe = result.feedDiagnostics?.absenceRemovalSafe ?? false;
-  const lines = [
+  const details = operationSections(result).filter(
+    (section) => !["Warnings", "Errors"].includes(section.title),
+  );
+  return [
     "## Canvas–Notion sync",
     "",
     `- Status: ${result.status}`,
     `- Mode: ${config.mode}`,
     `- Trigger: ${config.trigger}`,
-    `- Feed events: ${result.counts.feedItems}`,
-    `- Active assignments: ${result.counts.assignmentsParsed}`,
-    `- Cancelled assignments: ${result.counts.cancelledAssignments}`,
-    `- Ordinary events ignored: ${result.counts.ignoredEvents}`,
-    `- Suspicious events: ${result.counts.suspiciousEvents}`,
-    `- Malformed events: ${result.counts.malformedEvents}`,
-    `- Duplicate source UIDs: ${result.counts.duplicateUids}`,
-    `- Quarantined UIDs: ${result.counts.quarantinedUids} (values redacted)`,
-    `- Removal inference enabled: ${removalEnabled ? "yes" : "no"}`,
-    `- Removal inference safe: ${removalEnabled && removalSafe ? "yes" : "no"}`,
-    ...(dryRun
-      ? [
-          `- Proposed Assignment pages: ${result.counts.created}`,
-          `- Proposed Assignments updated: ${result.counts.updated}`,
-          `- Proposed Assignments marked removed: ${result.counts.removed}`,
-          `- Proposed description integrity audits: ${result.metrics.descriptionIntegrityAuditsDue}`,
-        ]
-      : [
-          `- Assignment pages added: ${assignmentPagesAdded}`,
-          `- Assignment pages created: ${result.metrics.assignmentPagesCreated}`,
-          `- Assignment pages recovered: ${result.metrics.assignmentPagesRecovered}`,
-          `- Assignments updated: ${result.counts.updated}`,
-          `- Assignments marked removed: ${result.counts.removed}`,
-        ]),
-    `- Newly observed missing candidates: ${result.counts.missingObserved}`,
-    `- ${dryRun ? "Proposed " : ""}Missing evidence advanced: ${result.counts.missingAdvanced}`,
-    `- ${dryRun ? "Proposed " : ""}Missing evidence cleared: ${result.counts.missingCleared}`,
-    ...(dryRun
-      ? [
-          `- Proposed Course pages: ${result.plan?.coursesToCreate.length ?? 0}`,
-          `- Proposed Courses enriched: ${result.counts.coursesUpdated}`,
-        ]
-      : [
-          `- Course pages added: ${coursePagesAdded}`,
-          `- Course pages created: ${result.metrics.coursesCreated}`,
-          `- Course pages recovered: ${result.metrics.coursesRecovered}`,
-          `- Courses enriched: ${result.counts.coursesUpdated}`,
-        ]),
-    `- Course conflicts: ${result.metrics.coursesConflicted}`,
-    `- Unchanged: ${result.counts.unchanged}`,
-    `- Skipped: ${result.counts.skipped}`,
-    `- Warnings: ${result.counts.warningCount}`,
-    `- Notion requests: ${result.metrics.notionRequests}`,
-    `- Notion read retries: ${result.metrics.readRetries}`,
-    `- Notion property-update retries: ${result.metrics.propertyUpdateRetries}`,
-    `- Assignment body reads: ${result.metrics.assignmentBodyReads}`,
-    `- Description updates avoided: ${result.metrics.descriptionUpdatesAvoided}`,
-    `- Description integrity audits due this run: ${result.metrics.descriptionIntegrityAuditsDue}`,
-    `- Description integrity audits deferred: ${result.metrics.descriptionIntegrityAuditsDeferred}`,
-    `- Description integrity audits run: ${result.metrics.descriptionIntegrityAuditsRun}`,
-    `- Description audits passed without repair: ${result.metrics.descriptionIntegrityAuditsPassed}`,
-    `- Description integrity repairs: ${result.metrics.descriptionIntegrityRepairs}`,
-    `- Description body reads avoided: ${result.metrics.descriptionBodyReadsAvoided}`,
+    ...reportLines(config, result).map((line) => `- ${line}`),
+    ...details.flatMap((section) => [
+      "",
+      `### ${section.title}`,
+      ...(section.lines.length ? section.lines : ["None"]).map(
+        (line) => `- ${redactText(line, secrets)}`,
+      ),
+    ]),
     ...(result.errors.length
       ? [
           "",
@@ -123,8 +60,7 @@ export function buildJobSummary(config: AppConfig, result: RunResult): string {
         ]
       : []),
     "",
-  ];
-  return lines.join("\n");
+  ].join("\n");
 }
 
 export async function writeJobSummaryBestEffort(
@@ -187,37 +123,28 @@ export async function run(
 ): Promise<RunResult> {
   const secrets = [config.CANVAS_ICS_URL, config.NOTION_TOKEN];
   const logger = createLogger();
-  const defaultMetrics = createRunMetrics();
-  const gateway =
-    dependencies.gateway ?? new OfficialNotionGateway(config.NOTION_TOKEN, logger, defaultMetrics);
-  const metrics = gateway.metrics ?? defaultMetrics;
+
+  const gateway = dependencies.gateway ?? new OfficialNotionGateway(config.NOTION_TOKEN, logger);
+  const baseline = requestDifference(gateway.requestMetrics, createRequestMetrics());
+  const metrics = createRunMetrics();
   const provider = dependencies.provider ?? new CanvasIcsProvider(config, logger);
   const now = dependencies.now ?? (() => new Date());
   const startedAt = now().toISOString();
   const counts = emptyCounts();
   let result: RunResult = { status: "Failed", counts, warnings: [], errors: [], metrics };
-  let syncLogAttempted = false;
 
   try {
     await validateNotionSchemas(gateway, config);
     const feed = await provider.fetchAssignments();
     const diagnosticSummary = feedDiagnosticSummary(feed);
     result.feedDiagnostics = diagnosticSummary;
-    counts.feedItems = feed.diagnostics.totalEvents;
-    counts.assignmentsParsed = feed.assignments.length;
-    counts.cancelledAssignments = diagnosticSummary.cancelledAssignments;
-    counts.ignoredEvents = diagnosticSummary.ignoredEvents;
-    counts.suspiciousEvents = diagnosticSummary.suspiciousEvents;
-    counts.malformedEvents = diagnosticSummary.malformedEvents;
-    counts.duplicateUids = diagnosticSummary.duplicateUids;
-    counts.quarantinedUids = diagnosticSummary.quarantinedUids;
+    result.warnings = feedWarnings(feed);
     if (!feed.diagnostics.complete) {
       throw new Error("Assignment provider returned incomplete feed diagnostics");
     }
 
     if (config.mode === "validate") {
       const warnings = feedWarnings(feed);
-      counts.warningCount = warnings.length;
       result = {
         status: warnings.length ? "Warning" : "Success",
         counts,
@@ -227,7 +154,7 @@ export async function run(
         metrics,
       };
     } else {
-      const [existingAssignments, courses] = await Promise.all([
+      const [existingAssignments, courses] = await settleReads([
         readAssignments(gateway, config.NOTION_ASSIGNMENTS_DATA_SOURCE_ID),
         readCourses(gateway, config.NOTION_COURSES_DATA_SOURCE_ID),
       ]);
@@ -239,7 +166,6 @@ export async function run(
         config.disableRemovals,
         config.NOTION_TIMEZONE,
         now(),
-        metrics,
         config.trigger,
         config.CANVAS_MISSING_EVIDENCE_MINIMUM_HOURS * 60 * 60 * 1000,
       );
@@ -250,29 +176,6 @@ export async function run(
           { code: warning.code, pageIds: warning.details ?? [], canvasIdentifiers: "[REDACTED]" },
           warning.message,
         );
-      }
-      counts.unchanged = plan.unchanged;
-      counts.skipped = plan.skipped;
-      counts.warningCount = plan.warnings.length;
-      counts.missingObserved = plan.missingCandidatesObserved;
-      if (config.mode === "dry-run") {
-        counts.created = plan.assignmentsToCreate.length;
-        counts.updated = plan.assignmentsToUpdate.length;
-        counts.coursesUpdated = plan.coursesToUpdate.length;
-        counts.removed = plan.assignmentsToRemove.filter(
-          (assignment) => assignment.markRemoved,
-        ).length;
-        counts.missingAdvanced =
-          plan.assignmentsMissingEvidenceToUpdate.filter(
-            (assignment) => assignment.transition === "advanced",
-          ).length +
-          plan.assignmentsToRemove.filter(
-            (assignment) => assignment.canvasMissingCountAfter !== undefined,
-          ).length;
-        counts.missingCleared =
-          plan.assignmentsToUpdate.filter((assignment) => assignment.missingEvidenceCleared)
-            .length +
-          plan.assignmentsToRemove.filter((assignment) => assignment.clearMissingEvidence).length;
       }
       result = {
         status:
@@ -285,41 +188,36 @@ export async function run(
         plan,
       };
       if (config.mode === "sync") {
-        result.execution = await applyPlan(gateway, config, plan, counts, { now });
+        result.execution = await applyPlan(gateway, config, plan, { now });
       }
     }
-
-    if (config.mode === "sync") {
-      syncLogAttempted = true;
-      await writeSyncLog(gateway, config, startedAt, now().toISOString(), result);
-    }
-    logger.debug({ metrics }, "Notion and reconciliation metrics");
-    logger.info({ status: result.status, counts: result.counts }, "Synchronization run complete");
   } catch (error) {
     if (error instanceof ApplyPlanError) result.execution = error.execution;
-    const message = safeError(error, secrets);
     result.status = "Failed";
-    result.errors.push(message);
-    logger.error(
-      { diagnostic: safeDiagnostic(error, secrets), counts, metrics },
-      "Synchronization run failed",
-    );
-    if (config.mode === "sync" && !syncLogAttempted) {
-      try {
-        syncLogAttempted = true;
-        await writeSyncLog(gateway, config, startedAt, now().toISOString(), result);
-      } catch (logError) {
-        const logMessage = safeError(logError, secrets);
-        result.errors.push(`Sync Log write failed: ${logMessage}`);
-        logger.error(
-          { diagnostic: safeDiagnostic(logError, secrets) },
-          "Could not persist the failed run to Notion Sync Log",
-        );
-      }
-    } else if (config.mode === "sync" && syncLogAttempted) {
+    result.errors.push(safeError(error, secrets));
+    logger.error({ diagnostic: safeDiagnostic(error, secrets) }, "Synchronization run failed");
+  }
+  const reportingStart = requestDifference(gateway.requestMetrics, createRequestMetrics());
+  result = finalizeRun(result, config.mode, requestDifference(reportingStart, baseline));
+  if (config.mode === "sync") {
+    try {
+      await writeSyncLog(gateway, config, startedAt, now().toISOString(), result);
+    } catch (error) {
+      result.status = "Failed";
+      result.errors.push(`Sync Log write failed: ${safeError(error, secrets)}`);
       result.errors.push("Sync Log write failed; creation was not blindly retried");
+      logger.error(
+        { diagnostic: safeDiagnostic(error, secrets) },
+        "Could not persist the run to Notion Sync Log",
+      );
     }
   }
+  result.reportingRequests = requestDifference(gateway.requestMetrics, reportingStart);
+  logger.debug(
+    { metrics: result.metrics, reportingRequests: result.reportingRequests },
+    "Notion and reconciliation metrics",
+  );
+  logger.info({ status: result.status, counts: result.counts }, "Synchronization run complete");
   for (const annotation of workflowAnnotations(config, result)) {
     process.stdout.write(`${annotation}\n`);
   }

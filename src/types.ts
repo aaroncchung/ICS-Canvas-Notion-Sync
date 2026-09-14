@@ -188,7 +188,15 @@ export interface PlanWarning {
   details?: string[];
 }
 
+export interface PlanningFacts {
+  coursesConflicted: number;
+  descriptionUpdatesAvoided: number;
+  descriptionIntegrityAuditsDeferred: number;
+  operations: PlanningOperationCounters;
+}
+
 export interface SyncPlan {
+  planning?: PlanningFacts;
   coursesToCreate: CourseCreate[];
   coursesToUpdate: CourseUpdate[];
   assignmentsToCreate: AssignmentCreate[];
@@ -228,6 +236,7 @@ export interface SyncOperation {
 export interface AppliedSyncOperation extends SyncOperation {
   pageId?: string;
   recovered?: boolean;
+  description?: { repaired: boolean; replaced: boolean };
 }
 
 export interface FailedSyncOperation extends SyncOperation {
@@ -249,7 +258,7 @@ export interface SyncExecutionResult {
   assignmentsSynchronized: AssignmentExecutionState[];
   partialAssignments: AssignmentExecutionState[];
   notAttempted: SyncOperation[];
-  ambiguousOperations: FailedSyncOperation[];
+  ambiguousWriteRecoveries: number;
   failedOperation?: FailedSyncOperation;
 }
 
@@ -274,11 +283,14 @@ export interface RunCounts {
   warningCount: number;
 }
 
-export interface RunMetrics {
+export interface RequestMetrics {
   notionRequests: number;
   requestsByOperation: Record<string, number>;
   readRetries: number;
   propertyUpdateRetries: number;
+}
+
+export interface RunMetrics extends RequestMetrics {
   ambiguousWriteRecoveries: number;
   assignmentBodyReads: number;
   descriptionReplacements: number;
@@ -306,7 +318,12 @@ export interface PlanningOperationCounters {
 
 export interface RunResult {
   status: "Success" | "Warning" | "Failed" | "Dry Run";
+  /** Compatibility projection: planned counts for dry runs, executed counts otherwise. */
   counts: RunCounts;
+  plannedCounts?: RunCounts;
+  executedCounts?: RunCounts;
+  /** Requests made while persisting the report; excluded from metrics. */
+  reportingRequests?: RequestMetrics;
   warnings: PlanWarning[];
   errors: string[];
   feedDiagnostics?: FeedDiagnosticSummary;

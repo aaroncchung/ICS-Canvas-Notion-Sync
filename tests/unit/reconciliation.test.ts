@@ -1,3 +1,4 @@
+import { runMetrics } from "../../src/observability/run-report.js";
 import { describe, expect, it, vi } from "vitest";
 import { parseIcs } from "../../src/canvas/parse-ics.js";
 import { createAssignment } from "../../src/notion/assignments.js";
@@ -5,7 +6,6 @@ import {
   descriptionIntegrityAuditDecision,
   managedDescriptionHash,
 } from "../../src/notion/descriptions.js";
-import { createRunMetrics } from "../../src/notion/client.js";
 import { datesEqual } from "../../src/sync/date-resolution.js";
 import { buildPlan, feedDiagnosticSummary, feedWarnings } from "../../src/sync/plan.js";
 import { applyPlan } from "../../src/sync/reconcile.js";
@@ -15,10 +15,9 @@ import type {
   AssignmentRecord,
   CourseRecord,
   ExternalAssignment,
-  PlanningOperationCounters,
   Trigger,
 } from "../../src/types.js";
-import { assignmentTypeMatcher, config, FakeGateway, runCounts } from "../helpers.js";
+import { assignmentTypeMatcher, config, FakeGateway } from "../helpers.js";
 
 const course: CourseRecord = {
   pageId: "course-page",
@@ -124,32 +123,12 @@ function planFeed(
   trigger: Trigger = "scheduled",
   now = new Date("2026-07-13T12:00:00Z"),
 ) {
-  return buildPlan(
-    value,
-    existing,
-    courses,
-    aliases,
-    false,
-    notionTimezone,
-    now,
-    undefined,
-    trigger,
-  );
+  return buildPlan(value, existing, courses, aliases, false, notionTimezone, now, trigger);
 }
 
 function planWithMetrics(existing: AssignmentRecord, now = new Date("2026-07-13T12:00:00Z")) {
-  const metrics = createRunMetrics();
-  const result = buildPlan(
-    feed([source()]),
-    [existing],
-    [course],
-    {},
-    false,
-    notionTimezone,
-    now,
-    metrics,
-  );
-  return { metrics, result };
+  const result = buildPlan(feed([source()]), [existing], [course], {}, false, notionTimezone, now);
+  return { metrics: runMetrics(result), result };
 }
 
 function auditDateForReason(reason: "deferred" | "scheduled-slot", verifiedAt: string): Date {
@@ -180,7 +159,6 @@ function courseConflictPlan(
   });
   const assignments =
     ordering === "auditable-first" ? [auditable, conflicting] : [conflicting, auditable];
-  const metrics = createRunMetrics();
   const result = buildPlan(
     feed(assignments),
     [existing],
@@ -189,9 +167,8 @@ function courseConflictPlan(
     false,
     notionTimezone,
     now,
-    metrics,
   );
-  return { metrics, result };
+  return { metrics: runMetrics(result), result };
 }
 
 describe("plan-first reconciliation", () => {
@@ -203,12 +180,12 @@ describe("plan-first reconciliation", () => {
   });
 
   it("matching description hashes avoid validation work and increment the avoidance metric", () => {
-    const { metrics, result } = planWithMetrics(record());
+    const { result } = planWithMetrics(record());
     expect(result.assignmentsToUpdate).toEqual([]);
-    expect(metrics.descriptionUpdatesAvoided).toBe(1);
-    expect(metrics.descriptionBodyReadsAvoided).toBe(1);
-    expect(metrics.descriptionIntegrityAuditsDue).toBe(0);
-    expect(metrics.descriptionIntegrityAuditsDeferred).toBe(0);
+    expect(runMetrics(result).descriptionUpdatesAvoided).toBe(1);
+    expect(runMetrics(result).descriptionBodyReadsAvoided).toBe(1);
+    expect(runMetrics(result).descriptionIntegrityAuditsDue).toBe(0);
+    expect(runMetrics(result).descriptionIntegrityAuditsDeferred).toBe(0);
   });
 
   it.each([undefined, "not-a-timestamp", "2026-07-13T18:00:00.000Z"])(
@@ -217,42 +194,41 @@ describe("plan-first reconciliation", () => {
       const existing = record();
       if (descriptionVerifiedAt === undefined) delete existing.descriptionVerifiedAt;
       else existing.descriptionVerifiedAt = descriptionVerifiedAt;
-      const { metrics, result } = planWithMetrics(existing);
+      const { result } = planWithMetrics(existing);
       expect(result.assignmentsToUpdate[0]).toMatchObject({
         verifyDescription: true,
         descriptionHashNeedsUpdate: false,
       });
-      expect(metrics.descriptionIntegrityAuditsDue).toBe(1);
-      expect(metrics.descriptionIntegrityAuditsDeferred).toBe(0);
+      expect(runMetrics(result).descriptionIntegrityAuditsDue).toBe(1);
+      expect(runMetrics(result).descriptionIntegrityAuditsDeferred).toBe(0);
     },
   );
 
   it("counts an eligible matching hash outside its slot as deferred exactly once", () => {
     const verifiedAt = "2026-05-20T12:00:00.000Z";
-    const { metrics, result } = planWithMetrics(
+    const { result } = planWithMetrics(
       record({ descriptionVerifiedAt: verifiedAt }),
       auditDateForReason("deferred", verifiedAt),
     );
     expect(result.assignmentsToUpdate).toEqual([]);
-    expect(metrics.descriptionIntegrityAuditsDue).toBe(0);
-    expect(metrics.descriptionIntegrityAuditsDeferred).toBe(1);
-    expect(metrics.descriptionUpdatesAvoided).toBe(1);
-    expect(metrics.descriptionBodyReadsAvoided).toBe(1);
+    expect(runMetrics(result).descriptionIntegrityAuditsDue).toBe(0);
+    expect(runMetrics(result).descriptionIntegrityAuditsDeferred).toBe(1);
+    expect(runMetrics(result).descriptionUpdatesAvoided).toBe(1);
+    expect(runMetrics(result).descriptionBodyReadsAvoided).toBe(1);
   });
 
   it("counts an eligible matching hash on its slot as due", () => {
     const verifiedAt = "2026-05-20T12:00:00.000Z";
-    const { metrics, result } = planWithMetrics(
+    const { result } = planWithMetrics(
       record({ descriptionVerifiedAt: verifiedAt }),
       auditDateForReason("scheduled-slot", verifiedAt),
     );
     expect(result.assignmentsToUpdate[0]?.verifyDescription).toBe(true);
-    expect(metrics.descriptionIntegrityAuditsDue).toBe(1);
-    expect(metrics.descriptionIntegrityAuditsDeferred).toBe(0);
+    expect(runMetrics(result).descriptionIntegrityAuditsDue).toBe(1);
+    expect(runMetrics(result).descriptionIntegrityAuditsDeferred).toBe(0);
   });
 
   it("counts a matching hash at maximum age as due", () => {
-    const metrics = createRunMetrics();
     const result = buildPlan(
       feed([source()]),
       [record({ descriptionVerifiedAt: "2026-05-14T12:00:00.000Z" })],
@@ -261,14 +237,13 @@ describe("plan-first reconciliation", () => {
       false,
       notionTimezone,
       new Date("2026-07-13T12:00:00Z"),
-      metrics,
     );
     expect(result.assignmentsToUpdate[0]).toMatchObject({
       verifyDescription: true,
       descriptionHashNeedsUpdate: false,
     });
-    expect(metrics.descriptionIntegrityAuditsDue).toBe(1);
-    expect(metrics.descriptionIntegrityAuditsDeferred).toBe(0);
+    expect(runMetrics(result).descriptionIntegrityAuditsDue).toBe(1);
+    expect(runMetrics(result).descriptionIntegrityAuditsDeferred).toBe(0);
   });
 
   it("plans changed title, due date, and description", () => {
@@ -301,7 +276,6 @@ describe("plan-first reconciliation", () => {
   });
 
   it("creates a new course and assignment", () => {
-    const metrics = createRunMetrics();
     const result = buildPlan(
       feed([source()]),
       [],
@@ -310,12 +284,11 @@ describe("plan-first reconciliation", () => {
       false,
       notionTimezone,
       new Date("2026-07-13T12:00:00Z"),
-      metrics,
     );
     expect(result.coursesToCreate).toHaveLength(1);
     expect(result.assignmentsToCreate).toHaveLength(1);
-    expect(metrics.descriptionIntegrityAuditsDue).toBe(1);
-    expect(metrics.descriptionIntegrityAuditsDeferred).toBe(0);
+    expect(runMetrics(result).descriptionIntegrityAuditsDue).toBe(1);
+    expect(runMetrics(result).descriptionIntegrityAuditsDeferred).toBe(0);
   });
 
   it.each(["rich-first", "name-first"] as const)(
@@ -565,12 +538,12 @@ describe("plan-first reconciliation", () => {
   it("removes audit and create metrics pruned by a later course conflict", () => {
     const existing = record({ uid: "auditable" });
     delete existing.descriptionVerifiedAt;
-    const { metrics, result } = courseConflictPlan("auditable-first", existing);
+    const { result } = courseConflictPlan("auditable-first", existing);
 
     expect(result.assignmentsToCreate).toEqual([]);
     expect(result.assignmentsToUpdate).toEqual([]);
-    expect(metrics.descriptionIntegrityAuditsDue).toBe(0);
-    expect(metrics.descriptionIntegrityAuditsDeferred).toBe(0);
+    expect(runMetrics(result).descriptionIntegrityAuditsDue).toBe(0);
+    expect(runMetrics(result).descriptionIntegrityAuditsDeferred).toBe(0);
   });
 
   it("keeps finalized audit metrics independent of conflicting source order", () => {
@@ -587,7 +560,7 @@ describe("plan-first reconciliation", () => {
   it("does not count an audit when conflict pruning retains only lifecycle properties", () => {
     const existing = record({ uid: "auditable", removed: true, canvasState: "Removed" });
     delete existing.descriptionVerifiedAt;
-    const { metrics, result } = courseConflictPlan("auditable-first", existing);
+    const { result } = courseConflictPlan("auditable-first", existing);
 
     expect(result.assignmentsToUpdate).toEqual([
       expect.objectContaining({
@@ -596,8 +569,8 @@ describe("plan-first reconciliation", () => {
         verifyDescription: false,
       }),
     ]);
-    expect(metrics.descriptionIntegrityAuditsDue).toBe(0);
-    expect(metrics.descriptionIntegrityAuditsDeferred).toBe(0);
+    expect(runMetrics(result).descriptionIntegrityAuditsDue).toBe(0);
+    expect(runMetrics(result).descriptionIntegrityAuditsDeferred).toBe(0);
   });
 
   it("excludes conflict-blocked deferrals and avoidances in either source order", () => {
@@ -618,11 +591,11 @@ describe("plan-first reconciliation", () => {
       assignmentsToCreate: forward.result.assignmentsToCreate,
       assignmentsToUpdate: forward.result.assignmentsToUpdate,
     });
-    for (const { metrics } of [forward, reversed]) {
-      expect(metrics.descriptionIntegrityAuditsDue).toBe(0);
-      expect(metrics.descriptionIntegrityAuditsDeferred).toBe(0);
-      expect(metrics.descriptionUpdatesAvoided).toBe(0);
-      expect(metrics.descriptionBodyReadsAvoided).toBe(0);
+    for (const { result } of [forward, reversed]) {
+      expect(runMetrics(result).descriptionIntegrityAuditsDue).toBe(0);
+      expect(runMetrics(result).descriptionIntegrityAuditsDeferred).toBe(0);
+      expect(runMetrics(result).descriptionUpdatesAvoided).toBe(0);
+      expect(runMetrics(result).descriptionBodyReadsAvoided).toBe(0);
     }
   });
 
@@ -647,10 +620,10 @@ describe("plan-first reconciliation", () => {
 
   it("a description hash version change deliberately schedules revalidation", () => {
     const oldVersion = managedDescriptionHash("Original description", "canvas-description:v0");
-    const { metrics, result } = planWithMetrics(record({ descriptionHash: oldVersion }));
+    const { result } = planWithMetrics(record({ descriptionHash: oldVersion }));
     expect(result.assignmentsToUpdate[0]?.verifyDescription).toBe(true);
-    expect(metrics.descriptionIntegrityAuditsDue).toBe(1);
-    expect(metrics.descriptionIntegrityAuditsDeferred).toBe(0);
+    expect(runMetrics(result).descriptionIntegrityAuditsDue).toBe(1);
+    expect(runMetrics(result).descriptionIntegrityAuditsDeferred).toBe(0);
   });
 
   it("updates Canvas-owned fields on Done assignments without status writes", () => {
@@ -1168,12 +1141,6 @@ describe("plan-first reconciliation", () => {
           canvasUrl: `https://canvas.example.edu/courses/${index}/assignments/${10_000 + index}`,
         }),
     );
-    const counters: PlanningOperationCounters = {
-      courseNormalizations: 0,
-      courseCandidatesExamined: 0,
-      assignmentNormalizations: 0,
-      assignmentCandidatesExamined: 0,
-    };
     const result = buildPlan(
       feed(assignments),
       existing,
@@ -1182,13 +1149,11 @@ describe("plan-first reconciliation", () => {
       false,
       notionTimezone,
       new Date("2026-07-13T12:00:00Z"),
-      undefined,
       "scheduled",
       undefined,
-      counters,
     );
     expect(result.assignmentsToCreate).toHaveLength(size);
-    expect(counters).toEqual({
+    expect(result.planning?.operations).toEqual({
       courseNormalizations: size * 6,
       courseCandidatesExamined: size,
       assignmentNormalizations: size * 4,
@@ -1619,7 +1584,7 @@ describe("course keys survive apply", () => {
     expect(result.assignmentsToUpdate[0]?.properties.coursePageId).toBe("page:course-page-2");
 
     const gateway = new FakeGateway();
-    await applyPlan(gateway, config(), result, runCounts(), applyOptions);
+    await applyPlan(gateway, config(), result, applyOptions);
     const write = gateway.writes.find(
       (entry) => entry.kind === "update" && entry.id === "assignment-page",
     );
@@ -1657,7 +1622,7 @@ describe("course keys survive apply", () => {
     expect(relinked?.properties.coursePageId).toBe("page:course-page");
 
     const gateway = new FakeGateway();
-    await applyPlan(gateway, config(), result, runCounts(), applyOptions);
+    await applyPlan(gateway, config(), result, applyOptions);
     const write = gateway.writes.find(
       (entry) => entry.kind === "update" && entry.id === "assignment-page",
     );
@@ -1702,7 +1667,7 @@ describe("course keys survive apply", () => {
 
     const gateway = new FakeGateway();
     gateway.simulateDefaultTemplate = true;
-    await applyPlan(gateway, config(), result, runCounts(), {
+    await applyPlan(gateway, config(), result, {
       ...applyOptions,
       templateWait: { attempts: 2, sleep: async () => {} },
     });

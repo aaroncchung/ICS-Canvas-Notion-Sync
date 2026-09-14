@@ -131,7 +131,6 @@ export async function createAssignment(
       }),
       recovered: false,
     };
-    if (gateway.metrics) gateway.metrics.assignmentPagesCreated += 1;
     return created;
   } catch (error) {
     if (!isAmbiguousWriteError(error)) throw error;
@@ -145,10 +144,6 @@ export async function createAssignment(
       options,
     );
     if (match && typeof match.id === "string") {
-      if (gateway.metrics) {
-        gateway.metrics.ambiguousWriteRecoveries += 1;
-        gateway.metrics.assignmentPagesRecovered += 1;
-      }
       return { pageId: match.id, recovered: true };
     }
     throw new AmbiguousNotionWriteError(

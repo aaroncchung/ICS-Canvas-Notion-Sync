@@ -14,7 +14,6 @@ import type {
   AssignmentExecutionState,
   Clock,
   FailedSyncOperation,
-  RunCounts,
   SyncExecutionResult,
   SyncOperation,
   SyncOperationKind,
@@ -52,7 +51,7 @@ export function emptyExecutionResult(): SyncExecutionResult {
     assignmentsSynchronized: [],
     partialAssignments: [],
     notAttempted: [],
-    ambiguousOperations: [],
+    ambiguousWriteRecoveries: 0,
   };
 }
 
@@ -72,7 +71,6 @@ export async function applyPlan(
   gateway: NotionGateway,
   config: AppConfig,
   plan: SyncPlan,
-  counts: RunCounts,
   options: ApplyPlanOptions = {},
 ): Promise<SyncExecutionResult> {
   const execution = emptyExecutionResult();
@@ -125,7 +123,6 @@ export async function applyPlan(
       }
       case "course-update":
         await updateCourse(gateway, command.course);
-        counts.coursesUpdated += 1;
         break;
       case "assignment-page-create": {
         const work = command.assignment;
@@ -138,7 +135,6 @@ export async function applyPlan(
           { now },
         );
         state(work).pageId = created.pageId;
-        if (!created.recovered) counts.created += 1;
         return created;
       }
       case "assignment-template-wait":
@@ -149,7 +145,6 @@ export async function applyPlan(
         const properties = { ...work.value.properties };
         if (properties.coursePageId) properties.coursePageId = coursePage(properties.coursePageId);
         await updateAssignment(gateway, work.value.pageId, properties, now);
-        if (work.value.missingEvidenceCleared) counts.missingCleared += 1;
         break;
       }
       case "assignment-description-update": {
@@ -158,9 +153,12 @@ export async function applyPlan(
           gateway,
           value.pageId!,
           command.assignment.value.source.descriptionMarkdown,
+          () => {
+            execution.ambiguousWriteRecoveries += 1;
+          },
         );
         value.repaired = integrity.repaired;
-        break;
+        return { description: integrity };
       }
       case "assignment-description-hash-update": {
         const work = command.assignment;
@@ -197,7 +195,6 @@ export async function applyPlan(
             },
             now,
           );
-          if (change.value.transition === "advanced") counts.missingAdvanced += 1;
         } else {
           const value = change.value;
           await updateAssignment(
@@ -215,9 +212,6 @@ export async function applyPlan(
             },
             now,
           );
-          if (value.markRemoved) counts.removed += 1;
-          if (value.clearMissingEvidence) counts.missingCleared += 1;
-          if (value.canvasMissingCountAfter !== undefined) counts.missingAdvanced += 1;
         }
         break;
       }
@@ -236,7 +230,6 @@ export async function applyPlan(
         const next = commands[index + 1];
         if (!next || !("assignment" in next) || next.assignment !== work) {
           execution.assignmentsSynchronized.push(assignmentState(work));
-          if (work.intent === "update") counts.updated += 1;
         }
       }
     } catch (error) {
@@ -246,7 +239,6 @@ export async function applyPlan(
         message: operationError(error),
       };
       execution.failedOperation = failed;
-      if (failed.outcome === "ambiguous") execution.ambiguousOperations.push(failed);
       if ("assignment" in command) {
         const value = state(command.assignment);
         if (

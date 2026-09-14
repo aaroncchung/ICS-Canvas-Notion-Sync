@@ -137,27 +137,21 @@ export async function replaceManagedDescription(
   gateway: NotionGateway,
   pageId: string,
   markdown: string | undefined,
+  onRecovery?: () => void,
 ): Promise<{ repaired: boolean; replaced: boolean }> {
-  if (gateway.metrics) {
-    gateway.metrics.descriptionIntegrityAuditsRun += 1;
-    gateway.metrics.assignmentBodyReads += 1;
-  }
   const snapshot = await createManagedSectionSnapshot(
     gateway,
     pageId,
     { managed: MANAGED_DESCRIPTION_TITLE, pending: PENDING_MANAGED_DESCRIPTION_TITLE },
     descriptionBlocks(markdown ?? ""),
+    undefined,
+    onRecovery,
   );
   if (await verifyManagedSection(gateway, snapshot)) {
-    if (gateway.metrics) gateway.metrics.descriptionIntegrityAuditsPassed += 1;
     return { repaired: false, replaced: false };
   }
 
   const result = await reconcileManagedSection(gateway, snapshot);
-  if (gateway.metrics) {
-    gateway.metrics.descriptionIntegrityRepairs += 1;
-    if (result.replaced) gateway.metrics.descriptionReplacements += 1;
-  }
   return { repaired: true, replaced: result.replaced };
 }
 
