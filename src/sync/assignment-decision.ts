@@ -3,13 +3,13 @@ import type {
   AssignmentRecord,
   AssignmentUpdate,
   ExternalAssignment,
-} from "../types.js";
-import { descriptionExcerpt } from "../notion/assignments.js";
+} from "../types.ts";
+import { descriptionExcerpt } from "../notion/assignments.ts";
 import {
   descriptionIntegrityAuditDecision,
   managedDescriptionHash,
-} from "../notion/descriptions.js";
-import { datesEqual, resolveDates } from "./date-resolution.js";
+} from "../notion/descriptions.ts";
+import { datesEqual, resolveDates } from "./date-resolution.ts";
 
 export function lifecycleProperties(existing: AssignmentRecord): {
   properties: AssignmentPropertyUpdate;

@@ -1,7 +1,7 @@
 import sanitizeHtml from "sanitize-html";
 import TurndownService from "turndown";
-import type { AssignmentType, ExternalAssignment } from "../types.js";
-import type { ClassificationResult } from "./classify-event.js";
+import type { AssignmentType, ExternalAssignment } from "../types.ts";
+import type { ClassificationResult } from "./classify-event.ts";
 
 export interface RawCalendarEvent {
   uid?: string;

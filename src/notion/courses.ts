@@ -1,7 +1,7 @@
-import type { Clock, CourseCreate, CourseRecord, CourseUpdate, RecoveredCreate } from "../types.js";
-import { AmbiguousNotionWriteError, isAmbiguousWriteError, type NotionGateway } from "./client.js";
-import { normalizeCourse } from "../course-normalization.js";
-import { pollForUniquePage, type VisibilityPollingOptions } from "./recovery.js";
+import type { Clock, CourseCreate, CourseRecord, CourseUpdate, RecoveredCreate } from "../types.ts";
+import { AmbiguousNotionWriteError, isAmbiguousWriteError, type NotionGateway } from "./client.ts";
+import { normalizeCourse } from "../course-normalization.ts";
+import { pollForUniquePage, type VisibilityPollingOptions } from "./recovery.ts";
 import {
   checkbox,
   pageId,
@@ -14,7 +14,7 @@ import {
   title,
   url,
   date,
-} from "./property-helpers.js";
+} from "./property-helpers.ts";
 
 export async function readCourses(
   gateway: NotionGateway,

@@ -1,10 +1,10 @@
-import { createRequestMetrics } from "../observability/run-report.js";
+import { createRequestMetrics } from "../observability/run-report.ts";
 import { setTimeout as sleep } from "node:timers/promises";
 import { Client } from "@notionhq/client";
 import type { Logger } from "pino";
-import type { RequestMetrics } from "../types.js";
-import { classifyNotionFailure } from "./failure.js";
-export { AmbiguousNotionWriteError } from "./failure.js";
+import type { RequestMetrics } from "../types.ts";
+import { classifyNotionFailure } from "./failure.ts";
+export { AmbiguousNotionWriteError } from "./failure.ts";
 
 export const NOTION_API_VERSION = "2026-03-11";
 
@@ -119,11 +119,16 @@ export class OfficialNotionGateway implements NotionGateway {
   private readonly client: Client;
   private nextRequestAt = 0;
 
+  private readonly logger: Logger;
+  public readonly requestMetrics: RequestMetrics;
+
   public constructor(
     token: string,
-    private readonly logger: Logger,
-    public readonly requestMetrics: RequestMetrics = createRequestMetrics(),
+    logger: Logger,
+    requestMetrics: RequestMetrics = createRequestMetrics(),
   ) {
+    this.logger = logger;
+    this.requestMetrics = requestMetrics;
     // Recovery and physical request accounting belong to this gateway, including DELETE.
     this.client = new Client({ auth: token, notionVersion: NOTION_API_VERSION, retry: false });
   }

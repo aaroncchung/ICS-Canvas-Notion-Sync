@@ -1,27 +1,27 @@
-import { runMetrics } from "../../src/observability/run-report.js";
+import { runMetrics } from "../../src/observability/run-report.ts";
 import { describe, expect, it, vi } from "vitest";
-import { parseIcs } from "../../src/canvas/parse-ics.js";
-import { DEFAULT_MISSING_EVIDENCE_MINIMUM_HOURS } from "../../src/config.js";
-import { normalizeCourse } from "../../src/course-normalization.js";
-import { createAssignment } from "../../src/notion/assignments.js";
+import { parseIcs } from "../../src/canvas/parse-ics.ts";
+import { DEFAULT_MISSING_EVIDENCE_MINIMUM_HOURS } from "../../src/config.ts";
+import { normalizeCourse } from "../../src/course-normalization.ts";
+import { createAssignment } from "../../src/notion/assignments.ts";
 import {
   descriptionIntegrityAuditDecision,
   managedDescriptionHash,
-} from "../../src/notion/descriptions.js";
-import { datesEqual } from "../../src/sync/date-resolution.js";
-import { buildPlan, feedDiagnosticSummary, feedWarnings } from "../../src/sync/plan.js";
-import { applyPlan } from "../../src/sync/reconcile.js";
+} from "../../src/notion/descriptions.ts";
+import { datesEqual } from "../../src/sync/date-resolution.ts";
+import { buildPlan, feedDiagnosticSummary, feedWarnings } from "../../src/sync/plan.ts";
+import { applyPlan } from "../../src/sync/reconcile.ts";
 import type {
   AssignmentFeed,
   AssignmentRecord,
   CourseRecord,
   ExternalAssignment,
   Trigger,
-} from "../../src/types.js";
-import { assignmentTypeMatcher, config, FakeGateway } from "../helpers.js";
+} from "../../src/types.ts";
+import { assignmentTypeMatcher, config, FakeGateway } from "../helpers.ts";
 
 // Spied, never stubbed: the planning work per source is observable without production counters.
-vi.mock(import("../../src/course-normalization.js"), { spy: true });
+vi.mock(import("../../src/course-normalization.ts"), { spy: true });
 
 const course: CourseRecord = {
   pageId: "course-page",

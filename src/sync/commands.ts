@@ -7,7 +7,7 @@ import type {
   CourseUpdate,
   SyncOperation,
   SyncPlan,
-} from "../types.js";
+} from "../types.ts";
 
 export interface AssignmentCreateWork {
   intent: "create";

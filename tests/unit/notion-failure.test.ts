@@ -1,8 +1,8 @@
-import { createRequestMetrics } from "../../src/observability/run-report.js";
+import { createRequestMetrics } from "../../src/observability/run-report.ts";
 import { describe, expect, it } from "vitest";
-import { withRetry } from "../../src/notion/client.js";
-import { classifyNotionFailure } from "../../src/notion/failure.js";
-import { safeDiagnostic } from "../../src/observability/redaction.js";
+import { withRetry } from "../../src/notion/client.ts";
+import { classifyNotionFailure } from "../../src/notion/failure.ts";
+import { safeDiagnostic } from "../../src/observability/redaction.ts";
 
 describe("Notion failure classification and retry policy", () => {
   it("retries a statusless read transport failure and succeeds", async () => {

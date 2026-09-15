@@ -1,20 +1,20 @@
 import { createHash } from "node:crypto";
 import { appendFile } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
-import { extractCourseCode } from "../src/canvas/normalize-assignment.js";
-import { CanvasIcsProvider } from "../src/canvas/provider.js";
-import { loadConfig, type AppConfig } from "../src/config.js";
-import { readAssignments } from "../src/notion/assignments.js";
-import { OfficialNotionGateway, settleReads } from "../src/notion/client.js";
-import { readCourses } from "../src/notion/courses.js";
-import { createLogger } from "../src/observability/logger.js";
-import { safeError } from "../src/observability/redaction.js";
+import { extractCourseCode } from "../src/canvas/normalize-assignment.ts";
+import { CanvasIcsProvider } from "../src/canvas/provider.ts";
+import { loadConfig, type AppConfig } from "../src/config.ts";
+import { readAssignments } from "../src/notion/assignments.ts";
+import { OfficialNotionGateway, settleReads } from "../src/notion/client.ts";
+import { readCourses } from "../src/notion/courses.ts";
+import { createLogger } from "../src/observability/logger.ts";
+import { safeError } from "../src/observability/redaction.ts";
 import {
   buildCourseIndex,
   matchCourseFromIndex,
   type CourseMatch,
-} from "../src/sync/course-matcher.js";
-import { buildPlan } from "../src/sync/plan.js";
+} from "../src/sync/course-matcher.ts";
+import { buildPlan } from "../src/sync/plan.ts";
 import type {
   AssignmentFeed,
   AssignmentRecord,
@@ -22,7 +22,7 @@ import type {
   ExternalAssignment,
   SyncPlan,
   Trigger,
-} from "../src/types.js";
+} from "../src/types.ts";
 
 /**
  * Compares course-code extraction before and after issue #26 against a real feed and the real

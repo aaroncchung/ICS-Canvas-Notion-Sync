@@ -1,5 +1,5 @@
-import type { AssignmentFeed, FeedDiagnosticSummary, PlanWarning } from "../types.js";
-import { absenceRemovalSafe } from "./removal-detector.js";
+import type { AssignmentFeed, FeedDiagnosticSummary, PlanWarning } from "../types.ts";
+import { absenceRemovalSafe } from "./removal-detector.ts";
 
 function aggregateFeedDiagnostics(feed: AssignmentFeed): {
   ignored: number;

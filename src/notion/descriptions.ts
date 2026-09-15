@@ -1,15 +1,15 @@
 import { createHash } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
-import { calendarDate, DATE_ONLY } from "../calendar-date.js";
-import { paragraph, paragraphs, type Block } from "./blocks.js";
-import type { NotionGateway } from "./client.js";
+import { calendarDate, DATE_ONLY } from "../calendar-date.ts";
+import { paragraph, paragraphs, type Block } from "./blocks.ts";
+import type { NotionGateway } from "./client.ts";
 import {
   blockText,
   createManagedSectionSnapshot,
   managedBlockCanonicalRepresentation,
   reconcileManagedSection,
   verifyManagedSection,
-} from "./managed-section.js";
+} from "./managed-section.ts";
 
 export const MANAGED_DESCRIPTION_TITLE = "Canvas Description — managed by sync";
 export const PENDING_MANAGED_DESCRIPTION_TITLE =

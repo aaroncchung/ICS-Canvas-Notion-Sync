@@ -1,6 +1,6 @@
-import type { AppConfig } from "../config.js";
-import type { RunResult, SyncOperation } from "../types.js";
-import { compilePlan, operationOf } from "../sync/commands.js";
+import type { AppConfig } from "../config.ts";
+import type { RunResult, SyncOperation } from "../types.ts";
+import { compilePlan, operationOf } from "../sync/commands.ts";
 
 export interface ReportSection {
   title: string;

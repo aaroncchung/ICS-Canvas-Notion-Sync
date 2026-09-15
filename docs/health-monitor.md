@@ -1,36 +1,39 @@
 # Scheduled health monitor
 
-This document is the authoritative policy for `.github/workflows/health-check.yml`. The checker evaluates `sync.yml` using UTC timestamps and only scheduled runs (`event: schedule`). Manual runs are excluded completely: they cannot improve or degrade scheduled health and a manual success cannot recover an incident.
+This document is the authoritative policy for `.github/workflows/health-check.yml`, which runs `scripts/check-health.ts` every four hours. The checker reads only `sync.yml` runs with `event: schedule`; manual runs never improve or degrade scheduled health and cannot recover an incident. It needs no npm dependencies, so the workflow runs the TypeScript source directly on Node 24 without installing or building anything.
 
-## Run classification and alert conditions
+## Run classification
 
-Runs are sorted newest first by completion/update/start/create timestamp. A completed `success` is healthy. Completed `failure`, `timed_out`, `action_required`, `startup_failure`, and scheduled `cancelled` runs are qualifying failures. Completed `neutral`, `skipped`, `stale`, and unknown non-success conclusions are neutral: they do not count as failures, break a consecutive-failure sequence, and do not count as successes. Queued, pending, requested, waiting, and in-progress runs are active rather than completed failures.
+Scheduled runs are ordered newest first by `updated_at`, which is the completion time of a completed run. A completed run with conclusion `success` is a success. A completed run with conclusion `failure`, `timed_out`, `action_required`, `startup_failure`, or `cancelled` is a failure. Any other completed conclusion (`neutral`, `skipped`, `stale`, and unknown values) is neither: it counts as a completion that breaks a run of consecutive failures, but it is not a success. Queued, pending, requested, waiting, and in-progress runs are active, not completed.
 
-The checker reports unhealthy state when any of these conditions applies:
+## Alert conditions
 
-- The three most recent completed scheduled runs are qualifying failures. A neutral completion between failures breaks the sequence.
-- No scheduled success exists after the initial activation grace ends.
-- The latest scheduled success is older than the 12-hour watchdog plus the 60-minute scheduler-delay allowance.
-- The workflow state is anything other than `active`; this opens an immediate `workflow_disabled` incident instead of treating the state as scheduler delay.
+The scheduled sync is unhealthy when any of these holds:
 
-The default initial activation grace is 14 hours. `HEALTH_ACTIVATION_GRACE_HOURS` can set another positive number of hours. Until the first scheduled success, the activation reference is the workflow's `updated_at`, falling back to `created_at` when `updated_at` is unavailable. Activation grace suppresses only the no-success condition; three actual qualifying failures still alert.
+- The workflow state is anything other than `active`. This alerts immediately and suppresses the other checks, because no scheduled run can start.
+- The three most recent completed scheduled runs are failures.
+- The latest scheduled success is 13 hours old or older (a 12-hour watchdog plus one hour of scheduler delay). With no scheduled success at all, the check is unhealthy from 14 hours after the workflow was last activated, where activation is the workflow's `updated_at` (falling back to `created_at`). `HEALTH_ACTIVATION_GRACE_HOURS` can set another positive number of hours.
 
-A scheduled active run created within the previous two hours defers a no-success alert. The same deferral applies while a prior success is between 12 and 13 hours old, which combines the 12-hour watchdog with the 60-minute scheduler-delay allowance. Recent active runs do not erase completed failures.
+A scheduled run that is still active and was created within the previous two hours defers the no-success alert only; it never masks completed failures, and a run stuck in the queue for longer than two hours no longer defers anything.
 
-## Durable incident lifecycle
+## Issue lifecycle
 
-The checker reuses one issue titled `Canvas–Notion sync is unhealthy` with the `sync-failure` label, creating the label when necessary. Pull requests returned by GitHub's issues endpoint are excluded before durable-issue matching. A later unhealthy episode reopens the same closed issue rather than creating another.
+The checker keeps one issue titled `Canvas–Notion sync is unhealthy` with the `sync-failure` label. The label is created on first use, and the oldest matching issue is reused. The labeled-issue listing is paginated (up to ten pages of 100), so newer labeled issues can never hide the durable one, and pull requests returned by the issues endpoint are ignored.
 
-Each episode has deterministic, secret-free markers for its episode ID, incident start, and latest qualifying failure run ID and completion timestamp. A three-failure incident starts at the oldest of the three triggering failures; other incidents start at the latest qualifying failure when one exists, otherwise at workflow activation. While an issue remains open, only a strictly newer qualifying failure advances the latest-failure marker. The generated issue body is patched only when its content changes.
+- Unhealthy and no issue exists: the issue is created.
+- Unhealthy and the issue is closed: the same issue is reopened with a fresh body.
+- Unhealthy and the issue is open: the body is patched only when its content changed. Line-ending differences from manual edits do not count as changes.
+- Healthy and the issue is open: the issue is closed only when a scheduled success is strictly newer than the latest scheduled failure. That excludes an older success still inside the watchdog, a success at the same timestamp as a failure, a manual success, and a fresh activation grace with no successes. When a disabled workflow is re-enabled, the issue closes as soon as the other checks pass.
+- Healthy and the issue is closed, or no issue exists: nothing happens.
 
-Legacy marked issues without current incident markers migrate conservatively. The checker uses the newest qualifying failure timestamp displayed in the old body, then falls back to the issue `updated_at` or `created_at`. If no parseable boundary exists, it leaves the issue open.
+Closing patches the issue first and then adds one comment naming the recovering run. Because the state change comes first, a failed comment request can never lead to a duplicate comment on the next check. Repeated healthy checks do not comment or close again, and reopening requires a genuinely new unhealthy condition, so the issue cannot flap.
 
-## Recovery
+## GitHub API access
 
-An open issue closes only when current health is otherwise healthy and a completed scheduled success is strictly newer than both the incident start and the latest qualifying failure boundary. A success at the same timestamp does not recover the incident. Neither an older success still inside the watchdog nor a manual success, neutral completion, queued run, or in-progress run can recover it.
+Requests go to the repository's `actions` and `issues` endpoints with the workflow token. Reads and idempotent `PATCH` requests retry twice on network failures, server errors, and rate limiting, where rate limiting means a `429` or a `403` carrying `Retry-After` or `x-ratelimit-remaining: 0`. Rate-limit delays follow GitHub's guidance in full: the request waits the whole `Retry-After`, otherwise until `x-ratelimit-reset` when `x-ratelimit-remaining` is `0`, and otherwise one minute. One request may wait at most five minutes in total across its retries, well inside the workflow's ten-minute timeout; a longer required wait fails the check immediately with the required delay in the error message, and the next scheduled check retries. Other transient failures wait one second per attempt. `POST` requests are never retried. Error messages include the method, path, and status only, never the token or the response body.
 
-Recovery adds one comment per episode using a deterministic marker, so retried health checks do not duplicate the comment. Repeated healthy checks do not comment or close again.
+`HEALTH_ACTIVATION_GRACE_HOURS` must be a positive finite number; anything else fails the check before any request is made.
 
 ## Data and privacy
 
-Issue bodies contain only workflow metadata needed for diagnosis: run/attempt identifiers, links, event, status/conclusion, branch, commit, and timestamps. They exclude secrets, credentials, authentication headers, environment variables, feed contents, assignment data, Notion data, complete descriptions, and application logs.
+Issue bodies contain only workflow metadata: run identifiers and links, attempt numbers, status and conclusion, short commit SHAs, timestamps, and the workflow state. They exclude secrets, credentials, environment variables, feed contents, assignment and Notion data, and application logs.

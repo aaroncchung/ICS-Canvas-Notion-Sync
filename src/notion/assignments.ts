@@ -5,9 +5,9 @@ import type {
   Clock,
   ExternalAssignment,
   RecoveredCreate,
-} from "../types.js";
-import { AmbiguousNotionWriteError, isAmbiguousWriteError, type NotionGateway } from "./client.js";
-import { pollForUniquePage, type VisibilityPollingOptions } from "./recovery.js";
+} from "../types.ts";
+import { AmbiguousNotionWriteError, isAmbiguousWriteError, type NotionGateway } from "./client.ts";
+import { pollForUniquePage, type VisibilityPollingOptions } from "./recovery.ts";
 import {
   checkbox,
   date,
@@ -28,7 +28,7 @@ import {
   title,
   url,
   number,
-} from "./property-helpers.js";
+} from "./property-helpers.ts";
 
 export const DESCRIPTION_EXCERPT_LENGTH = 1900;
 

@@ -7,8 +7,8 @@ import type {
   RequestMetrics,
   SyncExecutionResult,
   SyncPlan,
-} from "../types.js";
-import { compilePlan } from "../sync/commands.js";
+} from "../types.ts";
+import { compilePlan } from "../sync/commands.ts";
 
 export function createRequestMetrics(): RequestMetrics {
   return { notionRequests: 0, requestsByOperation: {}, readRetries: 0, propertyUpdateRetries: 0 };

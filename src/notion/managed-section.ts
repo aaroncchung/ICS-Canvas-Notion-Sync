@@ -3,9 +3,9 @@ import {
   errorStatus,
   isAmbiguousWriteError,
   type NotionGateway,
-} from "./client.js";
+} from "./client.ts";
 
-import { blockBatch, toggle, type Block } from "./blocks.js";
+import { blockBatch, toggle, type Block } from "./blocks.ts";
 
 interface ManagedSectionTitles {
   managed: string;

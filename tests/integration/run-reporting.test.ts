@@ -1,17 +1,17 @@
 import { describe, expect, it, vi } from "vitest";
-import { buildJobSummary, run } from "../../src/cli.js";
-import { blockText } from "../../src/notion/managed-section.js";
-import { managedDescriptionHash } from "../../src/notion/descriptions.js";
+import { buildJobSummary, run } from "../../src/cli.ts";
+import { blockText } from "../../src/notion/managed-section.ts";
+import { managedDescriptionHash } from "../../src/notion/descriptions.ts";
 import {
   createRequestMetrics,
   finalizeRun,
   runMetrics,
-} from "../../src/observability/run-report.js";
-import { reportLines, reportSections } from "../../src/observability/report-content.js";
-import { buildPlan, type PlanOptions } from "../../src/sync/plan.js";
-import { ApplyPlanError, applyPlan, plannedOperations } from "../../src/sync/reconcile.js";
-import type { AssignmentFeed, AssignmentRecord, CourseRecord, SyncPlan } from "../../src/types.js";
-import { assignmentFeed, config, FakeGateway, FakeProvider, runResult } from "../helpers.js";
+} from "../../src/observability/run-report.ts";
+import { reportLines, reportSections } from "../../src/observability/report-content.ts";
+import { buildPlan, type PlanOptions } from "../../src/sync/plan.ts";
+import { ApplyPlanError, applyPlan, plannedOperations } from "../../src/sync/reconcile.ts";
+import type { AssignmentFeed, AssignmentRecord, CourseRecord, SyncPlan } from "../../src/types.ts";
+import { assignmentFeed, config, FakeGateway, FakeProvider, runResult } from "../helpers.ts";
 
 const now = new Date("2026-09-14T12:00:00Z");
 const source = {

@@ -3,9 +3,9 @@ import {
   compareCourseExtraction,
   legacyCourseCode,
   renderReport,
-} from "../../scripts/course-code-diff.js";
-import type { AssignmentRecord, CourseRecord, ExternalAssignment } from "../../src/types.js";
-import { assignmentFeed } from "../helpers.js";
+} from "../../scripts/course-code-diff.ts";
+import type { AssignmentRecord, CourseRecord, ExternalAssignment } from "../../src/types.ts";
+import { assignmentFeed } from "../helpers.ts";
 
 const now = new Date("2026-09-14T12:00:00Z");
 

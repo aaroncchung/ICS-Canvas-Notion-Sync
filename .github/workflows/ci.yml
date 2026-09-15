@@ -46,3 +46,41 @@ jobs:
         run: npm test
       - name: Audit dependencies
         run: npm audit
+
+  # Mirrors the scheduled workflows: runtime dependencies only, TypeScript sources run by Node
+  # directly. Catches syntax or import shapes that tsc and Vitest accept but type stripping rejects.
+  native-runtime:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - run: npm ci --omit=dev --no-audit --fund=false
+      - name: Load every source module under Node type stripping
+        run: |
+          node --input-type=module -e '
+            import { glob } from "node:fs/promises";
+            import { pathToFileURL } from "node:url";
+            let count = 0;
+            for await (const file of glob(["src/**/*.ts", "scripts/**/*.ts"])) {
+              await import(pathToFileURL(file).href);
+              count += 1;
+            }
+            if (count === 0) throw new Error("no source modules found");
+            console.log("Loaded " + count + " modules");
+          '
+      - name: Run the workflow entry points as Node would
+        run: |
+          check() {
+            local expected="$1"; shift
+            local output
+            output="$("$@" 2>&1)" && { echo "expected a nonzero exit from: $*" >&2; exit 1; }
+            grep -qF "$expected" <<<"$output" || { printf '%s\n' "$output" >&2; exit 1; }
+          }
+          check "Invalid environment configuration" node src/cli.ts --mode validate
+          check "GITHUB_TOKEN and GITHUB_REPOSITORY are required" node scripts/check-health.ts
+          check "CANVAS_ICS_URL" node scripts/course-code-diff.ts

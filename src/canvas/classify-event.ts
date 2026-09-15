@@ -2,7 +2,7 @@ import {
   canvasAssignmentUrlIdentity,
   cleanUrlCandidate,
   verifiedCanvasOrigin,
-} from "./canvas-url.js";
+} from "./canvas-url.ts";
 
 export interface ClassificationInput {
   uid?: string;

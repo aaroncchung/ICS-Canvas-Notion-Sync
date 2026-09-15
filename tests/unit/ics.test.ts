@@ -1,14 +1,14 @@
 import { readFile } from "node:fs/promises";
 import { describe, expect, it } from "vitest";
 import { pino } from "pino";
-import { parseIcs } from "../../src/canvas/parse-ics.js";
+import { parseIcs } from "../../src/canvas/parse-ics.ts";
 import {
   compileAssignmentTypeMatcher,
   extractCourseCode,
   sanitizeDescription,
-} from "../../src/canvas/normalize-assignment.js";
-import { CanvasIcsProvider } from "../../src/canvas/provider.js";
-import { assignmentTypeMatcher, config } from "../helpers.js";
+} from "../../src/canvas/normalize-assignment.ts";
+import { CanvasIcsProvider } from "../../src/canvas/provider.ts";
+import { assignmentTypeMatcher, config } from "../helpers.ts";
 
 const fixture = (name: string) =>
   readFile(new URL(`../../fixtures/synthetic/${name}`, import.meta.url), "utf8");

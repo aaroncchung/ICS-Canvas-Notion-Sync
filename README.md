@@ -111,12 +111,13 @@ Development checks:
 ```bash
 npm run lint
 npm run format:check
-npm run typecheck
+npm run check:types-and-build
 npm run test:unit
 npm run test:integration
-npm run build
 npm audit
 ```
+
+Node 24 runs the TypeScript sources directly (`node src/cli.ts`, `node scripts/check-health.ts`), so no build step is needed to run the application. To keep that working, `tsconfig.json` enables `erasableSyntaxOnly` and `verbatimModuleSyntax`, and relative imports use `.ts` specifiers; `npm run build` still emits plain JavaScript to `dist/` with rewritten import extensions.
 
 Tests use synthetic ICS and in-memory Notion doubles; they require no live credentials.
 
@@ -130,9 +131,9 @@ Add the two secrets, four required variables, and optional health-grace variable
 
 Scheduled runs execute at 01:30, 08:30, 12:30, 14:00, 15:30, and 17:30 in `America/New_York`. Manual runs can select any mode and disable removal detection. Concurrency prevents overlapping syncs.
 
-The health workflow opens or reuses a durable issue after three consecutive qualifying scheduled failures, after the no-success watchdog expires, or when the sync workflow is disabled. Manual runs do not affect scheduled health. See [docs/health-monitor.md](docs/health-monitor.md) for the authoritative run classification, timing, incident, recovery, and privacy policy.
+The health workflow runs every four hours and keeps one `Canvas–Notion sync is unhealthy` issue. It opens or reopens that issue after three consecutive scheduled failures, when no scheduled run has succeeded within 13 hours, or when the sync workflow is disabled, and closes it once a newer scheduled run succeeds. Manual runs do not affect scheduled health. See [docs/health-monitor.md](docs/health-monitor.md) for the authoritative run classification, timing, issue lifecycle, and privacy policy.
 
-In GitHub Actions, fatal application failures produce sanitized `::error::` annotations and meaningful suspicious diagnostics produce a sanitized `::warning::`; ordinary ignored calendar events do not produce annotations. The job summary records mode and trigger, applied or proposed assignment and course counts, feed diagnostic counts, Notion request/retry metrics, removal-inference state, and a one-line failure summary without stacks. Summary-file I/O is best-effort: an append failure emits a sanitized warning but cannot change the synchronization result or exit status, and workflow annotations are still attempted. Normal logs retain sanitized diagnostic stacks. CI validates workflow syntax and expressions with pinned actionlint v1.7.12. GitHub-maintained actions are pinned to immutable commits, and npm caching uses `package-lock.json`.
+In GitHub Actions, fatal application failures produce sanitized `::error::` annotations and meaningful suspicious diagnostics produce a sanitized `::warning::`; ordinary ignored calendar events do not produce annotations. The job summary records mode and trigger, applied or proposed assignment and course counts, feed diagnostic counts, Notion request/retry metrics, removal-inference state, and a one-line failure summary without stacks. Summary-file I/O is best-effort: an append failure emits a sanitized warning but cannot change the synchronization result or exit status, and workflow annotations are still attempted. Normal logs retain sanitized diagnostic stacks. CI validates workflow syntax and expressions with pinned actionlint v1.7.12. GitHub-maintained actions are pinned to immutable commits. Scheduled workflows skip the build entirely: the sync job installs only runtime dependencies (cached by `package-lock.json`) and the health job installs nothing.
 
 No SMTP or external mail service is used. In GitHub notification settings, enable email or web notifications for failed Actions workflows. Watch this repository for new issues and issue updates, and subscribe to the `Canvas–Notion sync is unhealthy` issue when it is created. GitHub owns notification delivery.
 

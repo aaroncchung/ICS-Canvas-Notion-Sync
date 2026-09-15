@@ -1,4 +1,4 @@
-import { classifyNotionFailure, type NotionFailureClassification } from "../notion/failure.js";
+import { classifyNotionFailure, type NotionFailureClassification } from "../notion/failure.ts";
 
 const TOKEN_PATTERN = /\b(?:secret|ntn|oauth|sk)[_-][A-Za-z0-9_-]{8,}\b/gi;
 const AUTH_PATTERN = /(?:authorization\s*[:=]\s*|bearer\s+)[^\s,}\]]+/gi;
