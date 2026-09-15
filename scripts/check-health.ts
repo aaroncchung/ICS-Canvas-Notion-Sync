@@ -11,7 +11,10 @@ const WORKFLOW_FILE = "sync.yml";
 const RUNS_SHOWN = 5;
 const PAGE_SIZE = 100;
 const MAX_ISSUE_PAGES = 10;
-const MAX_RETRY_AFTER_MS = 10_000;
+/** GitHub asks for at least a minute before retrying a rate-limited request that carries no timing headers. */
+const MIN_RATE_LIMIT_WAIT_MS = 60_000;
+/** Total time one request may spend waiting on rate limits; the health workflow itself times out after ten minutes. */
+const MAX_RATE_LIMIT_WAIT_MS = 5 * 60 * 1000;
 const HOUR = 60 * 60 * 1000;
 
 export interface WorkflowRun {
@@ -101,7 +104,7 @@ export function assessScheduledHealth(
     const deadline = latestSuccess
       ? updatedAt(latestSuccess) + SUCCESS_WATCHDOG_HOURS * HOUR
       : Date.parse(activatedAt(workflow)) + activationGraceHours * HOUR;
-    if (now.getTime() > deadline && !activeRun) {
+    if (now.getTime() >= deadline && !activeRun) {
       reasons.push(
         latestSuccess
           ? `No scheduled run has succeeded in the last ${SUCCESS_WATCHDOG_HOURS} hours.`
@@ -178,15 +181,36 @@ export interface GitHubRequestOptions {
   fetch?: typeof fetch;
   attempts?: number;
   sleep?: (milliseconds: number) => Promise<unknown>;
+  /** Current time in milliseconds, used to wait until `x-ratelimit-reset`. */
+  now?: () => number;
 }
 
-/** Reads and idempotent updates retry transient failures; errors never echo the token or response body. */
+/**
+ * How long GitHub asks the client to wait: the full `Retry-After`, otherwise until `x-ratelimit-reset`
+ * when the quota is exhausted, otherwise the documented one-minute minimum.
+ */
+function rateLimitWaitMs(headers: Headers, now: number): number {
+  const retryAfterSeconds = Number(headers.get("retry-after"));
+  if (retryAfterSeconds > 0) return retryAfterSeconds * 1000;
+  const resetSeconds = Number(headers.get("x-ratelimit-reset"));
+  if (headers.get("x-ratelimit-remaining") === "0" && resetSeconds > 0) {
+    return Math.max(resetSeconds * 1000 - now, 1000);
+  }
+  return MIN_RATE_LIMIT_WAIT_MS;
+}
+
+/**
+ * Reads and idempotent updates retry transient failures; errors never echo the token or response body.
+ * Rate limits are honored in full, and a wait that would exceed the budget fails the request instead.
+ */
 export function createGitHubRequest(options: GitHubRequestOptions): GitHubRequest {
   const apiUrl = (options.apiUrl ?? "https://api.github.com").replace(/\/$/, "");
   const fetchImpl = options.fetch ?? fetch;
   const attempts = options.attempts ?? 3;
   const sleep = options.sleep ?? delay;
+  const now = options.now ?? Date.now;
   return async (method, path, body) => {
+    let waitedMs = 0;
     for (let attempt = 1; ; attempt += 1) {
       let response: Response | undefined;
       try {
@@ -208,24 +232,26 @@ export function createGitHubRequest(options: GitHubRequestOptions): GitHubReques
         return response.status === 204 ? undefined : ((await response.json()) as unknown);
       }
       const status = response?.status;
-      const retryAfterSeconds = Number(response?.headers.get("retry-after"));
       // GitHub signals secondary rate limits with 403 as well as 429.
       const rateLimited =
         status === 429 ||
         (status === 403 &&
-          (retryAfterSeconds > 0 || response?.headers.get("x-ratelimit-remaining") === "0"));
+          (Number(response?.headers.get("retry-after")) > 0 ||
+            response?.headers.get("x-ratelimit-remaining") === "0"));
       const transient = status === undefined || rateLimited || status >= 500;
-      if (method !== "POST" && transient && attempt < attempts) {
-        await sleep(
-          retryAfterSeconds > 0
-            ? Math.min(retryAfterSeconds * 1000, MAX_RETRY_AFTER_MS)
-            : attempt * 1000,
-        );
+      const waitMs =
+        rateLimited && response ? rateLimitWaitMs(response.headers, now()) : attempt * 1000;
+      const withinBudget = waitedMs + waitMs <= MAX_RATE_LIMIT_WAIT_MS;
+      if (method !== "POST" && transient && attempt < attempts && withinBudget) {
+        await sleep(waitMs);
+        waitedMs += waitMs;
         continue;
       }
       const endpoint = `${method} ${path.split("?")[0]}`;
       const hint = rateLimited
-        ? "; rate limited"
+        ? withinBudget
+          ? "; rate limited"
+          : `; rate limited for ${Math.ceil(waitMs / 1000)}s, longer than the ${MAX_RATE_LIMIT_WAIT_MS / 1000}s wait budget`
         : status === 401 || status === 403
           ? "; check the workflow token permissions"
           : "";

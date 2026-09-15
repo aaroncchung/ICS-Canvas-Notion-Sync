@@ -250,6 +250,23 @@ describe("GitHub health issue lifecycle", () => {
     expect(github.calls).not.toContain("PATCH /issues/1");
   });
 
+  it("treats a check landing exactly on the watchdog or activation deadline as unhealthy", () => {
+    const exactly13HoursAgo = new Date(now.getTime() - 13 * 60 * 60 * 1000).toISOString();
+    const success = [run(10, "success", exactly13HoursAgo)];
+    expect(assessScheduledHealth(success, activeWorkflow, now).reasons).toEqual([
+      "No scheduled run has succeeded in the last 13 hours.",
+    ]);
+    const justInside = new Date(now.getTime() - 1);
+    expect(assessScheduledHealth(success, activeWorkflow, justInside).reasons).toEqual([]);
+
+    const exactly14HoursAgo = new Date(now.getTime() - 14 * 60 * 60 * 1000).toISOString();
+    const activated = { ...activeWorkflow, updated_at: exactly14HoursAgo };
+    expect(assessScheduledHealth([], activated, now).reasons).toEqual([
+      "No scheduled run has succeeded within 14 hours of workflow activation.",
+    ]);
+    expect(assessScheduledHealth([], activated, justInside).reasons).toEqual([]);
+  });
+
   it("closes a disabled-workflow incident once the workflow is active and healthy again", async () => {
     const github = fakeGitHub({ workflow: { ...activeWorkflow, state: "disabled_manually" } });
     github.runs = [run(10, "success", "2026-07-13T11:30:00Z")];
@@ -345,18 +362,23 @@ describe("fetch-backed GitHub request", () => {
     expect(calls).toBe(2);
   });
 
-  it("honors a bounded Retry-After and treats a rate-limited 403 as transient", async () => {
+  it("waits the full Retry-After, until x-ratelimit-reset, or GitHub's one-minute minimum", async () => {
+    const nowMs = Date.parse("2026-07-13T12:00:00Z");
     const sleeps: number[] = [];
     const responses = [
-      new Response(null, { status: 403, headers: { "retry-after": "2" } }),
-      new Response(null, { status: 403, headers: { "x-ratelimit-remaining": "0" } }),
-      new Response(null, { status: 429, headers: { "retry-after": "600" } }),
+      new Response(null, { status: 403, headers: { "retry-after": "45" } }),
+      new Response(null, {
+        status: 403,
+        headers: { "x-ratelimit-remaining": "0", "x-ratelimit-reset": String(nowMs / 1000 + 90) },
+      }),
+      new Response(null, { status: 429 }),
       Response.json({ workflow_runs: [] }),
     ];
     const request = createGitHubRequest({
       token,
       repository: "o/r",
       attempts: 4,
+      now: () => nowMs,
       sleep: (milliseconds) => {
         sleeps.push(milliseconds);
         return Promise.resolve();
@@ -364,7 +386,7 @@ describe("fetch-backed GitHub request", () => {
       fetch: () => Promise.resolve(responses.shift()!),
     });
     await expect(request("GET", "/runs")).resolves.toEqual({ workflow_runs: [] });
-    expect(sleeps).toEqual([2000, 2000, 10_000]);
+    expect(sleeps).toEqual([45_000, 90_000, 60_000]);
 
     const exhausted = createGitHubRequest({
       token,
@@ -373,6 +395,47 @@ describe("fetch-backed GitHub request", () => {
       fetch: () => Promise.resolve(new Response(null, { status: 429 })),
     });
     await expect(exhausted("GET", "/runs")).rejects.toThrow("status 429; rate limited");
+  });
+
+  it("fails cleanly instead of sleeping when the rate-limit wait exceeds the budget", async () => {
+    let calls = 0;
+    const sleeps: number[] = [];
+    const request = createGitHubRequest({
+      token,
+      repository: "o/r",
+      sleep: (milliseconds) => {
+        sleeps.push(milliseconds);
+        return Promise.resolve();
+      },
+      fetch: () => {
+        calls += 1;
+        return Promise.resolve(
+          new Response(null, { status: 429, headers: { "retry-after": "600" } }),
+        );
+      },
+    });
+    await expect(request("GET", "/runs")).rejects.toThrow(
+      "GitHub API GET /runs failed with status 429; rate limited for 600s, longer than the 300s wait budget",
+    );
+    expect(calls).toBe(1);
+    expect(sleeps).toEqual([]);
+
+    // The budget is cumulative across retries of one request.
+    calls = 0;
+    const cumulative = createGitHubRequest({
+      token,
+      repository: "o/r",
+      attempts: 5,
+      sleep: () => Promise.resolve(),
+      fetch: () => {
+        calls += 1;
+        return Promise.resolve(
+          new Response(null, { status: 429, headers: { "retry-after": "120" } }),
+        );
+      },
+    });
+    await expect(cumulative("GET", "/runs")).rejects.toThrow("longer than the 300s wait budget");
+    expect(calls).toBe(3);
   });
 });
 

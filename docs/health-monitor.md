@@ -12,7 +12,7 @@ The scheduled sync is unhealthy when any of these holds:
 
 - The workflow state is anything other than `active`. This alerts immediately and suppresses the other checks, because no scheduled run can start.
 - The three most recent completed scheduled runs are failures.
-- The latest scheduled success is older than 13 hours (a 12-hour watchdog plus one hour of scheduler delay). With no scheduled success at all, the deadline is instead 14 hours after the workflow was last activated, where activation is the workflow's `updated_at` (falling back to `created_at`). `HEALTH_ACTIVATION_GRACE_HOURS` can set another positive number of hours.
+- The latest scheduled success is 13 hours old or older (a 12-hour watchdog plus one hour of scheduler delay). With no scheduled success at all, the check is unhealthy from 14 hours after the workflow was last activated, where activation is the workflow's `updated_at` (falling back to `created_at`). `HEALTH_ACTIVATION_GRACE_HOURS` can set another positive number of hours.
 
 A scheduled run that is still active and was created within the previous two hours defers the no-success alert only; it never masks completed failures, and a run stuck in the queue for longer than two hours no longer defers anything.
 
@@ -30,7 +30,7 @@ Closing patches the issue first and then adds one comment naming the recovering 
 
 ## GitHub API access
 
-Requests go to the repository's `actions` and `issues` endpoints with the workflow token. Reads and idempotent `PATCH` requests retry twice on network failures, server errors, and rate limiting, where rate limiting means a `429` or a `403` carrying `Retry-After` or `x-ratelimit-remaining: 0`. A `Retry-After` header sets the delay, capped at ten seconds; otherwise the delay grows by one second per attempt. `POST` requests are never retried. Error messages include the method, path, and status only, never the token or the response body.
+Requests go to the repository's `actions` and `issues` endpoints with the workflow token. Reads and idempotent `PATCH` requests retry twice on network failures, server errors, and rate limiting, where rate limiting means a `429` or a `403` carrying `Retry-After` or `x-ratelimit-remaining: 0`. Rate-limit delays follow GitHub's guidance in full: the request waits the whole `Retry-After`, otherwise until `x-ratelimit-reset` when `x-ratelimit-remaining` is `0`, and otherwise one minute. One request may wait at most five minutes in total across its retries, well inside the workflow's ten-minute timeout; a longer required wait fails the check immediately with the required delay in the error message, and the next scheduled check retries. Other transient failures wait one second per attempt. `POST` requests are never retried. Error messages include the method, path, and status only, never the token or the response body.
 
 `HEALTH_ACTIVATION_GRACE_HOURS` must be a positive finite number; anything else fails the check before any request is made.
 
