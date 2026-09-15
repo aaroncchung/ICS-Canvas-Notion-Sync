@@ -71,7 +71,7 @@ jobs:
               count += 1;
             }
             if (count === 0) throw new Error("no source modules found");
-            console.log(`Loaded ${count} modules`);
+            console.log("Loaded " + count + " modules");
           '
       - name: Run the workflow entry points as Node would
         run: |
