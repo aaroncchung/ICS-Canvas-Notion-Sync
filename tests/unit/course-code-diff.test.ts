@@ -30,7 +30,6 @@ function compare(
       normalizedAssignmentUids: assignments.map((item) => item.uid),
       quarantinedUids: [],
       events: [],
-      complete: true,
     },
   });
   return compareCourseExtraction({

@@ -8,7 +8,7 @@ import {
   runMetrics,
 } from "../../src/observability/run-report.js";
 import { reportLines, reportSections } from "../../src/observability/report-content.js";
-import { buildPlan } from "../../src/sync/plan.js";
+import { buildPlan, type PlanOptions } from "../../src/sync/plan.js";
 import { ApplyPlanError, applyPlan, plannedOperations } from "../../src/sync/reconcile.js";
 import type { AssignmentFeed, AssignmentRecord, CourseRecord, SyncPlan } from "../../src/types.js";
 import { assignmentFeed, config, FakeGateway, FakeProvider, runResult } from "../helpers.js";
@@ -22,7 +22,7 @@ const source = {
   inferredType: "Other" as const,
 };
 const feed = assignmentFeed({ assignments: [source] });
-const makePlan = () => buildPlan(feed, [], [], {}, false, "UTC", now);
+const makePlan = () => buildPlan(feed, [], [], { notionTimezone: "UTC", now });
 
 describe("run reporting sources of truth", () => {
   it("returns planning facts without mutating any input and repeats deterministically", () => {
@@ -36,11 +36,11 @@ describe("run reporting sources of truth", () => {
       descriptionHash: managedDescriptionHash(undefined),
       descriptionVerifiedAt: now.toISOString(),
     };
-    const inputs: [AssignmentFeed, AssignmentRecord[], CourseRecord[], Record<string, string>] = [
+    const inputs: [AssignmentFeed, AssignmentRecord[], CourseRecord[], PlanOptions] = [
       structuredClone(feed),
       [record],
       [{ pageId: "biology", title: "Biology", canvasCourseId: "7" }],
-      {},
+      { aliases: {}, notionTimezone: "UTC", now: new Date(now) },
     ];
     function freeze(value: unknown): void {
       if (!value || typeof value !== "object") return;
@@ -48,10 +48,9 @@ describe("run reporting sources of truth", () => {
       Object.freeze(value);
     }
     freeze(inputs);
-    const first = buildPlan(...inputs, false, "UTC", now);
-    expect(buildPlan(...inputs, false, "UTC", now)).toEqual(first);
+    const first = buildPlan(...inputs);
+    expect(buildPlan(...inputs)).toEqual(first);
     expect(first.planning?.descriptionUpdatesAvoided).toBe(1);
-    expect(first.planning?.operations.assignmentNormalizations).toBeGreaterThan(0);
     expect(runMetrics(first).descriptionBodyReadsAvoided).toBe(1);
   });
 

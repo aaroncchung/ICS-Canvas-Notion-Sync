@@ -184,9 +184,7 @@ describe("application modes and failure handling", () => {
         }),
         [],
         [],
-        {},
-        false,
-        "America/Los_Angeles",
+        { notionTimezone: "America/Los_Angeles" },
       );
       const gateway = new FakeGateway();
       gateway.simulateDefaultTemplate = true;
@@ -418,9 +416,6 @@ describe("application modes and failure handling", () => {
         coursePageIds: [testCase.existingCoursePageId],
         canvasMissingSince: "2026-07-12T00:00:00.000Z",
         canvasMissingCount: 2,
-        personalStatus: "In progress",
-        priority: "High",
-        assignmentType: "Quiz",
         removed: true,
         canvasState: "Removed",
       };
@@ -436,9 +431,7 @@ describe("application modes and failure handling", () => {
         }),
         [existing],
         testCase.courses,
-        {},
-        false,
-        "America/Los_Angeles",
+        { notionTimezone: "America/Los_Angeles" },
       );
       expect(plan.warnings, testCase.name).toContainEqual(
         expect.objectContaining({ code: testCase.warning }),
@@ -592,19 +585,6 @@ describe("application modes and failure handling", () => {
     });
     expect(result.status).toBe("Success");
     expect(result.counts.cancelledAssignments).toBe(1);
-  });
-
-  it("fails validate for a provider-declared incomplete feed without data writes", async () => {
-    const gateway = new FakeGateway();
-    const result = await run(config({ mode: "validate" }), {
-      gateway,
-      provider: new FakeProvider({
-        ...emptyFeed,
-        diagnostics: { ...emptyFeed.diagnostics, complete: false },
-      }),
-    });
-    expect(result.status).toBe("Failed");
-    expect(gateway.writes).toEqual([]);
   });
 
   it("retries Notion rate limits with bounded backoff", async () => {
@@ -782,9 +762,6 @@ describe("application modes and failure handling", () => {
           uid: "cancelled",
           title: "Cancelled",
           coursePageIds: ["course"],
-          personalStatus: "Done",
-          priority: "High",
-          assignmentType: "Exam",
           overrideDueDate: "2026-07-20T20:00:00.000Z",
           canvasMissingSince: "2026-07-12T00:00:00Z",
           canvasMissingCount: 1,
@@ -1407,10 +1384,7 @@ describe("managed descriptions", () => {
       },
       assignments,
       [{ pageId: "course", title: "EE 10" }],
-      {},
-      false,
-      "America/Los_Angeles",
-      new Date("2026-07-13T00:00:00Z"),
+      { notionTimezone: "America/Los_Angeles", now: new Date("2026-07-13T00:00:00Z") },
     );
     expect(plan.assignmentsToUpdate).toEqual([]);
     const executionForMetrics = await applyPlan(gateway, config(), plan);

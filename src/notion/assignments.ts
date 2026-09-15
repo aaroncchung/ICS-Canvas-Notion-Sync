@@ -19,7 +19,6 @@ import {
   readRelation,
   readRichText,
   readSelect,
-  readStatus,
   readTitle,
   readUrl,
   relation,
@@ -59,11 +58,7 @@ export async function readAssignments(
     const storedDescription = readRichText(properties, "Raw Description");
     const descriptionHash = readRichText(properties, "Canvas Description Hash");
     const descriptionVerifiedAt = readDate(properties, "Canvas Description Verified At");
-    const personalStatus = readStatus(properties, "Personal Status");
-    const priority = readSelect(properties, "Priority");
-    const assignmentType = readSelect(properties, "Assignment Type");
     const canvasState = readSelect(properties, "Canvas State");
-    const importedFrom = readSelect(properties, "Imported From");
     const id = pageId(page);
     assignments.push({
       pageId: id,
@@ -79,12 +74,8 @@ export async function readAssignments(
       ...(storedDescription ? { descriptionExcerpt: storedDescription } : {}),
       ...(descriptionHash ? { descriptionHash } : {}),
       ...(descriptionVerifiedAt ? { descriptionVerifiedAt } : {}),
-      ...(personalStatus ? { personalStatus } : {}),
-      ...(priority ? { priority } : {}),
-      ...(assignmentType ? { assignmentType } : {}),
       removed: readCheckbox(properties, "Removed from Canvas"),
       ...(canvasState ? { canvasState } : {}),
-      ...(importedFrom ? { importedFrom } : {}),
     });
   }
   return assignments;

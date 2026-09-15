@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { z } from "zod";
-import { normalizeCourse } from "./sync/course-normalization.js";
+import { normalizeCourse } from "./course-normalization.js";
 import { ASSIGNMENT_TYPES, type AssignmentType, type RunMode, type Trigger } from "./types.js";
 
 export const DEFAULT_MISSING_EVIDENCE_MINIMUM_HOURS = 6;

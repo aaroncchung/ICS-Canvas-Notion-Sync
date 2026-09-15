@@ -244,17 +244,15 @@ export function compareCourseExtraction(inputs: ComparisonInputs): CourseCodeDif
   ];
 
   const buildFor = (feed: AssignmentFeed) =>
-    buildPlan(
-      feed,
-      inputs.existingAssignments,
-      inputs.courses,
-      inputs.aliases,
-      false,
-      inputs.notionTimezone,
-      inputs.now,
-      inputs.trigger ?? "manual",
-      inputs.minimumMissingIntervalMs,
-    );
+    buildPlan(feed, inputs.existingAssignments, inputs.courses, {
+      aliases: inputs.aliases,
+      notionTimezone: inputs.notionTimezone,
+      now: inputs.now,
+      trigger: inputs.trigger ?? "manual",
+      ...(inputs.minimumMissingIntervalMs !== undefined
+        ? { minimumMissingIntervalMs: inputs.minimumMissingIntervalMs }
+        : {}),
+    });
   const beforeFields = planFields(buildFor(before));
   const afterFields = planFields(buildFor(after));
   const plan = beforeFields.map((field, position) => {

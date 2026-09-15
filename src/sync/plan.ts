@@ -3,10 +3,10 @@ import type {
   AssignmentRecord,
   CourseRecord,
   ExternalAssignment,
-  PlanningOperationCounters,
   SyncPlan,
   Trigger,
 } from "../types.js";
+import { DEFAULT_MISSING_EVIDENCE_MINIMUM_HOURS } from "../config.js";
 import { CourseCatalog, type CourseResolution } from "./course-catalog.js";
 import { buildCourseIndex, matchCourseFromIndex } from "./course-matcher.js";
 import { buildAssignmentIndex, possibleDuplicateFromIndex } from "./duplicate-detector.js";
@@ -14,6 +14,17 @@ import { detectRemovals } from "./removal-detector.js";
 import { decideAssignment, lifecycleUpdate } from "./assignment-decision.js";
 import { feedWarnings } from "./feed-diagnostics.js";
 export { feedWarnings, feedDiagnosticSummary } from "./feed-diagnostics.js";
+
+export interface PlanOptions {
+  notionTimezone: string;
+  /** Configured course aliases, keyed by source label. */
+  aliases?: Record<string, string>;
+  disableRemovals?: boolean;
+  /** The run clock; every timestamp in the plan derives from it. */
+  now?: Date;
+  trigger?: Trigger;
+  minimumMissingIntervalMs?: number;
+}
 
 function unidentifiedCourse(existing?: AssignmentRecord): CourseResolution {
   return {
@@ -28,30 +39,22 @@ function unidentifiedCourse(existing?: AssignmentRecord): CourseResolution {
 
 export function buildPlan(
   feed: AssignmentFeed,
-  existingAssignments: AssignmentRecord[],
-  courses: CourseRecord[],
-  aliases: Record<string, string>,
-  disableRemovals: boolean,
-  notionTimezone: string,
-  now = new Date(),
-  trigger: Trigger = "scheduled",
-  minimumMissingIntervalMs?: number,
+  existingAssignments: readonly AssignmentRecord[],
+  courses: readonly CourseRecord[],
+  options: PlanOptions,
 ): SyncPlan {
-  const operationCounters: PlanningOperationCounters = {
-    courseNormalizations: 0,
-    courseCandidatesExamined: 0,
-    assignmentNormalizations: 0,
-    assignmentCandidatesExamined: 0,
-  };
+  const {
+    notionTimezone,
+    aliases = {},
+    disableRemovals = false,
+    now = new Date(),
+    trigger = "scheduled",
+    minimumMissingIntervalMs = DEFAULT_MISSING_EVIDENCE_MINIMUM_HOURS * 60 * 60 * 1000,
+  } = options;
   const timestamp = now.toISOString();
   const courseIndex = buildCourseIndex(courses, aliases);
-  const assignments = buildAssignmentIndex(
-    existingAssignments,
-    courseIndex,
-    notionTimezone,
-    operationCounters,
-  );
-  const catalog = new CourseCatalog(courses, aliases, timestamp, operationCounters);
+  const assignments = buildAssignmentIndex(existingAssignments, courseIndex, notionTimezone);
+  const catalog = new CourseCatalog(courseIndex, timestamp);
   const plan: SyncPlan = {
     coursesToCreate: [],
     coursesToUpdate: [],
@@ -204,25 +207,23 @@ export function buildPlan(
   plan.warnings.push(...coursePlan.warnings);
 
   // Phase 3 sees the complete protection set; apply runs these writes only after active work succeeds.
-  const removal = detectRemovals(
-    feed,
-    existingAssignments,
-    disableRemovals,
-    protectedPages,
-    trigger,
-    now,
-    minimumMissingIntervalMs,
-    timestamp,
-  );
-  plan.assignmentsMissingEvidenceToUpdate = removal.missingEvidenceUpdates;
-  plan.assignmentsToRemove.push(...removal.removals);
-  plan.missingCandidatesObserved = removal.newlyObserved;
-  plan.warnings.push(...removal.warnings);
+  if (!disableRemovals) {
+    const removal = detectRemovals(feed, existingAssignments, {
+      protectedPageIds: protectedPages,
+      trigger,
+      now,
+      timestamp,
+      minimumMissingIntervalMs,
+    });
+    plan.assignmentsMissingEvidenceToUpdate = removal.missingEvidenceUpdates;
+    plan.assignmentsToRemove.push(...removal.removals);
+    plan.missingCandidatesObserved = removal.newlyObserved;
+    plan.warnings.push(...removal.warnings);
+  }
   plan.planning = {
     coursesConflicted: coursePlan.conflicts,
     descriptionIntegrityAuditsDeferred: deferred,
     descriptionUpdatesAvoided: avoided,
-    operations: operationCounters,
   };
   return plan;
 }

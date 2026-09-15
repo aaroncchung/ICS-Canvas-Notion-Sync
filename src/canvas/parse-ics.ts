@@ -180,7 +180,6 @@ export function parseIcs(
       ),
       quarantinedUids: [...quarantinedUids],
       events,
-      complete: true,
     },
   };
 }

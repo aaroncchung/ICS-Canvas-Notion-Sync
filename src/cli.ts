@@ -123,9 +123,6 @@ export async function run(
     const diagnosticSummary = feedDiagnosticSummary(feed);
     result.feedDiagnostics = diagnosticSummary;
     result.warnings = feedWarnings(feed);
-    if (!feed.diagnostics.complete) {
-      throw new Error("Assignment provider returned incomplete feed diagnostics");
-    }
 
     if (config.mode === "validate") {
       const warnings = feedWarnings(feed);
@@ -142,17 +139,14 @@ export async function run(
         readAssignments(gateway, config.NOTION_ASSIGNMENTS_DATA_SOURCE_ID),
         readCourses(gateway, config.NOTION_COURSES_DATA_SOURCE_ID),
       ]);
-      const plan = buildPlan(
-        feed,
-        existingAssignments,
-        courses,
-        config.aliases,
-        config.disableRemovals,
-        config.NOTION_TIMEZONE,
-        now(),
-        config.trigger,
-        config.CANVAS_MISSING_EVIDENCE_MINIMUM_HOURS * 60 * 60 * 1000,
-      );
+      const plan = buildPlan(feed, existingAssignments, courses, {
+        aliases: config.aliases,
+        disableRemovals: config.disableRemovals,
+        notionTimezone: config.NOTION_TIMEZONE,
+        now: now(),
+        trigger: config.trigger,
+        minimumMissingIntervalMs: config.CANVAS_MISSING_EVIDENCE_MINIMUM_HOURS * 60 * 60 * 1000,
+      });
       for (const warning of plan.warnings.filter(
         (item) => item.code === "course-metadata-conflict",
       )) {

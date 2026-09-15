@@ -69,7 +69,6 @@ export interface FeedDiagnostics {
   normalizedAssignmentUids: string[];
   quarantinedUids: string[];
   events: FeedEventDiagnostic[];
-  complete: boolean;
 }
 
 export interface AssignmentFeed {
@@ -113,12 +112,8 @@ export interface AssignmentRecord {
   descriptionExcerpt?: string;
   descriptionHash?: string;
   descriptionVerifiedAt?: string;
-  personalStatus?: string;
-  priority?: string;
-  assignmentType?: string;
   removed: boolean;
   canvasState?: string;
-  importedFrom?: string;
 }
 
 export interface CourseCreate {
@@ -192,7 +187,6 @@ export interface PlanningFacts {
   coursesConflicted: number;
   descriptionUpdatesAvoided: number;
   descriptionIntegrityAuditsDeferred: number;
-  operations: PlanningOperationCounters;
 }
 
 export interface SyncPlan {
@@ -309,13 +303,6 @@ export interface RunMetrics extends RequestMetrics {
   coursesConflicted: number;
   assignmentPagesCreated: number;
   assignmentPagesRecovered: number;
-}
-
-export interface PlanningOperationCounters {
-  courseNormalizations: number;
-  courseCandidatesExamined: number;
-  assignmentNormalizations: number;
-  assignmentCandidatesExamined: number;
 }
 
 export interface RunResult {

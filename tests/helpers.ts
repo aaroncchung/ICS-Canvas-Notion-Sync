@@ -31,7 +31,6 @@ export function assignmentFeed(overrides: Partial<AssignmentFeed> = {}): Assignm
       normalizedAssignmentUids: [],
       quarantinedUids: [],
       events: [],
-      complete: true,
     },
     ...overrides,
   };

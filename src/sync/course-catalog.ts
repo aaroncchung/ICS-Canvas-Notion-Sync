@@ -3,16 +3,16 @@ import type {
   CourseRecord,
   CourseUpdate,
   ExternalAssignment,
-  PlanningOperationCounters,
   PlanWarning,
 } from "../types.js";
+import { normalizeCourse } from "../course-normalization.js";
 import {
   addCanvasCourseIdToIndex,
   addCourseToIndex,
-  buildCourseIndex,
+  forkCourseIndex,
   matchCourseFromIndex,
   matchCourseMetadata,
-  normalizeCourse,
+  type CourseIndex,
   type CourseMatch,
 } from "./course-matcher.js";
 
@@ -54,29 +54,23 @@ function evidenceKeys(name?: string, code?: string, id?: string): string[] {
 export class CourseCatalog {
   private readonly entries = new Map<string, CourseEntry>();
   private readonly byPageId = new Map<string, CourseEntry>();
-  private readonly originalIndex;
-  private readonly index;
+  /** The live index also holds provisional courses and metadata planned earlier in this run. */
+  private readonly index: CourseIndex;
   private sequence = 0;
   private readonly ambiguities: Ambiguity[] = [];
 
+  /** `originalIndex` covers the courses as read from Notion and is never modified. */
   public constructor(
-    courses: CourseRecord[],
-    aliases: Record<string, string>,
+    private readonly originalIndex: CourseIndex,
     private readonly timestamp: string,
-    counters?: PlanningOperationCounters,
   ) {
-    this.originalIndex = buildCourseIndex(courses, aliases);
-    for (const course of courses) {
-      const key = `page:${course.pageId}`;
-      const entry: CourseEntry = { key, record: { ...course }, sources: [] };
+    for (const [pageId, matches] of originalIndex.byPageId) {
+      const key = `page:${pageId}`;
+      const entry: CourseEntry = { key, record: { ...matches[0]!.course }, sources: [] };
       this.entries.set(key, entry);
-      this.byPageId.set(course.pageId, entry);
+      this.byPageId.set(pageId, entry);
     }
-    this.index = buildCourseIndex(
-      [...this.entries.values()].map((entry) => entry.record),
-      aliases,
-      counters,
-    );
+    this.index = forkCourseIndex(originalIndex, (pageId) => this.byPageId.get(pageId)!.record);
   }
 
   public match(source: ExternalAssignment): CourseMatch {

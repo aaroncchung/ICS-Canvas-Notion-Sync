@@ -1,13 +1,5 @@
-import type {
-  CourseCreate,
-  CourseRecord,
-  CourseUpdate,
-  ExternalAssignment,
-  PlanningOperationCounters,
-} from "../types.js";
-import { normalizeCourse } from "./course-normalization.js";
-
-export { normalizeCourse } from "./course-normalization.js";
+import type { CourseCreate, CourseRecord, CourseUpdate, ExternalAssignment } from "../types.js";
+import { normalizeCourse } from "../course-normalization.js";
 
 export type CourseMatch =
   | {
@@ -42,32 +34,23 @@ interface IndexedAlias {
   readonly enabled: boolean;
 }
 
+type CourseMap = Map<string, IndexedCourse[]>;
+
+/** Lookup tables over course records. Courses may be added after construction; aliases are fixed. */
 export interface CourseIndex {
-  readonly byCanvasCourseId: ReadonlyMap<string, readonly IndexedCourse[]>;
-  readonly byExactTitle: ReadonlyMap<string, readonly IndexedCourse[]>;
-  readonly byExactCode: ReadonlyMap<string, readonly IndexedCourse[]>;
-  readonly byNormalizedTitle: ReadonlyMap<string, readonly IndexedCourse[]>;
-  readonly byNormalizedCode: ReadonlyMap<string, readonly IndexedCourse[]>;
-  readonly byPageId: ReadonlyMap<string, readonly IndexedCourse[]>;
+  readonly byCanvasCourseId: CourseMap;
+  readonly byExactTitle: CourseMap;
+  readonly byExactCode: CourseMap;
+  readonly byNormalizedTitle: CourseMap;
+  readonly byNormalizedCode: CourseMap;
+  readonly byPageId: CourseMap;
   readonly byNormalizedAliasSource: ReadonlyMap<string, readonly IndexedAlias[]>;
-  readonly counters?: PlanningOperationCounters;
 }
 
-function addToIndex<K>(map: Map<K, IndexedCourse[]>, key: K, value: IndexedCourse): void {
+export function addToIndex<K, V>(map: Map<K, V[]>, key: K, value: V): void {
   const matches = map.get(key);
   if (matches) matches.push(value);
   else map.set(key, [value]);
-}
-
-function mutableCourseMap(
-  map: ReadonlyMap<string, readonly IndexedCourse[]>,
-): Map<string, IndexedCourse[]> {
-  return map as Map<string, IndexedCourse[]>;
-}
-
-function normalizeIndexed(value: string, counters?: PlanningOperationCounters): string {
-  if (counters) counters.courseNormalizations += 1;
-  return normalizeCourse(value);
 }
 
 function courseUrl(assignment: ExternalAssignment): string | undefined {
@@ -95,43 +78,54 @@ function comparableUrl(value: string): string {
 }
 
 export function buildCourseIndex(
-  courses: CourseRecord[],
+  courses: readonly CourseRecord[],
   aliases: Record<string, string>,
-  counters?: PlanningOperationCounters,
-  courseKeysByPageId?: ReadonlyMap<string, string>,
 ): CourseIndex {
   const byNormalizedAliasSource = new Map<string, IndexedAlias[]>();
-  const index: CourseIndex = {
-    byCanvasCourseId: new Map<string, IndexedCourse[]>(),
-    byExactTitle: new Map<string, IndexedCourse[]>(),
-    byExactCode: new Map<string, IndexedCourse[]>(),
-    byNormalizedTitle: new Map<string, IndexedCourse[]>(),
-    byNormalizedCode: new Map<string, IndexedCourse[]>(),
-    byPageId: new Map<string, IndexedCourse[]>(),
-    byNormalizedAliasSource,
-    ...(counters ? { counters } : {}),
-  };
-
-  for (const course of courses) {
-    addCourseToIndex(
-      index,
-      course,
-      courseKeysByPageId?.get(course.pageId) ?? `page:${course.pageId}`,
-    );
-  }
-
   for (const [position, [source, target]] of Object.entries(aliases).entries()) {
-    const indexedAlias = Object.freeze({
+    addToIndex(byNormalizedAliasSource, normalizeCourse(source), {
       position,
-      target: normalizeIndexed(target, counters),
+      target: normalizeCourse(target),
       enabled: Boolean(target),
     });
-    const normalizedSource = normalizeIndexed(source, counters);
-    const matches = byNormalizedAliasSource.get(normalizedSource);
-    if (matches) matches.push(indexedAlias);
-    else byNormalizedAliasSource.set(normalizedSource, [indexedAlias]);
   }
+  const index: CourseIndex = {
+    byCanvasCourseId: new Map(),
+    byExactTitle: new Map(),
+    byExactCode: new Map(),
+    byNormalizedTitle: new Map(),
+    byNormalizedCode: new Map(),
+    byPageId: new Map(),
+    byNormalizedAliasSource,
+  };
+  for (const course of courses) addCourseToIndex(index, course);
   return index;
+}
+
+/**
+ * A copy that accepts additions without touching the original. Every course is rebound to the
+ * record `liveRecord` returns for its page; normalized labels are reused, never recomputed.
+ */
+export function forkCourseIndex(
+  index: CourseIndex,
+  liveRecord: (pageId: string) => CourseRecord,
+): CourseIndex {
+  const rebound = new Map<IndexedCourse, IndexedCourse>();
+  for (const [pageId, matches] of index.byPageId) {
+    const course = liveRecord(pageId);
+    for (const indexed of matches) rebound.set(indexed, { ...indexed, course });
+  }
+  const fork = (map: CourseMap): CourseMap =>
+    new Map([...map].map(([key, matches]) => [key, matches.map((value) => rebound.get(value)!)]));
+  return {
+    byCanvasCourseId: fork(index.byCanvasCourseId),
+    byExactTitle: fork(index.byExactTitle),
+    byExactCode: fork(index.byExactCode),
+    byNormalizedTitle: fork(index.byNormalizedTitle),
+    byNormalizedCode: fork(index.byNormalizedCode),
+    byPageId: fork(index.byPageId),
+    byNormalizedAliasSource: index.byNormalizedAliasSource,
+  };
 }
 
 export function addCourseToIndex(
@@ -143,23 +137,17 @@ export function addCourseToIndex(
     course,
     courseKey,
     position: index.byPageId.size,
-    normalizedTitle: normalizeIndexed(course.title, index.counters),
-    ...(course.courseCode
-      ? { normalizedCode: normalizeIndexed(course.courseCode, index.counters) }
-      : {}),
+    normalizedTitle: normalizeCourse(course.title),
+    ...(course.courseCode ? { normalizedCode: normalizeCourse(course.courseCode) } : {}),
   };
-  if (course.canvasCourseId) {
-    addToIndex(mutableCourseMap(index.byCanvasCourseId), course.canvasCourseId, indexed);
-  }
-  addToIndex(mutableCourseMap(index.byExactTitle), course.title, indexed);
-  if (course.courseCode !== undefined) {
-    addToIndex(mutableCourseMap(index.byExactCode), course.courseCode, indexed);
-  }
-  addToIndex(mutableCourseMap(index.byNormalizedTitle), indexed.normalizedTitle, indexed);
+  if (course.canvasCourseId) addToIndex(index.byCanvasCourseId, course.canvasCourseId, indexed);
+  addToIndex(index.byExactTitle, course.title, indexed);
+  if (course.courseCode !== undefined) addToIndex(index.byExactCode, course.courseCode, indexed);
+  addToIndex(index.byNormalizedTitle, indexed.normalizedTitle, indexed);
   if (indexed.normalizedCode !== undefined) {
-    addToIndex(mutableCourseMap(index.byNormalizedCode), indexed.normalizedCode, indexed);
+    addToIndex(index.byNormalizedCode, indexed.normalizedCode, indexed);
   }
-  addToIndex(mutableCourseMap(index.byPageId), course.pageId, indexed);
+  addToIndex(index.byPageId, course.pageId, indexed);
 }
 
 export function addCanvasCourseIdToIndex(
@@ -168,7 +156,7 @@ export function addCanvasCourseIdToIndex(
   canvasCourseId: string,
 ): void {
   for (const indexed of index.byPageId.get(course.pageId) ?? []) {
-    addToIndex(mutableCourseMap(index.byCanvasCourseId), canvasCourseId, indexed);
+    addToIndex(index.byCanvasCourseId, canvasCourseId, indexed);
   }
 }
 
@@ -183,7 +171,6 @@ function applicableAliases(index: CourseIndex, keys: readonly string[]): Indexed
 }
 
 function combinedMatches(
-  index: CourseIndex,
   keys: readonly string[],
   ...maps: Array<ReadonlyMap<string, readonly IndexedCourse[]>>
 ): readonly IndexedCourse[] {
@@ -193,19 +180,7 @@ function combinedMatches(
       for (const course of map.get(key) ?? []) matches.set(course.position, course);
     }
   }
-  const ordered = [...matches.values()].sort((left, right) => left.position - right.position);
-  if (index.counters) index.counters.courseCandidatesExamined += ordered.length;
-  return ordered;
-}
-
-function indexedMatches(
-  index: CourseIndex,
-  map: ReadonlyMap<string, readonly IndexedCourse[]>,
-  key: string,
-): readonly IndexedCourse[] {
-  const matches = map.get(key) ?? [];
-  if (index.counters) index.counters.courseCandidatesExamined += matches.length;
-  return matches;
+  return [...matches.values()].sort((left, right) => left.position - right.position);
 }
 
 export function matchCourseMetadata(
@@ -254,7 +229,7 @@ export function matchCourseFromIndex(
 
   const normalizedValues = [assignment.courseName, assignment.courseCode]
     .filter((value): value is string => Boolean(value))
-    .map((value) => normalizeIndexed(value, index.counters));
+    .map(normalizeCourse);
   const aliases = applicableAliases(index, normalizedValues);
   const resolveLevel = (
     method: string,
@@ -273,28 +248,22 @@ export function matchCourseFromIndex(
   if (assignment.canvasCourseId) {
     const match = resolveLevel(
       "canvas-course-id",
-      indexedMatches(index, index.byCanvasCourseId, assignment.canvasCourseId),
+      index.byCanvasCourseId.get(assignment.canvasCourseId) ?? [],
     );
     if (match) return match;
   }
   if (assignment.courseName) {
-    const match = resolveLevel(
-      "exact-title",
-      indexedMatches(index, index.byExactTitle, assignment.courseName),
-    );
+    const match = resolveLevel("exact-title", index.byExactTitle.get(assignment.courseName) ?? []);
     if (match) return match;
   }
   if (assignment.courseCode) {
-    const match = resolveLevel(
-      "exact-code",
-      indexedMatches(index, index.byExactCode, assignment.courseCode),
-    );
+    const match = resolveLevel("exact-code", index.byExactCode.get(assignment.courseCode) ?? []);
     if (match) return match;
   }
   if (normalizedValues.length) {
     const match = resolveLevel(
       "normalized-name-or-code",
-      combinedMatches(index, normalizedValues, index.byNormalizedTitle, index.byNormalizedCode),
+      combinedMatches(normalizedValues, index.byNormalizedTitle, index.byNormalizedCode),
     );
     if (match) return match;
   }
@@ -302,7 +271,6 @@ export function matchCourseFromIndex(
     const match = resolveLevel(
       "configured-alias",
       combinedMatches(
-        index,
         aliases.map((alias) => alias.target),
         index.byNormalizedTitle,
         index.byNormalizedCode,
@@ -317,7 +285,7 @@ export function matchCourseFromIndex(
     `Canvas Course ${assignment.canvasCourseId as string}`;
   const key = assignment.canvasCourseId
     ? `id:${assignment.canvasCourseId}`
-    : `name:${normalizeIndexed(title, index.counters)}`;
+    : `name:${normalizeCourse(title)}`;
   const newCourseUrl = courseUrl(assignment);
   return {
     kind: "create",

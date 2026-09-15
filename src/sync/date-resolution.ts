@@ -1,18 +1,10 @@
-const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
+import { calendarDate, DATE_ONLY } from "../calendar-date.js";
 
+/** The zone-local calendar date of a timestamp; an unparseable value keeps its leading date, if any. */
 export function timestampCalendarDate(value: string, timeZone: string): string | undefined {
   const milliseconds = Date.parse(value);
-  if (Number.isNaN(milliseconds)) return;
-  const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).formatToParts(milliseconds);
-  const year = parts.find((part) => part.type === "year")?.value;
-  const month = parts.find((part) => part.type === "month")?.value;
-  const day = parts.find((part) => part.type === "day")?.value;
-  return year && month && day ? `${year}-${month}-${day}` : undefined;
+  if (!Number.isNaN(milliseconds)) return calendarDate(milliseconds, timeZone);
+  return /^\d{4}-\d{2}-\d{2}/.exec(value)?.[0];
 }
 
 export function datesEqual(
@@ -27,9 +19,7 @@ export function datesEqual(
   if (leftDateOnly !== rightDateOnly) {
     const dateOnly = leftDateOnly ? left : right;
     const timestamp = leftDateOnly ? right : left;
-    const localDay = timestampCalendarDate(timestamp, timeZone);
-    if (localDay) return dateOnly === localDay;
-    return dateOnly === timestamp.match(/^\d{4}-\d{2}-\d{2}/)?.[0];
+    return dateOnly === timestampCalendarDate(timestamp, timeZone);
   }
   const leftMs = Date.parse(left);
   const rightMs = Date.parse(right);

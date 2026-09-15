@@ -1,22 +1,19 @@
-import type { AssignmentRecord, ExternalAssignment, PlanningOperationCounters } from "../types.js";
+import type { AssignmentRecord, ExternalAssignment } from "../types.js";
+import { DATE_ONLY } from "../calendar-date.js";
 import { canvasAssignmentUrlIdentity } from "../canvas/canvas-url.js";
-import { normalizeCourse, type CourseIndex } from "./course-matcher.js";
+import { normalizeCourse } from "../course-normalization.js";
+import { addToIndex, type CourseIndex } from "./course-matcher.js";
 import { datesEqual, timestampCalendarDate } from "./date-resolution.js";
 
-function normalizeTitle(value: string, counters?: PlanningOperationCounters): string {
-  if (counters) counters.assignmentNormalizations += 1;
+function normalizeTitle(value: string): string {
   return value
     .toLocaleLowerCase("en-US")
     .replace(/[^\p{L}\p{N}]+/gu, " ")
     .trim();
 }
 
-function normalizedCanvasUrl(
-  value: string,
-  counters?: PlanningOperationCounters,
-): string | undefined {
-  if (counters) counters.assignmentNormalizations += 1;
-  return canvasAssignmentUrlIdentity(value)?.normalizedUrl;
+function normalizedCanvasUrl(value: string | undefined): string | undefined {
+  return value ? canvasAssignmentUrlIdentity(value)?.normalizedUrl : undefined;
 }
 
 function assignmentId(value: string | undefined): string | undefined {
@@ -39,26 +36,13 @@ export interface AssignmentIndex {
   readonly byCanvasAssignmentId: ReadonlyMap<string, readonly IndexedAssignment[]>;
   readonly byTitleAndDueDate: ReadonlyMap<string, readonly IndexedAssignment[]>;
   readonly timeZone: string;
-  readonly counters?: PlanningOperationCounters;
-}
-
-function addToIndex<K, V>(map: Map<K, V[]>, key: K, value: V): void {
-  const matches = map.get(key);
-  if (matches) matches.push(value);
-  else map.set(key, [value]);
-}
-
-function freezeIndex<K, V>(map: Map<K, V[]>): ReadonlyMap<K, readonly V[]> {
-  for (const matches of map.values()) Object.freeze(matches);
-  return map;
 }
 
 function dueDateKeys(value: string | undefined, timeZone: string): string[] {
   if (value === undefined) return ["undefined"];
-  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) return [`date:${value}`];
+  if (DATE_ONLY.test(value)) return [`date:${value}`];
   const keys: string[] = [];
-  const calendarDate =
-    timestampCalendarDate(value, timeZone) ?? value.match(/^\d{4}-\d{2}-\d{2}/)?.[0];
+  const calendarDate = timestampCalendarDate(value, timeZone);
   if (calendarDate) keys.push(`date:${calendarDate}`);
   const milliseconds = Date.parse(value);
   keys.push(Number.isNaN(milliseconds) ? `raw:${value}` : `time:${milliseconds}`);
@@ -70,10 +54,9 @@ function titleAndDateKey(title: string, date: string): string {
 }
 
 export function buildAssignmentIndex(
-  assignments: AssignmentRecord[],
+  assignments: readonly AssignmentRecord[],
   courses: CourseIndex,
   timeZone: string,
-  counters?: PlanningOperationCounters,
 ): AssignmentIndex {
   const byUid = new Map<string, AssignmentRecord[]>();
   const byNormalizedCanvasUrl = new Map<string, IndexedAssignment[]>();
@@ -95,18 +78,16 @@ export function buildAssignmentIndex(
         }
       }
     }
-    const candidateAssignmentId = assignmentId(assignment.canvasUrl);
-    const indexed: IndexedAssignment = Object.freeze({
+    const canvasAssignmentId = assignmentId(assignment.canvasUrl);
+    const indexed: IndexedAssignment = {
       assignment,
       position,
-      normalizedTitle: normalizeTitle(assignment.title, counters),
-      normalizedUrl: assignment.canvasUrl
-        ? normalizedCanvasUrl(assignment.canvasUrl, counters)
-        : undefined,
-      ...(candidateAssignmentId ? { canvasAssignmentId: candidateAssignmentId } : {}),
+      normalizedTitle: normalizeTitle(assignment.title),
+      normalizedUrl: normalizedCanvasUrl(assignment.canvasUrl),
+      ...(canvasAssignmentId ? { canvasAssignmentId } : {}),
       courseIds,
       courseNames,
-    });
+    };
     if (indexed.normalizedUrl) {
       addToIndex(byNormalizedCanvasUrl, indexed.normalizedUrl, indexed);
     }
@@ -117,14 +98,7 @@ export function buildAssignmentIndex(
       addToIndex(byTitleAndDueDate, titleAndDateKey(indexed.normalizedTitle, dateKey), indexed);
     }
   }
-  return Object.freeze({
-    byUid: freezeIndex(byUid),
-    byNormalizedCanvasUrl: freezeIndex(byNormalizedCanvasUrl),
-    byCanvasAssignmentId: freezeIndex(byCanvasAssignmentId),
-    byTitleAndDueDate: freezeIndex(byTitleAndDueDate),
-    timeZone,
-    ...(counters ? { counters } : {}),
-  });
+  return { byUid, byNormalizedCanvasUrl, byCanvasAssignmentId, byTitleAndDueDate, timeZone };
 }
 
 function compatibleCourse(
@@ -149,9 +123,7 @@ export function possibleDuplicateFromIndex(
   resolvedCoursePageId?: string,
 ): AssignmentRecord[] {
   const candidates = new Map<number, IndexedAssignment>();
-  const sourceNormalizedUrl = source.canvasUrl
-    ? normalizedCanvasUrl(source.canvasUrl, index.counters)
-    : undefined;
+  const sourceNormalizedUrl = normalizedCanvasUrl(source.canvasUrl);
   if (sourceNormalizedUrl) {
     for (const candidate of index.byNormalizedCanvasUrl.get(sourceNormalizedUrl) ?? []) {
       candidates.set(candidate.position, candidate);
@@ -163,7 +135,7 @@ export function possibleDuplicateFromIndex(
       candidates.set(candidate.position, candidate);
     }
   }
-  const sourceTitle = normalizeTitle(source.title, index.counters);
+  const sourceTitle = normalizeTitle(source.title);
   for (const dateKey of dueDateKeys(source.dueAt, index.timeZone)) {
     for (const candidate of index.byTitleAndDueDate.get(titleAndDateKey(sourceTitle, dateKey)) ??
       []) {
@@ -172,12 +144,8 @@ export function possibleDuplicateFromIndex(
   }
   const sourceNames = [source.courseName, source.courseCode]
     .filter((value): value is string => Boolean(value))
-    .map((value) => {
-      if (index.counters) index.counters.courseNormalizations += 1;
-      return normalizeCourse(value);
-    });
+    .map(normalizeCourse);
   const ordered = [...candidates.values()].sort((left, right) => left.position - right.position);
-  if (index.counters) index.counters.assignmentCandidatesExamined += ordered.length;
   return ordered.flatMap((candidate) => {
     const assignment = candidate.assignment;
     if (assignment.uid === source.uid) return [];
