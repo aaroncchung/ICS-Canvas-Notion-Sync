@@ -5,6 +5,7 @@ import {
   GitHubApiError,
   HEALTH_ISSUE_LABEL,
   HEALTH_ISSUE_TITLE,
+  main,
   monitorScheduledHealth,
   renderHealthIssue,
   type GitHubRequest,
@@ -67,7 +68,10 @@ function fakeGitHub(overrides: Partial<FakeGitHub> = {}): FakeGitHub {
       if (method === "GET" && path === "/actions/workflows/sync.yml") {
         return Promise.resolve(github.workflow);
       }
-      if (method === "GET" && path.startsWith("/issues?")) return Promise.resolve(github.issues);
+      if (method === "GET" && path.startsWith("/issues?")) {
+        const page = Number(new URLSearchParams(path.split("?")[1]).get("page") ?? 1);
+        return Promise.resolve(github.issues.slice((page - 1) * 100, page * 100));
+      }
       if (method === "POST" && path === "/labels") {
         if (github.labelExists) return Promise.reject(new GitHubApiError("exists", 422));
         github.labelExists = true;
@@ -152,6 +156,21 @@ describe("GitHub health issue lifecycle", () => {
     expect(github.issues).toHaveLength(1);
     expect(github.issues[0]?.state).toBe("open");
     expect(github.issues[0]?.body).toContain("runs/1");
+  });
+
+  it("paginates labeled issues so newer ones cannot hide the durable issue", async () => {
+    const filler = Array.from({ length: 100 }, (_, index) => ({
+      number: 200 - index,
+      title: `Other ${index}`,
+      body: null,
+      state: "closed" as const,
+    }));
+    const github = fakeGitHub({ issues: [...filler, openIssue()] });
+    github.runs = [run(4, "failure", "2026-07-13T11:30:00Z"), ...threeFailures];
+    await monitorScheduledHealth(github.request, { now });
+    expect(github.calls.filter((call) => call === "GET /issues")).toHaveLength(2);
+    expect(github.calls).toContain("PATCH /issues/1");
+    expect(github.calls).not.toContain("POST /issues");
   });
 
   it("prefers the oldest matching issue and ignores pull requests", async () => {
@@ -325,4 +344,45 @@ describe("fetch-backed GitHub request", () => {
     await expect(request("POST", "/issues", {})).rejects.toThrow("status 503");
     expect(calls).toBe(2);
   });
+
+  it("honors a bounded Retry-After and treats a rate-limited 403 as transient", async () => {
+    const sleeps: number[] = [];
+    const responses = [
+      new Response(null, { status: 403, headers: { "retry-after": "2" } }),
+      new Response(null, { status: 403, headers: { "x-ratelimit-remaining": "0" } }),
+      new Response(null, { status: 429, headers: { "retry-after": "600" } }),
+      Response.json({ workflow_runs: [] }),
+    ];
+    const request = createGitHubRequest({
+      token,
+      repository: "o/r",
+      attempts: 4,
+      sleep: (milliseconds) => {
+        sleeps.push(milliseconds);
+        return Promise.resolve();
+      },
+      fetch: () => Promise.resolve(responses.shift()!),
+    });
+    await expect(request("GET", "/runs")).resolves.toEqual({ workflow_runs: [] });
+    expect(sleeps).toEqual([2000, 2000, 10_000]);
+
+    const exhausted = createGitHubRequest({
+      token,
+      repository: "o/r",
+      attempts: 1,
+      fetch: () => Promise.resolve(new Response(null, { status: 429 })),
+    });
+    await expect(exhausted("GET", "/runs")).rejects.toThrow("status 429; rate limited");
+  });
+});
+
+describe("environment validation", () => {
+  it.each(["Infinity", "NaN", "abc", "0", "-3"])(
+    "rejects HEALTH_ACTIVATION_GRACE_HOURS=%s before contacting GitHub",
+    async (value) => {
+      await expect(
+        main({ GITHUB_TOKEN: "t", GITHUB_REPOSITORY: "o/r", HEALTH_ACTIVATION_GRACE_HOURS: value }),
+      ).rejects.toThrow("HEALTH_ACTIVATION_GRACE_HOURS must be a positive finite number");
+    },
+  );
 });

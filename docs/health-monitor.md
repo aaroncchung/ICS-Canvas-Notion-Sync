@@ -18,7 +18,7 @@ A scheduled run that is still active and was created within the previous two hou
 
 ## Issue lifecycle
 
-The checker keeps one issue titled `Canvas–Notion sync is unhealthy` with the `sync-failure` label. The label is created on first use, and the oldest matching issue is reused; pull requests returned by the issues endpoint are ignored.
+The checker keeps one issue titled `Canvas–Notion sync is unhealthy` with the `sync-failure` label. The label is created on first use, and the oldest matching issue is reused. The labeled-issue listing is paginated (up to ten pages of 100), so newer labeled issues can never hide the durable one, and pull requests returned by the issues endpoint are ignored.
 
 - Unhealthy and no issue exists: the issue is created.
 - Unhealthy and the issue is closed: the same issue is reopened with a fresh body.
@@ -30,7 +30,9 @@ Closing patches the issue first and then adds one comment naming the recovering 
 
 ## GitHub API access
 
-Requests go to the repository's `actions` and `issues` endpoints with the workflow token. Reads and idempotent `PATCH` requests retry twice on network failures, rate limiting, and server errors; `POST` requests are never retried. Error messages include the method, path, and status only, never the token or the response body.
+Requests go to the repository's `actions` and `issues` endpoints with the workflow token. Reads and idempotent `PATCH` requests retry twice on network failures, server errors, and rate limiting, where rate limiting means a `429` or a `403` carrying `Retry-After` or `x-ratelimit-remaining: 0`. A `Retry-After` header sets the delay, capped at ten seconds; otherwise the delay grows by one second per attempt. `POST` requests are never retried. Error messages include the method, path, and status only, never the token or the response body.
+
+`HEALTH_ACTIVATION_GRACE_HOURS` must be a positive finite number; anything else fails the check before any request is made.
 
 ## Data and privacy
 

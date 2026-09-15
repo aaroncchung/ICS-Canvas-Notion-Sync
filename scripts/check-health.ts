@@ -9,6 +9,9 @@ export const SUCCESS_WATCHDOG_HOURS = 13;
 export const ACTIVE_RUN_GRACE_HOURS = 2;
 const WORKFLOW_FILE = "sync.yml";
 const RUNS_SHOWN = 5;
+const PAGE_SIZE = 100;
+const MAX_ISSUE_PAGES = 10;
+const MAX_RETRY_AFTER_MS = 10_000;
 const HOUR = 60 * 60 * 1000;
 
 export interface WorkflowRun {
@@ -205,16 +208,31 @@ export function createGitHubRequest(options: GitHubRequestOptions): GitHubReques
         return response.status === 204 ? undefined : ((await response.json()) as unknown);
       }
       const status = response?.status;
-      const transient = status === undefined || status === 429 || status >= 500;
+      const retryAfterSeconds = Number(response?.headers.get("retry-after"));
+      // GitHub signals secondary rate limits with 403 as well as 429.
+      const rateLimited =
+        status === 429 ||
+        (status === 403 &&
+          (retryAfterSeconds > 0 || response?.headers.get("x-ratelimit-remaining") === "0"));
+      const transient = status === undefined || rateLimited || status >= 500;
       if (method !== "POST" && transient && attempt < attempts) {
-        await sleep(attempt * 1000);
+        await sleep(
+          retryAfterSeconds > 0
+            ? Math.min(retryAfterSeconds * 1000, MAX_RETRY_AFTER_MS)
+            : attempt * 1000,
+        );
         continue;
       }
       const endpoint = `${method} ${path.split("?")[0]}`;
+      const hint = rateLimited
+        ? "; rate limited"
+        : status === 401 || status === 403
+          ? "; check the workflow token permissions"
+          : "";
       throw new GitHubApiError(
         status === undefined
           ? `GitHub API ${endpoint} failed before receiving a response`
-          : `GitHub API ${endpoint} failed with status ${status}${status === 401 || status === 403 ? "; check the workflow token permissions" : ""}`,
+          : `GitHub API ${endpoint} failed with status ${status}${hint}`,
         status,
       );
     }
@@ -238,6 +256,20 @@ export interface HealthMonitorOptions {
   activationGraceHours?: number;
 }
 
+/** Every labeled issue, paginated so an old durable issue is never hidden behind newer ones. */
+async function listLabeledIssues(request: GitHubRequest): Promise<HealthIssue[]> {
+  const issues: HealthIssue[] = [];
+  for (let page = 1; page <= MAX_ISSUE_PAGES; page += 1) {
+    const result = (await request(
+      "GET",
+      `/issues?state=all&labels=${HEALTH_ISSUE_LABEL}&per_page=${PAGE_SIZE}&page=${page}`,
+    )) as HealthIssue[];
+    issues.push(...result);
+    if (result.length < PAGE_SIZE) break;
+  }
+  return issues;
+}
+
 export async function monitorScheduledHealth(
   request: GitHubRequest,
   options: HealthMonitorOptions = {},
@@ -245,7 +277,7 @@ export async function monitorScheduledHealth(
   const [runs, workflow, issues] = (await Promise.all([
     request("GET", `/actions/workflows/${WORKFLOW_FILE}/runs?event=schedule&per_page=100`),
     request("GET", `/actions/workflows/${WORKFLOW_FILE}`),
-    request("GET", `/issues?state=all&labels=${HEALTH_ISSUE_LABEL}&per_page=100`),
+    listLabeledIssues(request),
   ])) as [{ workflow_runs: WorkflowRun[] }, Workflow, HealthIssue[]];
   const assessment = assessScheduledHealth(
     runs.workflow_runs,
@@ -288,8 +320,8 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
   if (!token || !repository) throw new Error("GITHUB_TOKEN and GITHUB_REPOSITORY are required");
   const grace = env.HEALTH_ACTIVATION_GRACE_HOURS?.trim();
   const activationGraceHours = grace ? Number(grace) : DEFAULT_ACTIVATION_GRACE_HOURS;
-  if (!(activationGraceHours > 0)) {
-    throw new Error("HEALTH_ACTIVATION_GRACE_HOURS must be a positive number");
+  if (!Number.isFinite(activationGraceHours) || activationGraceHours <= 0) {
+    throw new Error("HEALTH_ACTIVATION_GRACE_HOURS must be a positive finite number");
   }
   const request = createGitHubRequest({
     token,
