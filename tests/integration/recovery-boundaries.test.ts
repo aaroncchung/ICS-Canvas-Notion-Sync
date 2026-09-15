@@ -1,11 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { pino } from "pino";
-import { OfficialNotionGateway } from "../../src/notion/client.js";
+import { OfficialNotionGateway } from "../../src/notion/client.ts";
 import {
   MANAGED_DESCRIPTION_TITLE,
   replaceManagedDescription,
-} from "../../src/notion/descriptions.js";
-import { FakeGateway, readManagedDescription } from "../helpers.js";
+} from "../../src/notion/descriptions.ts";
+import { FakeGateway, readManagedDescription } from "../helpers.ts";
 
 afterEach(() => vi.unstubAllGlobals());
 

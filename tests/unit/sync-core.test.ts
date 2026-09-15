@@ -1,11 +1,11 @@
-import { runMetrics } from "../../src/observability/run-report.js";
+import { runMetrics } from "../../src/observability/run-report.ts";
 import { describe, expect, it } from "vitest";
-import { readAssignments } from "../../src/notion/assignments.js";
-import { managedDescriptionHash } from "../../src/notion/descriptions.js";
-import { buildPlan } from "../../src/sync/plan.js";
-import { ApplyPlanError, applyPlan, plannedOperations } from "../../src/sync/reconcile.js";
-import type { AssignmentRecord, CourseRecord, ExternalAssignment } from "../../src/types.js";
-import { assignmentFeed, config, FakeGateway } from "../helpers.js";
+import { readAssignments } from "../../src/notion/assignments.ts";
+import { managedDescriptionHash } from "../../src/notion/descriptions.ts";
+import { buildPlan } from "../../src/sync/plan.ts";
+import { ApplyPlanError, applyPlan, plannedOperations } from "../../src/sync/reconcile.ts";
+import type { AssignmentRecord, CourseRecord, ExternalAssignment } from "../../src/types.ts";
+import { assignmentFeed, config, FakeGateway } from "../helpers.ts";
 
 const now = new Date("2026-07-13T12:00:00Z");
 const timezone = "America/Los_Angeles";

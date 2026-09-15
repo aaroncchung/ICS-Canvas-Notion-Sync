@@ -1,8 +1,8 @@
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { describe, expect, it } from "vitest";
-import { buildJobSummary, run, workflowAnnotations } from "../../src/cli.js";
-import type { RunResult } from "../../src/types.js";
+import { buildJobSummary, run, workflowAnnotations } from "../../src/cli.ts";
+import type { RunResult } from "../../src/types.ts";
 import {
   assignmentFeed,
   config,
@@ -10,7 +10,7 @@ import {
   FakeProvider,
   runCounts,
   runResult,
-} from "../helpers.js";
+} from "../helpers.ts";
 
 const emptyFeed = assignmentFeed();
 

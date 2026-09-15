@@ -1,26 +1,26 @@
-import { failureSummary, reportLines, warningSummary } from "./observability/report-content.js";
+import { failureSummary, reportLines, warningSummary } from "./observability/report-content.ts";
 import {
   createRunMetrics,
   createRequestMetrics,
   emptyCounts,
   finalizeRun,
   requestDifference,
-} from "./observability/run-report.js";
+} from "./observability/run-report.ts";
 import { appendFile } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
 import type { Logger } from "pino";
-import { loadConfig, type AppConfig } from "./config.js";
-import { CanvasIcsProvider } from "./canvas/provider.js";
-import { readAssignments } from "./notion/assignments.js";
-import { OfficialNotionGateway, settleReads, type NotionGateway } from "./notion/client.js";
-import { readCourses } from "./notion/courses.js";
-import { validateNotionSchemas } from "./notion/schema-validator.js";
-import { writeSyncLog } from "./notion/sync-log.js";
-import { createLogger } from "./observability/logger.js";
-import { redactText, safeDiagnostic, safeError } from "./observability/redaction.js";
-import { buildPlan, feedDiagnosticSummary, feedWarnings } from "./sync/plan.js";
-import { ApplyPlanError, applyPlan } from "./sync/reconcile.js";
-import type { AssignmentProvider, RunResult } from "./types.js";
+import { loadConfig, type AppConfig } from "./config.ts";
+import { CanvasIcsProvider } from "./canvas/provider.ts";
+import { readAssignments } from "./notion/assignments.ts";
+import { OfficialNotionGateway, settleReads, type NotionGateway } from "./notion/client.ts";
+import { readCourses } from "./notion/courses.ts";
+import { validateNotionSchemas } from "./notion/schema-validator.ts";
+import { writeSyncLog } from "./notion/sync-log.ts";
+import { createLogger } from "./observability/logger.ts";
+import { redactText, safeDiagnostic, safeError } from "./observability/redaction.ts";
+import { buildPlan, feedDiagnosticSummary, feedWarnings } from "./sync/plan.ts";
+import { ApplyPlanError, applyPlan } from "./sync/reconcile.ts";
+import type { AssignmentProvider, RunResult } from "./types.ts";
 
 export interface RunDependencies {
   gateway?: NotionGateway;

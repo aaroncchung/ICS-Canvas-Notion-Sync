@@ -1,30 +1,30 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { pino } from "pino";
-import { blockBatch, paragraph, paragraphs, toggle, type Block } from "../../src/notion/blocks.js";
-import { OfficialNotionGateway } from "../../src/notion/client.js";
+import { blockBatch, paragraph, paragraphs, toggle, type Block } from "../../src/notion/blocks.ts";
+import { OfficialNotionGateway } from "../../src/notion/client.ts";
 import {
   MANAGED_DESCRIPTION_TITLE,
   PENDING_MANAGED_DESCRIPTION_TITLE,
   managedDescriptionHash,
   replaceManagedDescription,
   waitForTemplate,
-} from "../../src/notion/descriptions.js";
+} from "../../src/notion/descriptions.ts";
 import {
   blockText,
   createManagedSectionSnapshot,
   reconcileManagedSection,
-} from "../../src/notion/managed-section.js";
-import { MANAGED_SYNC_LOG_TITLE, writeSyncLog } from "../../src/notion/sync-log.js";
-import { operationSections } from "../../src/observability/report-content.js";
-import { runMetrics, workCounts } from "../../src/observability/run-report.js";
+} from "../../src/notion/managed-section.ts";
+import { MANAGED_SYNC_LOG_TITLE, writeSyncLog } from "../../src/notion/sync-log.ts";
+import { operationSections } from "../../src/observability/report-content.ts";
+import { runMetrics, workCounts } from "../../src/observability/run-report.ts";
 import {
   ApplyPlanError,
   applyPlan,
   emptyExecutionResult,
   plannedOperations,
-} from "../../src/sync/reconcile.js";
-import type { SyncPlan } from "../../src/types.js";
-import { config, FakeGateway, readManagedDescription, runResult } from "../helpers.js";
+} from "../../src/sync/reconcile.ts";
+import type { SyncPlan } from "../../src/types.ts";
+import { config, FakeGateway, readManagedDescription, runResult } from "../helpers.ts";
 import { setTimeout as sleep } from "node:timers/promises";
 
 vi.mock("node:timers/promises", () => ({ setTimeout: vi.fn(async () => {}) }));

@@ -1,5 +1,5 @@
-import type { CourseCreate, CourseRecord, CourseUpdate, ExternalAssignment } from "../types.js";
-import { normalizeCourse } from "../course-normalization.js";
+import type { CourseCreate, CourseRecord, CourseUpdate, ExternalAssignment } from "../types.ts";
+import { normalizeCourse } from "../course-normalization.ts";
 
 export type CourseMatch =
   | {

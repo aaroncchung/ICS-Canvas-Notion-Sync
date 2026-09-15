@@ -5,15 +5,15 @@ import type {
   ExternalAssignment,
   SyncPlan,
   Trigger,
-} from "../types.js";
-import { DEFAULT_MISSING_EVIDENCE_MINIMUM_HOURS } from "../config.js";
-import { CourseCatalog, type CourseResolution } from "./course-catalog.js";
-import { buildCourseIndex, matchCourseFromIndex } from "./course-matcher.js";
-import { buildAssignmentIndex, possibleDuplicateFromIndex } from "./duplicate-detector.js";
-import { detectRemovals } from "./removal-detector.js";
-import { decideAssignment, lifecycleUpdate } from "./assignment-decision.js";
-import { feedWarnings } from "./feed-diagnostics.js";
-export { feedWarnings, feedDiagnosticSummary } from "./feed-diagnostics.js";
+} from "../types.ts";
+import { DEFAULT_MISSING_EVIDENCE_MINIMUM_HOURS } from "../config.ts";
+import { CourseCatalog, type CourseResolution } from "./course-catalog.ts";
+import { buildCourseIndex, matchCourseFromIndex } from "./course-matcher.ts";
+import { buildAssignmentIndex, possibleDuplicateFromIndex } from "./duplicate-detector.ts";
+import { detectRemovals } from "./removal-detector.ts";
+import { decideAssignment, lifecycleUpdate } from "./assignment-decision.ts";
+import { feedWarnings } from "./feed-diagnostics.ts";
+export { feedWarnings, feedDiagnosticSummary } from "./feed-diagnostics.ts";
 
 export interface PlanOptions {
   notionTimezone: string;

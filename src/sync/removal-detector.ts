@@ -5,7 +5,7 @@ import type {
   AssignmentRemoval,
   PlanWarning,
   Trigger,
-} from "../types.js";
+} from "../types.ts";
 
 const DAY = 86_400_000;
 

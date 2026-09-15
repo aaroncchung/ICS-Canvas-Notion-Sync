@@ -1,5 +1,5 @@
-import type { AppConfig } from "../config.js";
-import { settleReads, type NotionGateway } from "./client.js";
+import type { AppConfig } from "../config.ts";
+import { settleReads, type NotionGateway } from "./client.ts";
 
 type Expected = Record<string, string | string[]>;
 

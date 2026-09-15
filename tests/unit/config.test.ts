@@ -7,7 +7,7 @@ import {
   parseAssignmentTypeRules,
   parseCourseAliases,
   parseJsonConfiguration,
-} from "../../src/config.js";
+} from "../../src/config.ts";
 
 const environment = {
   CANVAS_ICS_URL: "https://canvas.example.edu/feed.ics",

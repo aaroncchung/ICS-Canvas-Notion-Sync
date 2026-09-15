@@ -1,9 +1,9 @@
-import type { AssignmentRecord, ExternalAssignment } from "../types.js";
-import { DATE_ONLY } from "../calendar-date.js";
-import { canvasAssignmentUrlIdentity } from "../canvas/canvas-url.js";
-import { normalizeCourse } from "../course-normalization.js";
-import { addToIndex, type CourseIndex } from "./course-matcher.js";
-import { datesEqual, timestampCalendarDate } from "./date-resolution.js";
+import type { AssignmentRecord, ExternalAssignment } from "../types.ts";
+import { DATE_ONLY } from "../calendar-date.ts";
+import { canvasAssignmentUrlIdentity } from "../canvas/canvas-url.ts";
+import { normalizeCourse } from "../course-normalization.ts";
+import { addToIndex, type CourseIndex } from "./course-matcher.ts";
+import { datesEqual, timestampCalendarDate } from "./date-resolution.ts";
 
 function normalizeTitle(value: string): string {
   return value

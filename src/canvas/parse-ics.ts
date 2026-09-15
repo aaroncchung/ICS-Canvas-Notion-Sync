@@ -1,11 +1,11 @@
 import ical from "node-ical";
-import type { AssignmentFeed, FeedEventDiagnostic } from "../types.js";
-import { classifyEvent } from "./classify-event.js";
+import type { AssignmentFeed, FeedEventDiagnostic } from "../types.ts";
+import { classifyEvent } from "./classify-event.ts";
 import {
   normalizeAssignment,
   type AssignmentTypeMatcher,
   type RawCalendarEvent,
-} from "./normalize-assignment.js";
+} from "./normalize-assignment.ts";
 
 function asString(value: unknown): string | undefined {
   return typeof value === "string" ? value : undefined;

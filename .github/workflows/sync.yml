@@ -42,8 +42,8 @@ jobs:
           node-version: 24
           cache: npm
           cache-dependency-path: package-lock.json
-      - run: npm ci --no-audit --fund=false
-      - run: npm run build
+      # Node 24 runs the TypeScript sources directly, so only runtime dependencies are installed.
+      - run: npm ci --omit=dev --no-audit --fund=false
       - name: Synchronize assignments
         shell: bash
         env:
@@ -60,9 +60,9 @@ jobs:
         run: |
           if [[ "$RUN_MODE" == "compare-course-codes" ]]; then
             # Read-only: compares legacy and current course-code extraction against the real feed.
-            node dist/scripts/course-code-diff.js
+            node scripts/course-code-diff.ts
             exit
           fi
           args=(--mode "$RUN_MODE" --trigger "$RUN_TRIGGER")
           if [[ "$DISABLE_REMOVALS" == "true" ]]; then args+=(--disable-removals); fi
-          node dist/src/cli.js "${args[@]}"
+          node src/cli.ts "${args[@]}"

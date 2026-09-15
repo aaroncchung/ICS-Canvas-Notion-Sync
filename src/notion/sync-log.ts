@@ -1,12 +1,12 @@
-import type { AppConfig } from "../config.js";
-import { workflowUrl } from "../config.js";
-import { reportSections } from "../observability/report-content.js";
-import type { RunResult } from "../types.js";
-import { AmbiguousNotionWriteError, isAmbiguousWriteError, type NotionGateway } from "./client.js";
-import { createManagedSectionSnapshot, reconcileManagedSection } from "./managed-section.js";
-import { date, number, pageId, select, text, title, url } from "./property-helpers.js";
-import { pollForUniquePage, type VisibilityPollingOptions } from "./recovery.js";
-import { blockBatch, paragraphs, toggle, type Block } from "./blocks.js";
+import type { AppConfig } from "../config.ts";
+import { workflowUrl } from "../config.ts";
+import { reportSections } from "../observability/report-content.ts";
+import type { RunResult } from "../types.ts";
+import { AmbiguousNotionWriteError, isAmbiguousWriteError, type NotionGateway } from "./client.ts";
+import { createManagedSectionSnapshot, reconcileManagedSection } from "./managed-section.ts";
+import { date, number, pageId, select, text, title, url } from "./property-helpers.ts";
+import { pollForUniquePage, type VisibilityPollingOptions } from "./recovery.ts";
+import { blockBatch, paragraphs, toggle, type Block } from "./blocks.ts";
 
 export const MANAGED_SYNC_LOG_TITLE = "Canvas Sync Result — managed by sync";
 export const PENDING_MANAGED_SYNC_LOG_TITLE =

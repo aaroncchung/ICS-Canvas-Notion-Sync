@@ -1,21 +1,23 @@
 import type { Logger } from "pino";
-import type { AppConfig } from "../config.js";
-import type { AssignmentFeed, AssignmentProvider } from "../types.js";
-import { fetchFeed } from "./fetch-feed.js";
-import { parseIcs } from "./parse-ics.js";
+import type { AppConfig } from "../config.ts";
+import type { AssignmentFeed, AssignmentProvider } from "../types.ts";
+import { fetchFeed } from "./fetch-feed.ts";
+import { parseIcs } from "./parse-ics.ts";
 import {
   compileAssignmentTypeMatcher,
   type AssignmentTypeMatcher,
-} from "./normalize-assignment.js";
+} from "./normalize-assignment.ts";
 
 export class CanvasIcsProvider implements AssignmentProvider {
+  private readonly config: AppConfig;
+  private readonly logger: Logger;
+  private readonly fetchImpl: typeof fetch;
   private readonly assignmentTypeMatcher: AssignmentTypeMatcher;
 
-  public constructor(
-    private readonly config: AppConfig,
-    private readonly logger: Logger,
-    private readonly fetchImpl: typeof fetch = fetch,
-  ) {
+  public constructor(config: AppConfig, logger: Logger, fetchImpl: typeof fetch = fetch) {
+    this.config = config;
+    this.logger = logger;
+    this.fetchImpl = fetchImpl;
     this.assignmentTypeMatcher = compileAssignmentTypeMatcher(config.assignmentTypeRules);
   }
 

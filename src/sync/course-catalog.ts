@@ -4,8 +4,8 @@ import type {
   CourseUpdate,
   ExternalAssignment,
   PlanWarning,
-} from "../types.js";
-import { normalizeCourse } from "../course-normalization.js";
+} from "../types.ts";
+import { normalizeCourse } from "../course-normalization.ts";
 import {
   addCanvasCourseIdToIndex,
   addCourseToIndex,
@@ -14,7 +14,7 @@ import {
   matchCourseMetadata,
   type CourseIndex,
   type CourseMatch,
-} from "./course-matcher.js";
+} from "./course-matcher.ts";
 
 interface CourseEntry {
   key: string;
@@ -59,11 +59,13 @@ export class CourseCatalog {
   private sequence = 0;
   private readonly ambiguities: Ambiguity[] = [];
 
-  /** `originalIndex` covers the courses as read from Notion and is never modified. */
-  public constructor(
-    private readonly originalIndex: CourseIndex,
-    private readonly timestamp: string,
-  ) {
+  /** Covers the courses as read from Notion and is never modified. */
+  private readonly originalIndex: CourseIndex;
+  private readonly timestamp: string;
+
+  public constructor(originalIndex: CourseIndex, timestamp: string) {
+    this.originalIndex = originalIndex;
+    this.timestamp = timestamp;
     for (const [pageId, matches] of originalIndex.byPageId) {
       const key = `page:${pageId}`;
       const entry: CourseEntry = { key, record: { ...matches[0]!.course }, sources: [] };

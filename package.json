@@ -8,12 +8,11 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
-    "sync": "tsx src/cli.ts",
-    "health-check": "tsx scripts/check-health.ts",
+    "sync": "node src/cli.ts",
+    "health-check": "node scripts/check-health.ts",
     "lint": "eslint .",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "typecheck": "tsc --noEmit",
     "check:types-and-build": "tsc -b tsconfig.build.json tsconfig.test.json",
     "test": "vitest run",
     "test:unit": "vitest run tests/unit",
@@ -35,12 +34,8 @@
     "eslint": "10.6.0",
     "globals": "16.5.0",
     "prettier": "3.6.2",
-    "tsx": "4.21.0",
     "typescript": "5.9.3",
     "typescript-eslint": "8.63.0",
     "vitest": "4.1.11"
-  },
-  "overrides": {
-    "esbuild": "0.28.1"
   }
 }

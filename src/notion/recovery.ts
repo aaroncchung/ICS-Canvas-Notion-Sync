@@ -1,4 +1,4 @@
-import { AmbiguousNotionWriteError } from "./client.js";
+import { AmbiguousNotionWriteError } from "./client.ts";
 import { setTimeout as sleep } from "node:timers/promises";
 
 export interface VisibilityPollingOptions {

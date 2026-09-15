@@ -1,15 +1,15 @@
-import type { AppConfig } from "../config.js";
-import { safeError } from "../observability/redaction.js";
-import { createAssignment, updateAssignment } from "../notion/assignments.js";
-import type { Block } from "../notion/blocks.js";
-import { errorStatus, isAmbiguousWriteError, type NotionGateway } from "../notion/client.js";
-import { createCourse, updateCourse } from "../notion/courses.js";
+import type { AppConfig } from "../config.ts";
+import { safeError } from "../observability/redaction.ts";
+import { createAssignment, updateAssignment } from "../notion/assignments.ts";
+import type { Block } from "../notion/blocks.ts";
+import { errorStatus, isAmbiguousWriteError, type NotionGateway } from "../notion/client.ts";
+import { createCourse, updateCourse } from "../notion/courses.ts";
 import {
   managedDescriptionHash,
   replaceManagedDescription,
   waitForTemplate,
   type TemplateWaitOptions,
-} from "../notion/descriptions.js";
+} from "../notion/descriptions.ts";
 import type {
   AppliedSyncOperation,
   AssignmentExecutionState,
@@ -20,8 +20,8 @@ import type {
   SyncOperation,
   SyncOperationKind,
   SyncPlan,
-} from "../types.js";
-import { compilePlan, operationOf, type AssignmentWork, type SyncCommand } from "./commands.js";
+} from "../types.ts";
+import { compilePlan, operationOf, type AssignmentWork, type SyncCommand } from "./commands.ts";
 
 function operationError(error: unknown): string {
   const status = errorStatus(error);
@@ -35,14 +35,13 @@ export function plannedOperations(plan: SyncPlan): SyncOperation[] {
 }
 
 export class ApplyPlanError extends Error {
+  public readonly execution: SyncExecutionResult;
   public readonly operation: SyncOperationKind | undefined;
 
-  public constructor(
-    public readonly execution: SyncExecutionResult,
-    message: string,
-  ) {
+  public constructor(execution: SyncExecutionResult, message: string) {
     super(message);
     this.name = "ApplyPlanError";
+    this.execution = execution;
     this.operation = execution.failedOperation?.kind;
   }
 }

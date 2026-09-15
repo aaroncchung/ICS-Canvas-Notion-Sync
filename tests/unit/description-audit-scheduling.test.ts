@@ -4,7 +4,7 @@ import {
   DESCRIPTION_INTEGRITY_MINIMUM_AGE_DAYS,
   descriptionIntegrityAuditDecision,
   descriptionIntegrityAuditSlot,
-} from "../../src/notion/descriptions.js";
+} from "../../src/notion/descriptions.ts";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 

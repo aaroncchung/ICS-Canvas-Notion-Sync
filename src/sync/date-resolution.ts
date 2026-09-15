@@ -1,4 +1,4 @@
-import { calendarDate, DATE_ONLY } from "../calendar-date.js";
+import { calendarDate, DATE_ONLY } from "../calendar-date.ts";
 
 /** The zone-local calendar date of a timestamp; an unparseable value keeps its leading date, if any. */
 export function timestampCalendarDate(value: string, timeZone: string): string | undefined {

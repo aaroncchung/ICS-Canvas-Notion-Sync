@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { classifyEvent } from "../../src/canvas/classify-event.js";
-import { buildCourseIndex, matchCourseFromIndex } from "../../src/sync/course-matcher.js";
+import { classifyEvent } from "../../src/canvas/classify-event.ts";
+import { buildCourseIndex, matchCourseFromIndex } from "../../src/sync/course-matcher.ts";
 
 const assignmentUrl = "https://canvas.example.edu/courses/42/assignments/99";
 

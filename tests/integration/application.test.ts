@@ -1,25 +1,25 @@
-import { createRunMetrics, runMetrics, workCounts } from "../../src/observability/run-report.js";
+import { createRunMetrics, runMetrics, workCounts } from "../../src/observability/run-report.ts";
 import { describe, expect, it } from "vitest";
-import { run } from "../../src/cli.js";
-import { createAssignment, readAssignments } from "../../src/notion/assignments.js";
-import { withRetry } from "../../src/notion/client.js";
-import { createCourse } from "../../src/notion/courses.js";
+import { run } from "../../src/cli.ts";
+import { createAssignment, readAssignments } from "../../src/notion/assignments.ts";
+import { withRetry } from "../../src/notion/client.ts";
+import { createCourse } from "../../src/notion/courses.ts";
 import {
   MANAGED_DESCRIPTION_TITLE,
   PENDING_MANAGED_DESCRIPTION_TITLE,
   managedDescriptionHash,
   replaceManagedDescription,
   waitForTemplate,
-} from "../../src/notion/descriptions.js";
-import { blockText } from "../../src/notion/managed-section.js";
+} from "../../src/notion/descriptions.ts";
+import { blockText } from "../../src/notion/managed-section.ts";
 import {
   MANAGED_SYNC_LOG_TITLE,
   PENDING_MANAGED_SYNC_LOG_TITLE,
   writeSyncLog,
-} from "../../src/notion/sync-log.js";
-import { safeDiagnostic, safeError } from "../../src/observability/redaction.js";
-import { buildPlan } from "../../src/sync/plan.js";
-import { ApplyPlanError, applyPlan } from "../../src/sync/reconcile.js";
+} from "../../src/notion/sync-log.ts";
+import { safeDiagnostic, safeError } from "../../src/observability/redaction.ts";
+import { buildPlan } from "../../src/sync/plan.ts";
+import { ApplyPlanError, applyPlan } from "../../src/sync/reconcile.ts";
 import type {
   AssignmentCreate,
   AssignmentFeed,
@@ -28,7 +28,7 @@ import type {
   ExternalAssignment,
   RunResult,
   SyncPlan,
-} from "../../src/types.js";
+} from "../../src/types.ts";
 import {
   assignmentFeed,
   config,
@@ -37,7 +37,7 @@ import {
   readManagedDescription,
   runCounts,
   runResult,
-} from "../helpers.js";
+} from "../helpers.ts";
 
 const emptyFeed = assignmentFeed();
 const counts = runCounts;

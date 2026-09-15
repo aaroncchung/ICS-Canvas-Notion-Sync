@@ -1,13 +1,13 @@
-import { createRunMetrics, createRequestMetrics } from "../src/observability/run-report.js";
-import type { AppConfig } from "../src/config.js";
-import type { AssignmentFeed, AssignmentProvider, RunCounts, RunResult } from "../src/types.js";
-import { type NotionGateway } from "../src/notion/client.js";
+import { createRunMetrics, createRequestMetrics } from "../src/observability/run-report.ts";
+import type { AppConfig } from "../src/config.ts";
+import type { AssignmentFeed, AssignmentProvider, RunCounts, RunResult } from "../src/types.ts";
+import { type NotionGateway } from "../src/notion/client.ts";
 import {
   compileAssignmentTypeMatcher,
   type AssignmentTypeMatcher,
-} from "../src/canvas/normalize-assignment.js";
-import { MANAGED_DESCRIPTION_TITLE } from "../src/notion/descriptions.js";
-import { blockText } from "../src/notion/managed-section.js";
+} from "../src/canvas/normalize-assignment.ts";
+import { MANAGED_DESCRIPTION_TITLE } from "../src/notion/descriptions.ts";
+import { blockText } from "../src/notion/managed-section.ts";
 
 const rules: AppConfig["assignmentTypeRules"] = [
   { type: "Quiz", patterns: ["quiz"] },
@@ -429,7 +429,10 @@ export class FakeGateway implements NotionGateway {
 }
 
 export class FakeProvider implements AssignmentProvider {
-  public constructor(private readonly feed: AssignmentFeed) {}
+  private readonly feed: AssignmentFeed;
+  public constructor(feed: AssignmentFeed) {
+    this.feed = feed;
+  }
   public fetchAssignments() {
     return Promise.resolve(this.feed);
   }

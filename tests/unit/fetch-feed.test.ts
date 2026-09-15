@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { fetchFeed } from "../../src/canvas/fetch-feed.js";
+import { fetchFeed } from "../../src/canvas/fetch-feed.ts";
 
 const MAX_FEED_BYTES = 10 * 1024 * 1024;
 const TOO_LARGE_ERROR = "Canvas feed exceeds the 10 MiB safety limit";
