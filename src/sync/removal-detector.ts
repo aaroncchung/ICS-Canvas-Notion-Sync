@@ -8,7 +8,6 @@ import type {
 } from "../types.js";
 
 const DAY = 86_400_000;
-export const MINIMUM_MISSING_EVIDENCE_INTERVAL_MS = 6 * 60 * 60 * 1000;
 
 export function hasAssignmentSignals(feed: AssignmentFeed): boolean {
   return (
@@ -32,7 +31,6 @@ function hasDuplicateSourceData(feed: AssignmentFeed): boolean {
 
 export function absenceRemovalSafe(feed: AssignmentFeed): boolean {
   return (
-    feed.diagnostics.complete &&
     !hasUnidentifiableAssignmentLikeEvent(feed) &&
     !hasDuplicateSourceData(feed) &&
     feed.diagnostics.totalEvents < 1000 &&
@@ -47,15 +45,21 @@ export interface RemovalEvidenceResult {
   warnings: PlanWarning[];
 }
 
+export interface RemovalEvidenceOptions {
+  /** Pages that other decisions in this run already act on or deliberately preserve. */
+  protectedPageIds: ReadonlySet<string>;
+  trigger: Trigger;
+  now: Date;
+  /** `now` as the ISO string shared by every timestamp the plan writes. */
+  timestamp: string;
+  /** How long an assignment must have been missing before a second absence removes it. */
+  minimumMissingIntervalMs: number;
+}
+
 export function detectRemovals(
   feed: AssignmentFeed,
-  existing: AssignmentRecord[],
-  disableRemovals: boolean,
-  protectedPageIds: ReadonlySet<string>,
-  trigger: Trigger,
-  now = new Date(),
-  minimumMissingIntervalMs = MINIMUM_MISSING_EVIDENCE_INTERVAL_MS,
-  planTimestamp?: string,
+  existing: readonly AssignmentRecord[],
+  { protectedPageIds, trigger, now, timestamp, minimumMissingIntervalMs }: RemovalEvidenceOptions,
 ): RemovalEvidenceResult {
   const result: RemovalEvidenceResult = {
     removals: [],
@@ -63,9 +67,8 @@ export function detectRemovals(
     newlyObserved: 0,
     warnings: [],
   };
-  if (disableRemovals) return result;
 
-  if (!feed.diagnostics.complete || hasUnidentifiableAssignmentLikeEvent(feed)) {
+  if (hasUnidentifiableAssignmentLikeEvent(feed)) {
     result.warnings.push({
       code: "removals-unsafe-parse",
       message: "Missing evidence was not advanced after unsafe feed diagnostics",
@@ -97,7 +100,6 @@ export function detectRemovals(
     ...feed.diagnostics.quarantinedUids,
   ]);
   const nowMs = now.getTime();
-  let missingTimestamp = planTimestamp;
   const earliest = nowMs - 30 * DAY;
   const latest = nowMs + 366 * DAY;
   const candidates = existing.filter((assignment) => {
@@ -123,9 +125,7 @@ export function detectRemovals(
 
     if (trigger === "manual") continue;
 
-    const canvasMissingSince = hasPersistedEvidence
-      ? assignment.canvasMissingSince!
-      : (missingTimestamp ??= now.toISOString());
+    const canvasMissingSince = hasPersistedEvidence ? assignment.canvasMissingSince! : timestamp;
     const canvasMissingCount = hasPersistedEvidence ? previousCount + 1 : 1;
     const intervalSatisfied = hasPersistedEvidence && nowMs - sinceMs >= minimumMissingIntervalMs;
     if (canvasMissingCount >= 2 && intervalSatisfied) {

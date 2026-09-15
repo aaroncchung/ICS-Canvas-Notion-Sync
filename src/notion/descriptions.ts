@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
+import { calendarDate, DATE_ONLY } from "../calendar-date.js";
 import { paragraph, paragraphs, type Block } from "./blocks.js";
 import type { NotionGateway } from "./client.js";
 import {
@@ -19,7 +20,6 @@ export const DESCRIPTION_INTEGRITY_MAXIMUM_AGE_DAYS = 60;
 export const DESCRIPTION_INTEGRITY_SLOT_COUNT = 30;
 
 const MILLISECONDS_PER_DAY = 24 * 60 * 60 * 1000;
-const DATE_ONLY = /^(\d{4})-(\d{2})-(\d{2})$/;
 
 export type DescriptionIntegrityAuditReason =
   | "missing-verification"
@@ -40,39 +40,19 @@ function descriptionBlocks(markdown: string): Block[] {
   return markdown ? paragraphs(markdown) : [paragraph("No description provided.")];
 }
 
-const calendarDayFormatters = new Map<string, Intl.DateTimeFormat>();
-
-function calendarDayFormatter(timeZone: string): Intl.DateTimeFormat {
-  let formatter = calendarDayFormatters.get(timeZone);
-  if (!formatter) {
-    formatter = new Intl.DateTimeFormat("en-US", {
-      timeZone,
-      year: "numeric",
-      month: "2-digit",
-      day: "2-digit",
-    });
-    calendarDayFormatters.set(timeZone, formatter);
-  }
-  return formatter;
-}
-
-function calendarDayOrdinal(value: Date, timeZone: string): number {
-  const parts = calendarDayFormatter(timeZone).formatToParts(value);
-  const year = Number(parts.find((part) => part.type === "year")?.value);
-  const month = Number(parts.find((part) => part.type === "month")?.value);
-  const day = Number(parts.find((part) => part.type === "day")?.value);
+function dayOrdinal(dateOnly: string): number {
+  const [year, month, day] = dateOnly.split("-").map(Number) as [number, number, number];
   return Math.floor(Date.UTC(year, month - 1, day) / MILLISECONDS_PER_DAY);
 }
 
+function calendarDayOrdinal(value: Date, timeZone: string): number {
+  return dayOrdinal(calendarDate(value.getTime(), timeZone));
+}
+
 function verifiedCalendarDayOrdinal(value: string, timestamp: number, timeZone: string): number {
-  const dateOnly = DATE_ONLY.exec(value);
-  if (dateOnly) {
-    return Math.floor(
-      Date.UTC(Number(dateOnly[1]), Number(dateOnly[2]) - 1, Number(dateOnly[3])) /
-        MILLISECONDS_PER_DAY,
-    );
-  }
-  return calendarDayOrdinal(new Date(timestamp), timeZone);
+  return DATE_ONLY.test(value)
+    ? dayOrdinal(value)
+    : calendarDayOrdinal(new Date(timestamp), timeZone);
 }
 
 function modulo(value: number, divisor: number): number {

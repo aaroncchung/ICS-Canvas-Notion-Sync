@@ -50,12 +50,6 @@ export function feedDiagnosticSummary(feed: AssignmentFeed): FeedDiagnosticSumma
 export function feedWarnings(feed: AssignmentFeed): PlanWarning[] {
   const warnings: PlanWarning[] = [];
   const diagnostics = aggregateFeedDiagnostics(feed);
-  if (!feed.diagnostics.complete) {
-    warnings.push({
-      code: "incomplete-feed-diagnostics",
-      message: "The provider reported incomplete feed diagnostics",
-    });
-  }
   if (feed.diagnostics.totalEvents >= 1000) {
     warnings.push({
       code: "feed-event-limit",

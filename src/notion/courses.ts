@@ -1,6 +1,6 @@
 import type { Clock, CourseCreate, CourseRecord, CourseUpdate, RecoveredCreate } from "../types.js";
 import { AmbiguousNotionWriteError, isAmbiguousWriteError, type NotionGateway } from "./client.js";
-import { normalizeCourse } from "../sync/course-matcher.js";
+import { normalizeCourse } from "../course-normalization.js";
 import { pollForUniquePage, type VisibilityPollingOptions } from "./recovery.js";
 import {
   checkbox,

@@ -11,10 +11,6 @@ import {
 } from "../notion/descriptions.js";
 import { datesEqual, resolveDates } from "./date-resolution.js";
 
-function sameOptional(left?: string, right?: string): boolean {
-  return left === right;
-}
-
 export function lifecycleProperties(existing: AssignmentRecord): {
   properties: AssignmentPropertyUpdate;
   missingEvidenceCleared: boolean;
@@ -65,9 +61,7 @@ export function decideAssignment(
     properties.coursePageId = courseKey;
   }
   if (existing.title !== source.title) properties.title = source.title;
-  if (!sameOptional(existing.canvasUrl, source.canvasUrl)) {
-    properties.canvasUrl = source.canvasUrl ?? null;
-  }
+  if (existing.canvasUrl !== source.canvasUrl) properties.canvasUrl = source.canvasUrl ?? null;
 
   const dates = resolveDates(existing, source.dueAt, notionTimezone);
   if (!datesEqual(existing.canvasDueDate, source.dueAt, notionTimezone)) {

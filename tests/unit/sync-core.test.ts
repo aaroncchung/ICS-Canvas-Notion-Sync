@@ -39,10 +39,9 @@ function plan(
       normalizedAssignmentUids: sources.map((value) => value.uid),
       quarantinedUids: [],
       events: [],
-      complete: true,
     },
   });
-  const result = buildPlan(feed, records, courses, {}, false, timezone, now);
+  const result = buildPlan(feed, records, courses, { notionTimezone: timezone, now });
   return { result, metrics: runMetrics(result) };
 }
 

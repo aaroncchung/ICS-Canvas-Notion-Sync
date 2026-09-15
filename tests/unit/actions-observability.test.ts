@@ -176,14 +176,11 @@ describe("GitHub Actions observability", () => {
   it("preserves a failed sync after an append failure", async () => {
     const value = await run(config({ GITHUB_STEP_SUMMARY: "summary.md" }), {
       gateway: new FakeGateway(),
-      provider: new FakeProvider({
-        ...emptyFeed,
-        diagnostics: { ...emptyFeed.diagnostics, complete: false },
-      }),
+      provider: { fetchAssignments: () => Promise.reject(new Error("feed unavailable")) },
       summaryAppender: () => Promise.reject(new Error("append failed")),
     });
     expect(value.status).toBe("Failed");
-    expect(value.errors[0]).toContain("incomplete feed diagnostics");
+    expect(value.errors[0]).toContain("feed unavailable");
   });
 
   it("normally appends the generated summary", async () => {

@@ -1,6 +1,8 @@
 import { runMetrics } from "../../src/observability/run-report.js";
 import { describe, expect, it, vi } from "vitest";
 import { parseIcs } from "../../src/canvas/parse-ics.js";
+import { DEFAULT_MISSING_EVIDENCE_MINIMUM_HOURS } from "../../src/config.js";
+import { normalizeCourse } from "../../src/course-normalization.js";
 import { createAssignment } from "../../src/notion/assignments.js";
 import {
   descriptionIntegrityAuditDecision,
@@ -9,7 +11,6 @@ import {
 import { datesEqual } from "../../src/sync/date-resolution.js";
 import { buildPlan, feedDiagnosticSummary, feedWarnings } from "../../src/sync/plan.js";
 import { applyPlan } from "../../src/sync/reconcile.js";
-import { MINIMUM_MISSING_EVIDENCE_INTERVAL_MS } from "../../src/sync/removal-detector.js";
 import type {
   AssignmentFeed,
   AssignmentRecord,
@@ -18,6 +19,9 @@ import type {
   Trigger,
 } from "../../src/types.js";
 import { assignmentTypeMatcher, config, FakeGateway } from "../helpers.js";
+
+// Spied, never stubbed: the planning work per source is observable without production counters.
+vi.mock(import("../../src/course-normalization.js"), { spy: true });
 
 const course: CourseRecord = {
   pageId: "course-page",
@@ -71,10 +75,8 @@ function record(overrides: Partial<AssignmentRecord> = {}): AssignmentRecord {
     descriptionExcerpt: "Original description",
     descriptionHash: managedDescriptionHash("Original description"),
     descriptionVerifiedAt: "2026-07-01T00:00:00.000Z",
-    personalStatus: "Done",
     removed: false,
     canvasState: "Active",
-    importedFrom: "Canvas ICS",
     ...overrides,
   };
 }
@@ -100,7 +102,6 @@ function feed(
       ),
       quarantinedUids: [],
       events: [],
-      complete: true,
       ...options.diagnostics,
     },
   };
@@ -123,11 +124,11 @@ function planFeed(
   trigger: Trigger = "scheduled",
   now = new Date("2026-07-13T12:00:00Z"),
 ) {
-  return buildPlan(value, existing, courses, aliases, false, notionTimezone, now, trigger);
+  return buildPlan(value, existing, courses, { aliases, notionTimezone, now, trigger });
 }
 
 function planWithMetrics(existing: AssignmentRecord, now = new Date("2026-07-13T12:00:00Z")) {
-  const result = buildPlan(feed([source()]), [existing], [course], {}, false, notionTimezone, now);
+  const result = buildPlan(feed([source()]), [existing], [course], { notionTimezone, now });
   return { metrics: runMetrics(result), result };
 }
 
@@ -163,10 +164,7 @@ function courseConflictPlan(
     feed(assignments),
     [existing],
     [{ pageId: "course-page", title: "EE 10", courseCode: "EE 10" }],
-    {},
-    false,
-    notionTimezone,
-    now,
+    { notionTimezone, now },
   );
   return { metrics: runMetrics(result), result };
 }
@@ -233,10 +231,7 @@ describe("plan-first reconciliation", () => {
       feed([source()]),
       [record({ descriptionVerifiedAt: "2026-05-14T12:00:00.000Z" })],
       [course],
-      {},
-      false,
-      notionTimezone,
-      new Date("2026-07-13T12:00:00Z"),
+      { notionTimezone, now: new Date("2026-07-13T12:00:00Z") },
     );
     expect(result.assignmentsToUpdate[0]).toMatchObject({
       verifyDescription: true,
@@ -276,15 +271,10 @@ describe("plan-first reconciliation", () => {
   });
 
   it("creates a new course and assignment", () => {
-    const result = buildPlan(
-      feed([source()]),
-      [],
-      [],
-      {},
-      false,
+    const result = buildPlan(feed([source()]), [], [], {
       notionTimezone,
-      new Date("2026-07-13T12:00:00Z"),
-    );
+      now: new Date("2026-07-13T12:00:00Z"),
+    });
     expect(result.coursesToCreate).toHaveLength(1);
     expect(result.assignmentsToCreate).toHaveLength(1);
     expect(runMetrics(result).descriptionIntegrityAuditsDue).toBe(1);
@@ -1094,10 +1084,7 @@ describe("plan-first reconciliation", () => {
         { pageId: "course-one", title: "One" },
         { pageId: "course-two", title: "Two" },
       ],
-      {},
-      false,
-      notionTimezone,
-      now,
+      { notionTimezone, now },
     );
     expect(toISOString).toHaveBeenCalledTimes(1);
     expect(result.coursesToUpdate.map((update) => update.syncUpdatedAt)).toEqual([
@@ -1141,24 +1128,16 @@ describe("plan-first reconciliation", () => {
           canvasUrl: `https://canvas.example.edu/courses/${index}/assignments/${10_000 + index}`,
         }),
     );
-    const result = buildPlan(
-      feed(assignments),
-      existing,
-      courses,
-      {},
-      false,
+    const normalizations = vi.mocked(normalizeCourse);
+    normalizations.mockClear();
+    const result = buildPlan(feed(assignments), existing, courses, {
       notionTimezone,
-      new Date("2026-07-13T12:00:00Z"),
-      "scheduled",
-      undefined,
-    );
-    expect(result.assignmentsToCreate).toHaveLength(size);
-    expect(result.planning?.operations).toEqual({
-      courseNormalizations: size * 6,
-      courseCandidatesExamined: size,
-      assignmentNormalizations: size * 4,
-      assignmentCandidatesExamined: 0,
+      now: new Date("2026-07-13T12:00:00Z"),
     });
+    expect(result.assignmentsToCreate).toHaveLength(size);
+    // Two labels per course for the index, then two per source for matching, duplicate
+    // screening, and settling. A rescan would multiply any of these by the course count.
+    expect(normalizations.mock.calls).toHaveLength(size * 8);
   });
 
   it("does not create an active assignment for a cancelled new event", () => {
@@ -1183,10 +1162,8 @@ describe("plan-first reconciliation", () => {
     expect(result.assignmentsToRemove).toHaveLength(0);
   });
 
-  it("marks a cancelled existing assignment removed while retaining Notion-owned values", () => {
+  it("marks a cancelled existing assignment removed and clears its missing evidence", () => {
     const existing = record({
-      priority: "High",
-      assignmentType: "Quiz",
       canvasMissingSince: "2026-07-12T00:00:00Z",
       canvasMissingCount: 1,
     });
@@ -1207,9 +1184,6 @@ describe("plan-first reconciliation", () => {
     });
     expect(planFeed(value, [existing]).assignmentsToRemove[0]).toMatchObject({
       pageId: "assignment-page",
-      personalStatus: "Done",
-      priority: "High",
-      assignmentType: "Quiz",
       reason: "explicit-cancellation",
       clearMissingEvidence: true,
     });
@@ -1351,8 +1325,6 @@ describe("plan-first reconciliation", () => {
       canvasState: "Removed",
       canvasMissingSince: "2026-07-12T00:00:00.000Z",
       canvasMissingCount: 2,
-      priority: "High",
-      assignmentType: "Quiz",
     });
     const result = plan([testCase.incoming], [existing], testCase.courses);
     expect(result.assignmentsToUpdate).toHaveLength(1);
@@ -1428,7 +1400,7 @@ describe("plan-first reconciliation", () => {
     expect(beforeInterval.assignmentsMissingEvidenceToUpdate[0]?.canvasMissingCount).toBe(2);
 
     const qualifyingNow = new Date(
-      Date.parse("2026-07-13T10:00:00Z") + MINIMUM_MISSING_EVIDENCE_INTERVAL_MS,
+      Date.parse("2026-07-13T10:00:00Z") + DEFAULT_MISSING_EVIDENCE_MINIMUM_HOURS * 60 * 60 * 1000,
     );
     const qualifying = planFeed(
       feed([other]),
@@ -1501,57 +1473,21 @@ describe("plan-first reconciliation", () => {
   });
 
   it("suppresses removal at 1,000 feed items", () => {
-    const result = buildPlan(
-      feed([], 1000),
-      [record()],
-      [course],
-      {},
-      false,
+    const result = buildPlan(feed([], 1000), [record()], [course], {
       notionTimezone,
-      new Date("2026-07-13T12:00:00Z"),
-    );
+      now: new Date("2026-07-13T12:00:00Z"),
+    });
     expect(result.assignmentsToRemove).toHaveLength(0);
     expect(result.warnings.some((warning) => warning.code === "removals-feed-limit")).toBe(true);
   });
 
   it("honors removal-disabled mode", () => {
-    const result = buildPlan(
-      feed([]),
-      [record()],
-      [course],
-      {},
-      true,
+    const result = buildPlan(feed([]), [record()], [course], {
+      disableRemovals: true,
       notionTimezone,
-      new Date("2026-07-13T12:00:00Z"),
-    );
-    expect(result.assignmentsToRemove).toHaveLength(0);
-  });
-
-  it("preserves all Notion-owned fields on removal", () => {
-    const removed = plan(
-      [
-        source({
-          uid: "uid-other",
-          title: "Different assignment",
-          canvasAssignmentId: "999",
-          canvasUrl: "https://canvas.example.edu/courses/123/assignments/999",
-          dueAt: "2026-08-01T20:00:00.000Z",
-        }),
-      ],
-      [
-        record({
-          priority: "High",
-          assignmentType: "Quiz",
-          canvasMissingSince: "2026-07-13T00:00:00Z",
-          canvasMissingCount: 1,
-        }),
-      ],
-    ).assignmentsToRemove[0];
-    expect(removed).toMatchObject({
-      personalStatus: "Done",
-      priority: "High",
-      assignmentType: "Quiz",
+      now: new Date("2026-07-13T12:00:00Z"),
     });
+    expect(result.assignmentsToRemove).toHaveLength(0);
   });
 });
 
@@ -1570,15 +1506,10 @@ describe("course keys survive apply", () => {
   it("relinks an assignment to another existing course using a resolvable key", async () => {
     const otherCourse: CourseRecord = { pageId: "course-page-2", title: "PHYS 5" };
     const moved = unlinkedSource({ courseName: "PHYS 5", courseCode: "PHYS 5" });
-    const result = buildPlan(
-      feed([moved]),
-      [record()],
-      [course, otherCourse],
-      {},
-      false,
+    const result = buildPlan(feed([moved]), [record()], [course, otherCourse], {
       notionTimezone,
-      new Date("2026-07-13T12:00:00Z"),
-    );
+      now: new Date("2026-07-13T12:00:00Z"),
+    });
 
     // A bare page ID here is not a course key, so apply cannot resolve it.
     expect(result.assignmentsToUpdate[0]?.properties.coursePageId).toBe("page:course-page-2");
@@ -1608,10 +1539,7 @@ describe("course keys survive apply", () => {
         record({ pageId: "assignment-page-2", uid: "uid-2", title: "Homework 2" }),
       ],
       [{ pageId: "course-page", title: "Biology 101", courseCode: "BIO101" }],
-      {},
-      false,
-      notionTimezone,
-      new Date("2026-07-13T12:00:00Z"),
+      { notionTimezone, now: new Date("2026-07-13T12:00:00Z") },
     );
 
     // The provisional create is dropped, so a relation still pointing at it would strand apply.
@@ -1652,10 +1580,7 @@ describe("course keys survive apply", () => {
       feed([conflicted, conflicting, redirecting]),
       [record({ uid: "uid-1", coursePageIds: [] })],
       [{ pageId: "course-page", title: "Biology 101", courseCode: "BIO101" }],
-      {},
-      false,
-      notionTimezone,
-      new Date("2026-07-13T12:00:00Z"),
+      { notionTimezone, now: new Date("2026-07-13T12:00:00Z") },
     );
 
     // The plan reports the course as conflicted, so it must not also write the relation.
@@ -1699,10 +1624,7 @@ describe("course keys survive apply", () => {
       ]),
       [],
       [],
-      {},
-      false,
-      notionTimezone,
-      new Date("2026-07-13T12:00:00Z"),
+      { notionTimezone, now: new Date("2026-07-13T12:00:00Z") },
     );
 
     // Chemistry is planned once; a colliding synthetic ID used to strand its Canvas course ID

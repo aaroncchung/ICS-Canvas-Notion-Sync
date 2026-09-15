@@ -60,11 +60,6 @@ export function readSelect(properties: Record<string, unknown>, name: string): s
   return typeof value === "string" ? value : undefined;
 }
 
-export function readStatus(properties: Record<string, unknown>, name: string): string | undefined {
-  const value = object(property(properties, name).status)?.name;
-  return typeof value === "string" ? value : undefined;
-}
-
 export function readRelation(properties: Record<string, unknown>, name: string): string[] {
   const relation = property(properties, name).relation;
   if (!Array.isArray(relation)) return [];
