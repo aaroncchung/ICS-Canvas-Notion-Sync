@@ -224,6 +224,10 @@ describe("course-code extraction", () => {
       ["Intro to Circuits (EE 10)", "EE 10"],
       ["CS 101 (37000)", "CS 101"],
       ["Fall 2026 - ICS 31 Lecture A", "ICS 31"],
+      // The real feed prefixes every label with a mixed-case term tag, which the legacy
+      // case-insensitive pattern returned as the code for every course.
+      ["Fa26 PHY-0013 Physics", "PHY-0013"],
+      ["Fa26 EN-0001 English", "EN-0001"],
     ];
     for (const [label, expected] of cases) {
       expect(extractCourseCode(label), label).toBe(expected);

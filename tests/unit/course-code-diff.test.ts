@@ -47,6 +47,7 @@ describe("course-code extraction comparison", () => {
   it("reproduces the legacy case-insensitive first-match behavior", () => {
     expect(legacyCourseCode("Fall 2026 Biology")).toBe("Fall 2026");
     expect(legacyCourseCode("FA26 CS 101")).toBe("FA26");
+    expect(legacyCourseCode("Fa26 PHY-0013 Physics")).toBe("Fa26");
     expect(legacyCourseCode("EE 10")).toBe("EE 10");
     expect(legacyCourseCode(undefined)).toBeUndefined();
   });
