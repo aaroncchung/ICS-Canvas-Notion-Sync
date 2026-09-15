@@ -89,7 +89,9 @@ Aliases are optional. Copy `config/course-aliases.example.json` to `config/cours
 }
 ```
 
-The left side is the Canvas label; the right side is an existing Notion Course title or Course Code. An absent file means no aliases. Alias source keys must remain unique after the same Unicode, punctuation, whitespace, and casing normalization used for course matching; duplicate normalized sources are rejected even when their targets are equivalent, so configuration intent stays explicit.
+The left side is the Canvas label; the right side is an existing Notion Course title or Course Code. An absent file means no aliases.
+
+The Canvas label in square brackets is always the course name. A Course Code is extracted from it only when it contains an uppercase department prefix of at least two letters followed by a course number of up to four digits and an optional section letter, such as `EE 10`, `CS-61A`, `BIO101`, or `MATH 2B`. Matching is case-sensitive, and uppercase term, structure, and work words such as `FALL 2026`, `FA26`, `WEEK 2`, or `HW 3` are skipped, so `[Fall 2026 Biology]` yields no code and `[FA26 CS 101]` yields `CS 101`. Running the sync workflow manually with the `compare-course-codes` mode reruns the legacy and current extraction against the real feed and Notion snapshot without writing anything and reports whether any course destination would change. Alias source keys must remain unique after the same Unicode, punctuation, whitespace, and casing normalization used for course matching; duplicate normalized sources are rejected even when their targets are equivalent, so configuration intent stays explicit.
 
 Both optional JSON files are structurally validated. Alias keys and values must be bounded nonempty strings. `config/assignment-type-rules.json`, when present, must be a nonempty list of supported types with nonempty, bounded phrase lists and no normalized duplicate type/phrase pair. Assignment-type patterns are literal phrases, not regular expressions; matcher construction escapes them.
 

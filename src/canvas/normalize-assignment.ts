@@ -82,12 +82,98 @@ export function sanitizeDescription(html: string | undefined): {
   };
 }
 
+/**
+ * A course code is an uppercase department prefix of at least two letters, an optional space or
+ * hyphen, a course number of up to four digits, and an optional section letter: "EE 10", "CS-61A",
+ * "BIO101", "MATH 2B". Matching is case-sensitive so that ordinary words followed by a number
+ * ("Fall 2026", "Section 3", "Chapter 12") are never taken for a code.
+ */
+const COURSE_CODE_CANDIDATE = /\b([A-Z]{2,})\s*[- ]?\d{1,4}[A-Z]?\b/g;
+
+/**
+ * Uppercase words that look like a department prefix but describe a term, a structural unit, or a
+ * piece of work. "FALL 2026", "FA26", "WEEK 3", and "HW 2" are rejected; extraction then continues
+ * with the next candidate so "FA26 CS 101" still yields "CS 101".
+ */
+const NON_COURSE_PREFIXES = new Set([
+  // Academic terms and their common Canvas SIS abbreviations.
+  "FALL",
+  "SPRING",
+  "SUMMER",
+  "WINTER",
+  "AUTUMN",
+  "FA",
+  "SP",
+  "SU",
+  "WI",
+  "TERM",
+  "SEMESTER",
+  "QUARTER",
+  "SESSION",
+  // Structural units inside a course.
+  "SECTION",
+  "SEC",
+  "SECT",
+  "WEEK",
+  "WK",
+  "UNIT",
+  "MODULE",
+  "CHAPTER",
+  "LESSON",
+  "LECTURE",
+  "LEC",
+  "DISCUSSION",
+  "DISC",
+  "ROOM",
+  "PERIOD",
+  "GRADE",
+  "YEAR",
+  "DAY",
+  "PART",
+  "PAGE",
+  "VOL",
+  "VOLUME",
+  "VERSION",
+  "GROUP",
+  "TEAM",
+  "COURSE",
+  // Kinds of work that appear in assignment-like labels.
+  "HW",
+  "HOMEWORK",
+  "ASSIGNMENT",
+  "QUIZ",
+  "EXAM",
+  "TEST",
+  "MIDTERM",
+  "FINAL",
+  "PROJECT",
+  "PSET",
+  "ESSAY",
+  "PAPER",
+  "READING",
+  "TASK",
+  "STEP",
+  "ROUND",
+  "PHASE",
+  "DRAFT",
+  "ATTEMPT",
+]);
+
+/** Extracts the first real course code from a Canvas course label, if it contains one. */
+export function extractCourseCode(label: string): string | undefined {
+  for (const match of label.matchAll(COURSE_CODE_CANDIDATE)) {
+    const prefix = match[1];
+    if (prefix && !NON_COURSE_PREFIXES.has(prefix)) return match[0];
+  }
+  return;
+}
+
 function parseCourse(summary: string, description?: string): { name?: string; code?: string } {
   const bracket = summary.match(/\s+\[([^\]]+)]\s*$/);
   const descriptionCourse = description?.match(/(?:course|context)\s*:\s*([^\n<]+)/i)?.[1]?.trim();
   const name = bracket?.[1]?.trim() ?? descriptionCourse;
   if (!name) return {};
-  const code = name.match(/\b[A-Z]{2,}\s*[- ]?\d{1,4}[A-Z]?\b/i)?.[0];
+  const code = extractCourseCode(name);
   return { name, ...(code ? { code } : {}) };
 }
 

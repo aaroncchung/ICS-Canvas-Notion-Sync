@@ -17,6 +17,7 @@ on:
           - sync
           - dry-run
           - validate
+          - compare-course-codes
       disable_removals:
         description: Disable removed-assignment detection
         required: true
@@ -57,6 +58,11 @@ jobs:
           RUN_TRIGGER: ${{ github.event_name == 'schedule' && 'scheduled' || 'manual' }}
           DISABLE_REMOVALS: ${{ inputs.disable_removals || false }}
         run: |
+          if [[ "$RUN_MODE" == "compare-course-codes" ]]; then
+            # Read-only: compares legacy and current course-code extraction against the real feed.
+            node dist/scripts/course-code-diff.js
+            exit
+          fi
           args=(--mode "$RUN_MODE" --trigger "$RUN_TRIGGER")
           if [[ "$DISABLE_REMOVALS" == "true" ]]; then args+=(--disable-removals); fi
           node dist/src/cli.js "${args[@]}"

@@ -4,6 +4,7 @@ import { pino } from "pino";
 import { parseIcs } from "../../src/canvas/parse-ics.js";
 import {
   compileAssignmentTypeMatcher,
+  extractCourseCode,
   sanitizeDescription,
 } from "../../src/canvas/normalize-assignment.js";
 import { CanvasIcsProvider } from "../../src/canvas/provider.js";
@@ -209,5 +210,78 @@ describe("RFC 5545 Canvas parsing", () => {
       if (original === undefined) delete process.env.TZ;
       else process.env.TZ = original;
     }
+  });
+});
+
+describe("course-code extraction", () => {
+  it("extracts uppercase department codes in their common spellings", () => {
+    const cases: Array<[string, string]> = [
+      ["EE 10", "EE 10"],
+      ["CS-61A", "CS-61A"],
+      ["BIO101", "BIO101"],
+      ["MATH 2B", "MATH 2B"],
+      ["COMPSCI 161", "COMPSCI 161"],
+      ["Intro to Circuits (EE 10)", "EE 10"],
+      ["CS 101 (37000)", "CS 101"],
+      ["Fall 2026 - ICS 31 Lecture A", "ICS 31"],
+      // The real feed prefixes every label with a mixed-case term tag, which the legacy
+      // case-insensitive pattern returned as the code for every course.
+      ["Fa26 PHY-0013 Physics", "PHY-0013"],
+      ["Fa26 EN-0001 English", "EN-0001"],
+    ];
+    for (const [label, expected] of cases) {
+      expect(extractCourseCode(label), label).toBe(expected);
+    }
+  });
+
+  it("never treats ordinary words followed by a number as a course code", () => {
+    const labels = [
+      "Fall 2026 Biology",
+      "Biology 101",
+      "English 101",
+      "Section 3 Chemistry",
+      "Chapter 12 review",
+      "Room 101",
+      "FALL 2026",
+      "WEEK 2",
+      "HW 3",
+      "FA26",
+      "ID 12345",
+      "Intro to EE",
+      "ICS31LECA",
+    ];
+    for (const label of labels) {
+      expect(extractCourseCode(label), label).toBeUndefined();
+    }
+  });
+
+  it("skips term and structural words to reach the real code", () => {
+    expect(extractCourseCode("FA26 CS 101")).toBe("CS 101");
+    expect(extractCourseCode("FA26-CS-101")).toBe("CS-101");
+    expect(extractCourseCode("WEEK 2 PHYS 7C")).toBe("PHYS 7C");
+    expect(extractCourseCode("CS 101 SECTION 3")).toBe("CS 101");
+  });
+
+  it("keeps the course label as the name whether or not it contains a code", () => {
+    const parsed = parseIcs(
+      calendar(
+        [
+          event(
+            "UID:event-assignment-1@canvas\nDTSTART:20260701T120000Z\nSUMMARY:Essay 1 [Fall 2026 Biology]\nURL:https://x.test/courses/1/assignments/1",
+          ),
+          event(
+            "UID:event-assignment-2@canvas\nDTSTART:20260701T120000Z\nSUMMARY:Lab 1 [FA26 CS 101]\nURL:https://x.test/courses/2/assignments/2",
+          ),
+        ].join("\n"),
+      ),
+      assignmentTypeMatcher,
+    );
+    expect(
+      parsed.assignments.map((item) => [item.title, item.courseName, item.courseCode]),
+    ).toEqual([
+      ["Essay 1", "Fall 2026 Biology", undefined],
+      ["Lab 1", "FA26 CS 101", "CS 101"],
+    ]);
+    expect("courseCode" in parsed.assignments[0]!).toBe(false);
   });
 });
