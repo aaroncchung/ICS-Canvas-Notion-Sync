@@ -1,8 +1,9 @@
 import { createHash } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
 import { calendarDate, DATE_ONLY } from "../calendar-date.ts";
-import { paragraph, paragraphs, type Block } from "./blocks.ts";
+import type { Block } from "./blocks.ts";
 import type { NotionGateway } from "./client.ts";
+import { descriptionBlocks } from "./description-blocks.ts";
 import {
   blockText,
   createManagedSectionSnapshot,
@@ -14,7 +15,15 @@ import {
 export const MANAGED_DESCRIPTION_TITLE = "Canvas Description — managed by sync";
 export const PENDING_MANAGED_DESCRIPTION_TITLE =
   "Canvas Description — managed by sync [replacement pending]";
-export const DESCRIPTION_HASH_VERSION = "canvas-description:v2";
+/**
+ * Bumped whenever the rendered managed-section blocks change for the same Canvas input. Every
+ * stored hash with an older version then differs from the current one, which schedules a body
+ * audit and, where the rendered blocks differ, a one-time rewrite through the pending marker.
+ *
+ * - v2: one paragraph per 1,900 characters of raw Markdown.
+ * - v3: native blocks (headings, lists, quotes, code) with styled rich text.
+ */
+export const DESCRIPTION_HASH_VERSION = "canvas-description:v3";
 export const DESCRIPTION_INTEGRITY_MINIMUM_AGE_DAYS = 30;
 export const DESCRIPTION_INTEGRITY_MAXIMUM_AGE_DAYS = 60;
 export const DESCRIPTION_INTEGRITY_SLOT_COUNT = 30;
@@ -36,8 +45,16 @@ export interface DescriptionIntegrityAuditDecision {
   ageDays?: number;
 }
 
-function descriptionBlocks(markdown: string): Block[] {
-  return markdown ? paragraphs(markdown) : [paragraph("No description provided.")];
+/** The version prefix of a stored hash, or undefined when the value is not a versioned hash. */
+export function descriptionHashVersion(hash: string | undefined): string | undefined {
+  const separator = hash?.lastIndexOf(":") ?? -1;
+  return hash && separator > 0 ? hash.slice(0, separator) : undefined;
+}
+
+/** True when a stored hash was produced by an older representation and needs a format upgrade. */
+export function isOutdatedDescriptionHash(hash: string | undefined): boolean {
+  const version = descriptionHashVersion(hash);
+  return version !== undefined && version !== DESCRIPTION_HASH_VERSION;
 }
 
 function dayOrdinal(dateOnly: string): number {

@@ -187,6 +187,8 @@ export interface PlanningFacts {
   coursesConflicted: number;
   descriptionUpdatesAvoided: number;
   descriptionIntegrityAuditsDeferred: number;
+  /** Existing pages whose stored hash predates the current managed-description format. */
+  descriptionFormatUpgrades: number;
 }
 
 export interface SyncPlan {
@@ -297,6 +299,8 @@ export interface RunMetrics extends RequestMetrics {
   descriptionIntegrityAuditsPassed: number;
   descriptionIntegrityRepairs: number;
   descriptionBodyReadsAvoided: number;
+  /** Planned audits caused by a managed-description format change; a one-time cost per page. */
+  descriptionFormatUpgrades: number;
   coursesCreated: number;
   coursesRecovered: number;
   coursesEnriched: number;

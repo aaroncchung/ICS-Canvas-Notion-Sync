@@ -7,6 +7,7 @@ import type {
 import { descriptionExcerpt } from "../notion/assignments.ts";
 import {
   descriptionIntegrityAuditDecision,
+  isOutdatedDescriptionHash,
   managedDescriptionHash,
 } from "../notion/descriptions.ts";
 import { datesEqual, resolveDates } from "./date-resolution.ts";
@@ -53,7 +54,7 @@ export function decideAssignment(
   course: { courseKey: string; pageId?: string },
   notionTimezone: string,
   now: Date,
-): { update?: AssignmentUpdate; deferred: boolean } {
+): { update?: AssignmentUpdate; deferred: boolean; formatUpgrade: boolean } {
   const courseKey = course.courseKey;
   const lifecycle = lifecycleProperties(existing);
   const properties: AssignmentPropertyUpdate = { ...lifecycle.properties };
@@ -76,6 +77,8 @@ export function decideAssignment(
   const excerptChanged = (existing.descriptionExcerpt ?? "") !== excerpt;
   const descriptionHash = managedDescriptionHash(source.descriptionMarkdown);
   const descriptionHashNeedsUpdate = existing.descriptionHash !== descriptionHash;
+  // A representation change is a hash change like any other; it is only counted separately.
+  const formatUpgrade = isOutdatedDescriptionHash(existing.descriptionHash);
   const auditDecision = descriptionHashNeedsUpdate
     ? undefined
     : descriptionIntegrityAuditDecision(
@@ -99,7 +102,8 @@ export function decideAssignment(
         missingEvidenceCleared: lifecycle.missingEvidenceCleared,
       },
       deferred: auditDecision?.reason === "deferred",
+      formatUpgrade,
     };
   }
-  return { deferred: auditDecision?.reason === "deferred" };
+  return { deferred: auditDecision?.reason === "deferred", formatUpgrade };
 }

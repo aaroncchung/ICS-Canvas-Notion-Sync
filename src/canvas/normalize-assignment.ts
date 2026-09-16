@@ -1,5 +1,6 @@
 import sanitizeHtml from "sanitize-html";
 import TurndownService from "turndown";
+import { descriptionPlainText, parseDescriptionMarkdown } from "../description-document.ts";
 import type { AssignmentType, ExternalAssignment } from "../types.ts";
 import type { ClassificationResult } from "./classify-event.ts";
 
@@ -15,7 +16,60 @@ export interface RawCalendarEvent {
   datetype?: string;
 }
 
-const turndown = new TurndownService({ headingStyle: "atx", bulletListMarker: "-" });
+/**
+ * Turndown options are pinned because `description-document.ts` parses exactly this dialect:
+ * ATX headings, `-` bullets, fenced code, `**strong**`, and `_emphasis_`.
+ */
+const turndown = new TurndownService({
+  headingStyle: "atx",
+  bulletListMarker: "-",
+  codeBlockStyle: "fenced",
+  fence: "```",
+  emDelimiter: "_",
+  strongDelimiter: "**",
+});
+
+function tableCells(row: Node): Node[] {
+  return Array.from(row.childNodes).filter((node) => /^T[HD]$/.test(node.nodeName));
+}
+
+function isHeaderRow(row: Node): boolean {
+  const parent = row.parentNode;
+  if (!parent) return false;
+  if (parent.nodeName === "THEAD") return true;
+  const cells = tableCells(row);
+  const first = Array.from(parent.childNodes).find((node) => node.nodeName === "TR") === row;
+  return first && cells.length > 0 && cells.every((cell) => cell.nodeName === "TH");
+}
+
+// Turndown has no table support of its own; emit pipe rows so tables survive as one line per row.
+turndown.addRule("tableCell", {
+  filter: ["th", "td"],
+  replacement: (content, node) => {
+    const index = node.parentNode ? tableCells(node.parentNode).indexOf(node) : 0;
+    const cell = content
+      .trim()
+      .replace(/\s*\n\s*/g, " ")
+      .replace(/\|/g, "\\|");
+    return `${index === 0 ? "| " : " "}${cell} |`;
+  },
+});
+turndown.addRule("tableRow", {
+  filter: "tr",
+  replacement: (content, node) => {
+    const separator = isHeaderRow(node)
+      ? `\n|${tableCells(node)
+          .map(() => " --- |")
+          .join("")}`
+      : "";
+    return `\n${content}${separator}`;
+  },
+});
+turndown.addRule("table", {
+  filter: ["table", "thead", "tbody"],
+  replacement: (content, node) =>
+    node.nodeName === "TABLE" ? `\n\n${content.trim()}\n\n` : content,
+});
 
 export type AssignmentTypeMatcher = (title: string) => AssignmentType;
 
@@ -75,7 +129,8 @@ export function sanitizeDescription(html: string | undefined): {
     disallowedTagsMode: "discard",
   });
   const markdown = turndown.turndown(safeHtml).trim();
-  const plainText = sanitizeHtml(safeHtml, { allowedTags: [] }).replace(/\s+/g, " ").trim();
+  // The excerpt is the visible text of the same blocks the managed section renders.
+  const plainText = descriptionPlainText(parseDescriptionMarkdown(markdown));
   return {
     ...(plainText ? { plainText } : {}),
     ...(markdown ? { markdown } : {}),
