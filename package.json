@@ -7,35 +7,37 @@
     "node": ">=24 <25"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
+    "tsc": "node node_modules/typescript-native/bin/tsc",
+    "build": "npm run tsc -- -p tsconfig.build.json",
     "sync": "node src/cli.ts",
     "health-check": "node scripts/check-health.ts",
     "lint": "eslint .",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "check:types-and-build": "tsc -b tsconfig.build.json tsconfig.test.json",
+    "check:types-and-build": "npm run tsc -- -b tsconfig.build.json tsconfig.test.json",
     "test": "vitest run",
     "test:unit": "vitest run tests/unit",
     "test:integration": "vitest run tests/integration"
   },
   "dependencies": {
-    "@notionhq/client": "5.23.0",
-    "node-ical": "0.26.1",
-    "pino": "9.7.0",
+    "@notionhq/client": "5.26.0",
+    "node-ical": "0.27.2",
+    "pino": "10.3.1",
     "sanitize-html": "2.17.7",
-    "turndown": "7.2.0",
-    "zod": "4.1.12"
+    "turndown": "7.2.4",
+    "zod": "4.6.5"
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",
-    "@types/node": "24.10.1",
-    "@types/sanitize-html": "2.16.0",
-    "@types/turndown": "5.0.5",
-    "eslint": "10.6.0",
-    "globals": "16.5.0",
-    "prettier": "3.6.2",
-    "typescript": "5.9.3",
-    "typescript-eslint": "8.63.0",
-    "vitest": "4.1.11"
+    "@types/node": "24.13.5",
+    "@types/sanitize-html": "2.16.1",
+    "@types/turndown": "5.0.6",
+    "eslint": "10.10.0",
+    "globals": "17.12.0",
+    "prettier": "3.9.7",
+    "typescript": "6.0.3",
+    "typescript-eslint": "8.70.0",
+    "typescript-native": "npm:typescript@7.0.2",
+    "vitest": "5.0.1"
   }
 }

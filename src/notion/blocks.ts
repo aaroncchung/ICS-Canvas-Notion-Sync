@@ -14,7 +14,7 @@ export function paragraph(content: string): Block {
 /** Split text into paragraph blocks without cutting a surrogate pair in half. */
 export function paragraphs(content: string, limit = PARAGRAPH_TEXT_LIMIT): Block[] {
   const blocks: Block[] = [];
-  for (let offset = 0; offset < content.length; ) {
+  for (let offset = 0; offset < content.length;) {
     let end = Math.min(offset + limit, content.length);
     const high = content.charCodeAt(end - 1);
     const low = content.charCodeAt(end);

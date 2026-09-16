@@ -1095,38 +1095,31 @@ describe("plan-first reconciliation", () => {
 
   it("builds linear indexes instead of rescanning full collections per source assignment", () => {
     const size = 400;
-    const courses = Array.from(
-      { length: size },
-      (_, index): CourseRecord => ({
-        pageId: `course-${index}`,
-        title: `Course ${index}`,
-        courseCode: `CODE ${index}`,
-        canvasCourseId: String(index),
+    const courses = Array.from({ length: size }, (_, index): CourseRecord => ({
+      pageId: `course-${index}`,
+      title: `Course ${index}`,
+      courseCode: `CODE ${index}`,
+      canvasCourseId: String(index),
+    }));
+    const existing = Array.from({ length: size }, (_, index): AssignmentRecord =>
+      record({
+        pageId: `existing-${index}`,
+        uid: `existing-${index}`,
+        title: `Existing ${index}`,
+        coursePageIds: [`course-${index}`],
+        canvasUrl: `https://canvas.example.edu/courses/${index}/assignments/${index}`,
       }),
     );
-    const existing = Array.from(
-      { length: size },
-      (_, index): AssignmentRecord =>
-        record({
-          pageId: `existing-${index}`,
-          uid: `existing-${index}`,
-          title: `Existing ${index}`,
-          coursePageIds: [`course-${index}`],
-          canvasUrl: `https://canvas.example.edu/courses/${index}/assignments/${index}`,
-        }),
-    );
-    const assignments = Array.from(
-      { length: size },
-      (_, index): ExternalAssignment =>
-        source({
-          uid: `incoming-${index}`,
-          title: `Incoming ${index}`,
-          courseName: `Course ${index}`,
-          courseCode: `CODE ${index}`,
-          canvasCourseId: String(index),
-          canvasAssignmentId: String(10_000 + index),
-          canvasUrl: `https://canvas.example.edu/courses/${index}/assignments/${10_000 + index}`,
-        }),
+    const assignments = Array.from({ length: size }, (_, index): ExternalAssignment =>
+      source({
+        uid: `incoming-${index}`,
+        title: `Incoming ${index}`,
+        courseName: `Course ${index}`,
+        courseCode: `CODE ${index}`,
+        canvasCourseId: String(index),
+        canvasAssignmentId: String(10_000 + index),
+        canvasUrl: `https://canvas.example.edu/courses/${index}/assignments/${10_000 + index}`,
+      }),
     );
     const normalizations = vi.mocked(normalizeCourse);
     normalizations.mockClear();
