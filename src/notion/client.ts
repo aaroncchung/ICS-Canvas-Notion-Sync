@@ -9,12 +9,7 @@ export { AmbiguousNotionWriteError } from "./failure.ts";
 export const NOTION_API_VERSION = "2026-03-11";
 
 export type NotionOperation =
-  | "read"
-  | "property-update"
-  | "page-create"
-  | "block-append"
-  | "delete"
-  | "sync-log-create";
+  "read" | "property-update" | "page-create" | "block-append" | "delete" | "sync-log-create";
 
 export interface NotionGateway {
   readonly requestMetrics: RequestMetrics;

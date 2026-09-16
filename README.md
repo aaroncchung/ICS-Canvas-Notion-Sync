@@ -119,6 +119,8 @@ npm audit
 
 Node 24 runs the TypeScript sources directly (`node src/cli.ts`, `node scripts/check-health.ts`), so no build step is needed to run the application. To keep that working, `tsconfig.json` enables `erasableSyntaxOnly` and `verbatimModuleSyntax`, and relative imports use `.ts` specifiers; `npm run build` still emits plain JavaScript to `dist/` with rewritten import extensions.
 
+The type-check and build scripts use the native TypeScript 7 compiler. Type-aware ESLint uses TypeScript 6 as its compiler API until `typescript-eslint` supports the native compiler.
+
 Tests use synthetic ICS and in-memory Notion doubles; they require no live credentials.
 
 ## GitHub Actions

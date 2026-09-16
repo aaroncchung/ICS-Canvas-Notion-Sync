@@ -27,12 +27,7 @@ interface ManagedSectionReconciliation {
 }
 
 type CanonicalValue =
-  | null
-  | boolean
-  | number
-  | string
-  | CanonicalValue[]
-  | { [key: string]: CanonicalValue };
+  null | boolean | number | string | CanonicalValue[] | { [key: string]: CanonicalValue };
 
 export function blockText(block: Block): string {
   const type = block.type;
