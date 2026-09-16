@@ -1,6 +1,11 @@
 import sanitizeHtml from "sanitize-html";
 import TurndownService from "turndown";
-import { descriptionPlainText, parseDescriptionMarkdown } from "../description-document.ts";
+import {
+  TABLE_ROW_MARKER,
+  TABLE_SEPARATOR_MARKER,
+  descriptionPlainText,
+  parseDescriptionMarkdown,
+} from "../description-document.ts";
 import type { AssignmentType, ExternalAssignment } from "../types.ts";
 import type { ClassificationResult } from "./classify-event.ts";
 
@@ -42,7 +47,8 @@ function isHeaderRow(row: Node): boolean {
   return first && cells.length > 0 && cells.every((cell) => cell.nodeName === "TH");
 }
 
-// Turndown has no table support of its own; emit pipe rows so tables survive as one line per row.
+// Turndown has no table support of its own. Control-delimited tags keep generated rows distinct
+// from ordinary Canvas text that happens to use pipe characters.
 turndown.addRule("tableCell", {
   filter: ["th", "td"],
   replacement: (content, node) => {
@@ -57,12 +63,8 @@ turndown.addRule("tableCell", {
 turndown.addRule("tableRow", {
   filter: "tr",
   replacement: (content, node) => {
-    const separator = isHeaderRow(node)
-      ? `\n|${tableCells(node)
-          .map(() => " --- |")
-          .join("")}`
-      : "";
-    return `\n${content}${separator}`;
+    const separator = isHeaderRow(node) ? `\n${TABLE_SEPARATOR_MARKER}` : "";
+    return `\n${TABLE_ROW_MARKER}${content}${separator}`;
   },
 });
 turndown.addRule("table", {

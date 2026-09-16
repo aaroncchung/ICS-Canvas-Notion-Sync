@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { sanitizeDescription } from "../../src/canvas/normalize-assignment.ts";
 import {
+  TABLE_ROW_MARKER,
+  TABLE_SEPARATOR_MARKER,
   descriptionPlainText,
   parseDescriptionMarkdown,
   parseInline,
@@ -90,9 +92,9 @@ describe("description document parsing", () => {
       "    return x",
       "```",
       "",
-      "| Col A | Col B |",
-      "| --- | --- |",
-      "| 1 \\| one | 2 |",
+      `${TABLE_ROW_MARKER}| Col A | Col B |`,
+      TABLE_SEPARATOR_MARKER,
+      `${TABLE_ROW_MARKER}| 1 \\| one | 2 |`,
       "",
       "#### Deep heading",
     ].join("\n");
@@ -181,6 +183,14 @@ describe("Canvas HTML to Notion blocks", () => {
     expect(blocks.map(blockText)).toEqual(["Part | Points", "Essay | draft | 10"]);
     expect(richText(blocks[0]!)[0]).toMatchObject({ annotations: { bold: true } });
     expect(richText(blocks[1]!)[0]).not.toHaveProperty("annotations");
+  });
+
+  it("preserves literal pipe-wrapped text instead of treating it as a table", () => {
+    const { markdown, plainText } = sanitizeDescription("<p>| important |</p><p>| --- |</p>");
+    const blocks = descriptionBlocks(markdown ?? "");
+    expect(blocks.map((block) => block.type)).toEqual(["paragraph", "paragraph"]);
+    expect(blocks.map(blockText)).toEqual(["| important |", "| --- |"]);
+    expect(plainText).toBe("| important | | --- |");
   });
 
   it("renders code blocks as Notion code blocks", () => {

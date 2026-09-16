@@ -4,9 +4,9 @@
  * the searchable plain-text excerpt derive from this model, so they always agree.
  *
  * The dialect is deliberately narrow: ATX headings, `-` bullets, `1.` numbers, `>` quotes,
- * fenced code, pipe tables, `**strong**`, `_emphasis_`, `` `code` ``, `[text](url)` links, and
- * backslash escapes. The model is flat because the managed section is verified block by block;
- * nested lists flatten to siblings and table rows become one paragraph each.
+ * fenced code, tagged table rows, `**strong**`, `_emphasis_`, `` `code` ``, `[text](url)` links,
+ * and backslash escapes. The model is flat because the managed section is verified block by
+ * block; nested lists flatten to siblings and table rows become one paragraph each.
  */
 
 export interface InlineRun {
@@ -36,10 +36,19 @@ const FENCE = /^ {0,3}(`{3,}|~{3,})/;
 const QUOTE = /^ {0,3}> ?(.*)$/;
 const BULLET = /^( {0,3})([-*+])(?:([ \t]+)(.*)|$)/;
 const ORDERED = /^( {0,3})(\d{1,9})[.)](?:([ \t]+)(.*)|$)/;
-const TABLE_ROW = /^ {0,3}\|.*\|[ \t]*$/;
-const TABLE_SEPARATOR = /^ {0,3}\|(?:[ \t]*:?-+:?[ \t]*\|)+[ \t]*$/;
+/** Control-delimited tags distinguish generated table syntax from literal pipe-wrapped text. */
+export const TABLE_ROW_MARKER = "\u001eC2N_TABLE_ROW\u001f";
+export const TABLE_SEPARATOR_MARKER = "\u001eC2N_TABLE_SEPARATOR\u001f";
 /** Turndown renders `<br>` as two trailing spaces; that is the only hard break it emits. */
 const HARD_BREAK = / {2,}$/;
+
+function isTableRow(line: string): boolean {
+  return line.startsWith(TABLE_ROW_MARKER);
+}
+
+function isTableSeparator(line: string): boolean {
+  return line === TABLE_SEPARATOR_MARKER;
+}
 
 function isBlank(line: string): boolean {
   return line.trim() === "";
@@ -56,7 +65,8 @@ function startsBlock(line: string): boolean {
     QUOTE.test(line) ||
     BULLET.test(line) ||
     ORDERED.test(line) ||
-    TABLE_ROW.test(line)
+    isTableRow(line) ||
+    isTableSeparator(line)
   );
 }
 
@@ -275,7 +285,7 @@ function paragraphText(lines: string[]): string {
 }
 
 function splitTableRow(line: string): string[] {
-  const inner = line.trim().slice(1, -1);
+  const inner = line.slice(TABLE_ROW_MARKER.length).trim().slice(1, -1);
   const cells: string[] = [];
   let cell = "";
   for (let index = 0; index < inner.length; index += 1) {
@@ -412,14 +422,14 @@ function parseBlocks(lines: string[]): DescriptionNode[] {
       continue;
     }
 
-    if (TABLE_ROW.test(line)) {
+    if (isTableRow(line) || isTableSeparator(line)) {
       const rows: string[] = [];
       let headerRow = -1;
       while (index < lines.length) {
         const candidate = lines[index]!;
-        if (TABLE_SEPARATOR.test(candidate)) {
+        if (isTableSeparator(candidate)) {
           if (rows.length && headerRow < 0) headerRow = rows.length - 1;
-        } else if (TABLE_ROW.test(candidate)) rows.push(candidate);
+        } else if (isTableRow(candidate)) rows.push(candidate);
         else break;
         index += 1;
       }
