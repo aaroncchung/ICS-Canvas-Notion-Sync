@@ -4,6 +4,7 @@ import { readAssignments } from "../../src/notion/assignments.ts";
 import { managedDescriptionHash } from "../../src/notion/descriptions.ts";
 import { buildPlan } from "../../src/sync/plan.ts";
 import { ApplyPlanError, applyPlan } from "../../src/sync/reconcile.ts";
+import { hasAssignmentSignals } from "../../src/sync/removal-detector.ts";
 import type { AssignmentRecord, CourseRecord, ExternalAssignment } from "../../src/types.ts";
 import { assignmentFeed, config, FakeGateway, plannedOperations } from "../helpers.ts";
 
@@ -265,5 +266,43 @@ describe("execution ledger", () => {
     expect(failure?.execution.failedOperation?.kind).toBe("assignment-page-create");
     expect(failure?.execution.notAttempted).toEqual(plannedOperations(result).slice(2));
     expect(gateway.assignments).toEqual([]);
+  });
+});
+
+describe("assignment signals", () => {
+  const diagnostics = assignmentFeed().diagnostics;
+
+  it("finds none in an empty feed or one holding only ordinary events", () => {
+    expect(hasAssignmentSignals(assignmentFeed())).toBe(false);
+    expect(
+      hasAssignmentSignals(
+        assignmentFeed({
+          diagnostics: {
+            ...diagnostics,
+            totalEvents: 1,
+            events: [{ kind: "ignored", reason: "ordinary-calendar-event", indicators: [] }],
+          },
+        }),
+      ),
+    ).toBe(false);
+  });
+
+  // The feed type does not tie these fields together, so each one must count on its own.
+  it.each<[string, Parameters<typeof assignmentFeed>[0]]>([
+    ["an active assignment", { assignments: [source("a")] }],
+    ["a cancelled assignment", { cancelledAssignments: [source("a")] }],
+    ["a normalized UID", { diagnostics: { ...diagnostics, normalizedAssignmentUids: ["a"] } }],
+    ["a quarantined UID", { diagnostics: { ...diagnostics, quarantinedUids: ["a"] } }],
+    [
+      "a non-ignored event",
+      {
+        diagnostics: {
+          ...diagnostics,
+          events: [{ kind: "suspicious", reason: "assignment-like-event", indicators: [] }],
+        },
+      },
+    ],
+  ])("treats %s alone as a signal", (_label, overrides) => {
+    expect(hasAssignmentSignals(assignmentFeed(overrides))).toBe(true);
   });
 });
