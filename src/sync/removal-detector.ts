@@ -9,12 +9,10 @@ import type {
 
 const DAY = 86_400_000;
 
+/** Every quarantined or cancelled UID also records a non-ignored diagnostic event. */
 export function hasAssignmentSignals(feed: AssignmentFeed): boolean {
   return (
-    feed.assignments.length > 0 ||
-    feed.cancelledAssignments.length > 0 ||
     feed.diagnostics.normalizedAssignmentUids.length > 0 ||
-    feed.diagnostics.quarantinedUids.length > 0 ||
     feed.diagnostics.events.some((event) => event.kind !== "ignored")
   );
 }

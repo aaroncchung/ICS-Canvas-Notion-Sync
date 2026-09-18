@@ -9,9 +9,16 @@ import {
 } from "../../src/observability/run-report.ts";
 import { reportLines, reportSections } from "../../src/observability/report-content.ts";
 import { buildPlan, type PlanOptions } from "../../src/sync/plan.ts";
-import { ApplyPlanError, applyPlan, plannedOperations } from "../../src/sync/reconcile.ts";
+import { ApplyPlanError, applyPlan } from "../../src/sync/reconcile.ts";
 import type { AssignmentFeed, AssignmentRecord, CourseRecord, SyncPlan } from "../../src/types.ts";
-import { assignmentFeed, config, FakeGateway, FakeProvider, runResult } from "../helpers.ts";
+import {
+  assignmentFeed,
+  config,
+  FakeGateway,
+  FakeProvider,
+  plannedOperations,
+  runResult,
+} from "../helpers.ts";
 
 const now = new Date("2026-09-14T12:00:00Z");
 const source = {
@@ -51,7 +58,7 @@ describe("run reporting sources of truth", () => {
     const first = buildPlan(...inputs);
     expect(buildPlan(...inputs)).toEqual(first);
     expect(first.planning?.descriptionUpdatesAvoided).toBe(1);
-    expect(runMetrics(first).descriptionBodyReadsAvoided).toBe(1);
+    expect(runMetrics(first).descriptionUpdatesAvoided).toBe(1);
   });
 
   it.each([false, true])(
@@ -235,7 +242,6 @@ describe("run reporting sources of truth", () => {
       "Description integrity audits run",
       "Description audits passed without repair",
       "Description integrity repairs",
-      "Description body reads avoided",
     ]);
     for (const line of summary) if (!aliases.has(line.split(":")[0]!)) expect(log).toContain(line);
   });

@@ -1,6 +1,14 @@
 import { createRunMetrics, createRequestMetrics } from "../src/observability/run-report.ts";
 import type { AppConfig } from "../src/config.ts";
-import type { AssignmentFeed, AssignmentProvider, RunCounts, RunResult } from "../src/types.ts";
+import type {
+  AssignmentFeed,
+  AssignmentProvider,
+  RunCounts,
+  RunResult,
+  SyncOperation,
+  SyncPlan,
+} from "../src/types.ts";
+import { compilePlan, operationOf } from "../src/sync/commands.ts";
 import { type NotionGateway } from "../src/notion/client.ts";
 import {
   compileAssignmentTypeMatcher,
@@ -20,6 +28,11 @@ const rules: AppConfig["assignmentTypeRules"] = [
 ];
 
 export const assignmentTypeMatcher: AssignmentTypeMatcher = compileAssignmentTypeMatcher(rules);
+
+/** Every operation a plan compiles to, in execution order. */
+export function plannedOperations(plan: SyncPlan): SyncOperation[] {
+  return compilePlan(plan).map(operationOf);
+}
 
 export function assignmentFeed(overrides: Partial<AssignmentFeed> = {}): AssignmentFeed {
   return {

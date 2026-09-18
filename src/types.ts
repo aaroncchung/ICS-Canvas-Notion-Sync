@@ -298,7 +298,6 @@ export interface RunMetrics extends RequestMetrics {
   descriptionIntegrityAuditsRun: number;
   descriptionIntegrityAuditsPassed: number;
   descriptionIntegrityRepairs: number;
-  descriptionBodyReadsAvoided: number;
   /** Planned audits caused by a managed-description format change; a one-time cost per page. */
   descriptionFormatUpgrades: number;
   coursesCreated: number;

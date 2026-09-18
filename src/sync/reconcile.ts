@@ -17,7 +17,6 @@ import type {
   Clock,
   FailedSyncOperation,
   SyncExecutionResult,
-  SyncOperation,
   SyncOperationKind,
   SyncPlan,
 } from "../types.ts";
@@ -28,10 +27,6 @@ function operationError(error: unknown): string {
   if (status) return `Notion request failed with status ${status}`;
   if (error instanceof Error) return safeError(error).slice(0, 240);
   return "Notion operation failed";
-}
-
-export function plannedOperations(plan: SyncPlan): SyncOperation[] {
-  return compilePlan(plan).map(operationOf);
 }
 
 export class ApplyPlanError extends Error {

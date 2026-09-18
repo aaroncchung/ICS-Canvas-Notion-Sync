@@ -3,9 +3,9 @@ import { describe, expect, it } from "vitest";
 import { readAssignments } from "../../src/notion/assignments.ts";
 import { managedDescriptionHash } from "../../src/notion/descriptions.ts";
 import { buildPlan } from "../../src/sync/plan.ts";
-import { ApplyPlanError, applyPlan, plannedOperations } from "../../src/sync/reconcile.ts";
+import { ApplyPlanError, applyPlan } from "../../src/sync/reconcile.ts";
 import type { AssignmentRecord, CourseRecord, ExternalAssignment } from "../../src/types.ts";
-import { assignmentFeed, config, FakeGateway } from "../helpers.ts";
+import { assignmentFeed, config, FakeGateway, plannedOperations } from "../helpers.ts";
 
 const now = new Date("2026-07-13T12:00:00Z");
 const timezone = "America/Los_Angeles";
@@ -132,7 +132,7 @@ describe("finalized reconciliation decisions", () => {
     expect(result.unchanged).toBe(0);
     expect(result.skipped).toBe(2);
     expect(result.assignmentsToUpdate).toEqual([]);
-    expect(metrics.descriptionBodyReadsAvoided).toBe(0);
+    expect(metrics.descriptionUpdatesAvoided).toBe(0);
   });
 
   it("protects absent duplicate Notion UIDs from removal evidence", () => {

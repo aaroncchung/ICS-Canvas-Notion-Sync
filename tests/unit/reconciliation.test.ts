@@ -181,7 +181,6 @@ describe("plan-first reconciliation", () => {
     const { result } = planWithMetrics(record());
     expect(result.assignmentsToUpdate).toEqual([]);
     expect(runMetrics(result).descriptionUpdatesAvoided).toBe(1);
-    expect(runMetrics(result).descriptionBodyReadsAvoided).toBe(1);
     expect(runMetrics(result).descriptionIntegrityAuditsDue).toBe(0);
     expect(runMetrics(result).descriptionIntegrityAuditsDeferred).toBe(0);
   });
@@ -212,7 +211,6 @@ describe("plan-first reconciliation", () => {
     expect(runMetrics(result).descriptionIntegrityAuditsDue).toBe(0);
     expect(runMetrics(result).descriptionIntegrityAuditsDeferred).toBe(1);
     expect(runMetrics(result).descriptionUpdatesAvoided).toBe(1);
-    expect(runMetrics(result).descriptionBodyReadsAvoided).toBe(1);
   });
 
   it("counts an eligible matching hash on its slot as due", () => {
@@ -585,7 +583,6 @@ describe("plan-first reconciliation", () => {
       expect(runMetrics(result).descriptionIntegrityAuditsDue).toBe(0);
       expect(runMetrics(result).descriptionIntegrityAuditsDeferred).toBe(0);
       expect(runMetrics(result).descriptionUpdatesAvoided).toBe(0);
-      expect(runMetrics(result).descriptionBodyReadsAvoided).toBe(0);
     }
   });
 

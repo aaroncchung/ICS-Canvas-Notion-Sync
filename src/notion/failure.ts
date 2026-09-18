@@ -53,7 +53,8 @@ export type NotionFailureClassification =
       ambiguousWrite: true;
     };
 
-function property(value: unknown, name: string): unknown {
+/** Reads a property from an untrusted thrown value; a throwing getter reads as undefined. */
+export function property(value: unknown, name: string): unknown {
   if (!value || (typeof value !== "object" && typeof value !== "function")) return;
   try {
     return (value as Record<string, unknown>)[name];

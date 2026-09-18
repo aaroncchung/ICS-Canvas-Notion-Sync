@@ -46,7 +46,6 @@ export function createRunMetrics(): RunMetrics {
     descriptionIntegrityAuditsRun: 0,
     descriptionIntegrityAuditsPassed: 0,
     descriptionIntegrityRepairs: 0,
-    descriptionBodyReadsAvoided: 0,
     descriptionFormatUpgrades: 0,
     coursesCreated: 0,
     coursesRecovered: 0,
@@ -145,8 +144,6 @@ export function runMetrics(
   };
   metrics.coursesConflicted = plan?.planning?.coursesConflicted ?? 0;
   metrics.descriptionUpdatesAvoided = plan?.planning?.descriptionUpdatesAvoided ?? 0;
-  // Compatibility alias, never an independently accumulated counter.
-  metrics.descriptionBodyReadsAvoided = metrics.descriptionUpdatesAvoided;
   metrics.descriptionIntegrityAuditsDeferred =
     plan?.planning?.descriptionIntegrityAuditsDeferred ?? 0;
   metrics.descriptionFormatUpgrades = plan?.planning?.descriptionFormatUpgrades ?? 0;

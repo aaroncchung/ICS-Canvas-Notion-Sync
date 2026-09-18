@@ -1,4 +1,8 @@
-import { classifyNotionFailure, type NotionFailureClassification } from "../notion/failure.ts";
+import {
+  classifyNotionFailure,
+  property,
+  type NotionFailureClassification,
+} from "../notion/failure.ts";
 
 const TOKEN_PATTERN = /\b(?:secret|ntn|oauth|sk)[_-][A-Za-z0-9_-]{8,}\b/gi;
 const AUTH_PATTERN = /(?:authorization\s*[:=]\s*|bearer\s+)[^\s,}\]]+/gi;
@@ -29,15 +33,6 @@ export function redactText(input: string, secrets: string[] = []): string {
     .replace(TOKEN_PATTERN, "[REDACTED_TOKEN]")
     .replace(AUTH_PATTERN, "Authorization: [REDACTED]")
     .replace(URL_PATTERN, "[REDACTED_URL]");
-}
-
-function property(value: unknown, name: string): unknown {
-  if (!value || (typeof value !== "object" && typeof value !== "function")) return;
-  try {
-    return (value as Record<string, unknown>)[name];
-  } catch {
-    return;
-  }
 }
 
 function stringProperty(value: unknown, name: string): string | undefined {

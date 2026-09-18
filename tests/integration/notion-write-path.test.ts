@@ -17,14 +17,15 @@ import {
 import { MANAGED_SYNC_LOG_TITLE, writeSyncLog } from "../../src/notion/sync-log.ts";
 import { operationSections } from "../../src/observability/report-content.ts";
 import { runMetrics, workCounts } from "../../src/observability/run-report.ts";
-import {
-  ApplyPlanError,
-  applyPlan,
-  emptyExecutionResult,
-  plannedOperations,
-} from "../../src/sync/reconcile.ts";
+import { ApplyPlanError, applyPlan, emptyExecutionResult } from "../../src/sync/reconcile.ts";
 import type { SyncPlan } from "../../src/types.ts";
-import { config, FakeGateway, readManagedDescription, runResult } from "../helpers.ts";
+import {
+  config,
+  FakeGateway,
+  plannedOperations,
+  readManagedDescription,
+  runResult,
+} from "../helpers.ts";
 import { setTimeout as sleep } from "node:timers/promises";
 
 vi.mock("node:timers/promises", () => ({ setTimeout: vi.fn(async () => {}) }));
