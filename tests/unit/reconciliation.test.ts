@@ -616,6 +616,19 @@ describe("plan-first reconciliation", () => {
     expect(runMetrics(result).descriptionIntegrityAuditsDeferred).toBe(0);
   });
 
+  it("counts pages stored in an older description format as format upgrades", () => {
+    const legacy = managedDescriptionHash("Original description", "canvas-description:v2");
+    const { result, metrics } = planWithMetrics(record({ descriptionHash: legacy }));
+    expect(result.planning?.descriptionFormatUpgrades).toBe(1);
+    expect(metrics.descriptionFormatUpgrades).toBe(1);
+    expect(result.assignmentsToUpdate[0]?.verifyDescription).toBe(true);
+    // A current-format hash that merely changed content is a plain audit, not an upgrade.
+    const changed = planWithMetrics(record({ descriptionHash: managedDescriptionHash("Other") }));
+    expect(changed.metrics.descriptionFormatUpgrades).toBe(0);
+    expect(changed.metrics.descriptionIntegrityAuditsDue).toBe(1);
+    expect(planWithMetrics(record()).metrics.descriptionFormatUpgrades).toBe(0);
+  });
+
   it("updates Canvas-owned fields on Done assignments without status writes", () => {
     const update = plan([source({ title: "Changed" })]).assignmentsToUpdate[0];
     expect(update?.properties.title).toBe("Changed");

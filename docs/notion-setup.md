@@ -81,6 +81,8 @@ The sync does not overwrite Term, Instructor, Notes, Drive Folder, Color, or oth
 
 The sync applies the default through Notion's template API, waits for asynchronous template content, and then reconciles its own managed Canvas description toggle. It writes `Canvas Description Hash` and `Canvas Description Verified At` together only after that managed body is verified. Hash changes and blank or invalid verification dates trigger immediate auditing. Matching hashes with valid dates are eligible after 30 calendar days and are distributed across 30 stable slots derived from the Canvas UID. The slot calendar and age use `NOTION_TIMEZONE`, and a 60-calendar-day maximum forces an audit even when the current run is outside the assignment's slot. Thus the first live sync at or after 60 days cannot defer the audit. Dry-run reports audits due and deferred without reading page bodies. The schedule requires no additional Notion properties.
 
+The managed toggle holds native Notion blocks (headings, lists, quotes, code, styled paragraphs). When a release changes that rendering, the hash version changes with it and every existing page is audited once on the next live run: matching bodies get only new metadata, differing bodies are rewritten through the pending marker before their metadata is written. The dry-run report lists the affected pages as `Description format upgrades`.
+
 ## 5. Create Canvas Sync Log
 
 Create a database named `Canvas Sync Log` with exactly:

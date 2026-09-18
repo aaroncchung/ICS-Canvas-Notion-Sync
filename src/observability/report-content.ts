@@ -101,6 +101,11 @@ function reportFields(config: AppConfig, result: RunResult): ReportField[] {
       "Audits deferred to later slots",
     ),
     field(
+      "Description format upgrades",
+      metrics.descriptionFormatUpgrades,
+      "Description integrity",
+    ),
+    field(
       "Description integrity audits run",
       metrics.descriptionIntegrityAuditsRun,
       "Description integrity",

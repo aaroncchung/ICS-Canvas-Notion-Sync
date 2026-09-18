@@ -170,6 +170,7 @@ export function buildPlan(
   const usedCourses = new Set<string>();
   let avoided = 0;
   let deferred = 0;
+  let formatUpgrades = 0;
   for (const { source, existing, duplicateCoursePageId, resolve } of candidates) {
     const course = resolve();
     if (course.kind === "blocked") {
@@ -196,6 +197,7 @@ export function buildPlan(
     const decision = decideAssignment(source, existing, course, notionTimezone, now);
     if (decision.update) plan.assignmentsToUpdate.push(decision.update);
     else plan.unchanged += 1;
+    if (decision.formatUpgrade) formatUpgrades += 1;
     if (!decision.update?.verifyDescription) {
       avoided += 1;
       if (decision.deferred) deferred += 1;
@@ -224,6 +226,7 @@ export function buildPlan(
     coursesConflicted: coursePlan.conflicts,
     descriptionIntegrityAuditsDeferred: deferred,
     descriptionUpdatesAvoided: avoided,
+    descriptionFormatUpgrades: formatUpgrades,
   };
   return plan;
 }

@@ -47,6 +47,7 @@ export function createRunMetrics(): RunMetrics {
     descriptionIntegrityAuditsPassed: 0,
     descriptionIntegrityRepairs: 0,
     descriptionBodyReadsAvoided: 0,
+    descriptionFormatUpgrades: 0,
     coursesCreated: 0,
     coursesRecovered: 0,
     coursesEnriched: 0,
@@ -148,6 +149,7 @@ export function runMetrics(
   metrics.descriptionBodyReadsAvoided = metrics.descriptionUpdatesAvoided;
   metrics.descriptionIntegrityAuditsDeferred =
     plan?.planning?.descriptionIntegrityAuditsDeferred ?? 0;
+  metrics.descriptionFormatUpgrades = plan?.planning?.descriptionFormatUpgrades ?? 0;
   metrics.descriptionIntegrityAuditsDue = plan
     ? compilePlan(plan).filter((value) => value.kind === "assignment-description-update").length
     : 0;

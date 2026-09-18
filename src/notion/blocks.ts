@@ -2,6 +2,8 @@ export type Block = Record<string, unknown>;
 
 /** Notion allows 2000 characters per rich text item; leave a margin. */
 export const PARAGRAPH_TEXT_LIMIT = 1900;
+/** Notion allows 100 rich text items per block. */
+export const RICH_TEXT_ITEM_LIMIT = 100;
 
 export function paragraph(content: string): Block {
   return {
@@ -11,19 +13,36 @@ export function paragraph(content: string): Block {
   };
 }
 
-/** Split text into paragraph blocks without cutting a surrogate pair in half. */
-export function paragraphs(content: string, limit = PARAGRAPH_TEXT_LIMIT): Block[] {
-  const blocks: Block[] = [];
+function isSurrogateBoundary(content: string, end: number): boolean {
+  const high = content.charCodeAt(end - 1);
+  const low = content.charCodeAt(end);
+  return high >= 0xd800 && high <= 0xdbff && low >= 0xdc00 && low <= 0xdfff;
+}
+
+/**
+ * Split text into pieces of at most `limit` UTF-16 units. A piece ends at the last whitespace in
+ * the second half of its window when there is one, so words stay whole; it never ends between
+ * the halves of a surrogate pair.
+ */
+export function splitText(content: string, limit = PARAGRAPH_TEXT_LIMIT): string[] {
+  const pieces: string[] = [];
   for (let offset = 0; offset < content.length;) {
     let end = Math.min(offset + limit, content.length);
-    const high = content.charCodeAt(end - 1);
-    const low = content.charCodeAt(end);
-    if (end < content.length && high >= 0xd800 && high <= 0xdbff && low >= 0xdc00 && low <= 0xdfff)
-      end -= 1;
-    blocks.push(paragraph(content.slice(offset, end)));
+    if (end < content.length) {
+      const window = content.slice(offset, end);
+      const boundary = window.search(/\s\S*$/);
+      if (boundary > limit / 2) end = offset + boundary + 1;
+      else if (isSurrogateBoundary(content, end)) end -= 1;
+    }
+    pieces.push(content.slice(offset, end));
     offset = end;
   }
-  return blocks;
+  return pieces;
+}
+
+/** Split text into paragraph blocks without cutting a surrogate pair in half. */
+export function paragraphs(content: string, limit = PARAGRAPH_TEXT_LIMIT): Block[] {
+  return splitText(content, limit).map(paragraph);
 }
 
 export function toggle(title: string, children?: Block[]): Block {

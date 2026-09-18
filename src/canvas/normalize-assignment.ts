@@ -1,5 +1,13 @@
 import sanitizeHtml from "sanitize-html";
 import TurndownService from "turndown";
+import {
+  TABLE_CELL_LINE_BREAK,
+  TABLE_CELL_SEPARATOR,
+  TABLE_ROW_MARKER,
+  TABLE_SEPARATOR_MARKER,
+  descriptionPlainText,
+  parseDescriptionMarkdown,
+} from "../description-document.ts";
 import type { AssignmentType, ExternalAssignment } from "../types.ts";
 import type { ClassificationResult } from "./classify-event.ts";
 
@@ -15,7 +23,115 @@ export interface RawCalendarEvent {
   datetype?: string;
 }
 
-const turndown = new TurndownService({ headingStyle: "atx", bulletListMarker: "-" });
+/**
+ * Turndown options are pinned because `description-document.ts` parses exactly this dialect:
+ * ATX headings, `-` bullets, fenced code, `**strong**`, and `_emphasis_`. The rules added below
+ * keep that Markdown unambiguous where turndown's defaults are not.
+ */
+const turndown = new TurndownService({
+  headingStyle: "atx",
+  bulletListMarker: "-",
+  codeBlockStyle: "fenced",
+  fence: "```",
+  emDelimiter: "_",
+  strongDelimiter: "**",
+});
+
+function tableCells(row: Node): Node[] {
+  return Array.from(row.childNodes).filter((node) => /^T[HD]$/.test(node.nodeName));
+}
+
+function isHeaderRow(row: Node): boolean {
+  if (row.parentNode?.nodeName === "THEAD") return true;
+  const cells = tableCells(row);
+  return cells.length > 0 && cells.every((cell) => cell.nodeName === "TH");
+}
+
+function hasAncestor(node: Node, names: string[]): boolean {
+  for (let parent = node.parentNode; parent; parent = parent.parentNode) {
+    if (names.includes(parent.nodeName)) return true;
+  }
+  return false;
+}
+
+/** Inline code flattens its content onto one line, where table syntax would only be noise. */
+function insideCode(node: Node): boolean {
+  return hasAncestor(node, ["CODE"]);
+}
+
+const BLOCK_CONTENT = "p, h1, h2, h3, h4, h5, h6, ul, ol, pre, blockquote, table";
+
+/** Inline Markdown cannot span blocks: its delimiters would become paragraphs of their own. */
+function wrapsBlocks(node: TurndownService.Node): boolean {
+  // Turndown's bundled DOM answers "no match" with undefined rather than null.
+  return Boolean(node.querySelector(BLOCK_CONTENT));
+}
+
+// Redundant same-style nesting such as `<b><strong>x</strong></b>` would double the delimiter into
+// text that reads differently (`__x__` is strong, `****x****` is literal), so only the outermost
+// element of a style emits delimiters. An element that wraps blocks emits none and keeps its text.
+function styleRule(
+  tags: Array<"em" | "i" | "strong" | "b">,
+  delimiter: (options: TurndownService.Options) => string | undefined,
+): TurndownService.Rule {
+  const names = tags.map((tag) => tag.toUpperCase());
+  return {
+    filter: tags,
+    replacement: (content, node, options) => {
+      if (!content.trim()) return "";
+      if (hasAncestor(node, names) || wrapsBlocks(node)) return content;
+      return `${delimiter(options)}${content}${delimiter(options)}`;
+    },
+  };
+}
+turndown.addRule(
+  "emphasis",
+  styleRule(["em", "i"], (options) => options.emDelimiter),
+);
+turndown.addRule(
+  "strong",
+  styleRule(["strong", "b"], (options) => options.strongDelimiter),
+);
+
+turndown.addRule("blockLink", {
+  filter: (node) => node.nodeName === "A" && wrapsBlocks(node),
+  replacement: (content) => content,
+});
+
+// Turndown has no table support of its own. Control-delimited tags keep generated rows distinct
+// from ordinary Canvas text that happens to use pipe characters, and cells need no escaping.
+turndown.addRule("tableCell", {
+  filter: ["th", "td"],
+  replacement: (content, node) => {
+    const index = node.parentNode ? tableCells(node.parentNode).indexOf(node) : 0;
+    if (insideCode(node)) return `${index === 0 ? "" : " "}${content.trim()}`;
+    // The model is flat, so a table nested in this cell folds into the cell's own text. The cell
+    // keeps its block Markdown; its line breaks are encoded because a row is a single line.
+    const cell = content
+      .replaceAll(TABLE_SEPARATOR_MARKER, "")
+      .replaceAll(TABLE_ROW_MARKER, "")
+      .replaceAll(TABLE_CELL_SEPARATOR, " | ")
+      .trim()
+      .replaceAll("\n", TABLE_CELL_LINE_BREAK);
+    return `${index === 0 ? "" : TABLE_CELL_SEPARATOR}${cell}`;
+  },
+});
+turndown.addRule("tableRow", {
+  filter: "tr",
+  replacement: (content, node) => {
+    if (insideCode(node)) return content;
+    const separator = isHeaderRow(node) ? `\n${TABLE_SEPARATOR_MARKER}` : "";
+    return `\n${TABLE_ROW_MARKER}${content}${separator}`;
+  },
+});
+turndown.addRule("table", {
+  filter: ["table", "thead", "tbody"],
+  replacement: (content, node) =>
+    node.nodeName === "TABLE" && !insideCode(node) ? `\n\n${content.trim()}\n\n` : content,
+});
+
+/** Every control character except tab, line feed, and carriage return. */
+const CONTROL_CHARACTERS = /[^\P{Cc}\t\n\r]/gu;
 
 export type AssignmentTypeMatcher = (title: string) => AssignmentType;
 
@@ -74,8 +190,11 @@ export function sanitizeDescription(html: string | undefined): {
     allowedSchemes: ["http", "https", "mailto"],
     disallowedTagsMode: "discard",
   });
-  const markdown = turndown.turndown(safeHtml).trim();
-  const plainText = sanitizeHtml(safeHtml, { allowedTags: [] }).replace(/\s+/g, " ").trim();
+  // sanitize-html decodes character references, so this also catches `&#x1e;`. Control characters
+  // have no visible form, and the table rules rely on Canvas text never containing them.
+  const markdown = turndown.turndown(safeHtml.replace(CONTROL_CHARACTERS, "")).trim();
+  // The excerpt is the visible text of the same blocks the managed section renders.
+  const plainText = descriptionPlainText(parseDescriptionMarkdown(markdown));
   return {
     ...(plainText ? { plainText } : {}),
     ...(markdown ? { markdown } : {}),

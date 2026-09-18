@@ -121,14 +121,33 @@ function canonicalRichText(value: unknown): CanonicalValue[] {
   });
 }
 
+/** Block types whose payload is rich text plus a color, as written and as Notion reads them back. */
+const RICH_TEXT_BLOCK_TYPES = new Set([
+  "paragraph",
+  "toggle",
+  "heading_1",
+  "heading_2",
+  "heading_3",
+  "bulleted_list_item",
+  "numbered_list_item",
+  "quote",
+]);
+
 function canonicalPayload(block: Block, type: string): CanonicalValue {
   const value = block[type];
   const payload = value && typeof value === "object" ? (value as Record<string, unknown>) : {};
-  if (type === "paragraph" || type === "toggle" || /^heading_[123]$/.test(type)) {
+  if (RICH_TEXT_BLOCK_TYPES.has(type)) {
     return {
       rich_text: canonicalRichText(payload.rich_text),
       color: typeof payload.color === "string" ? payload.color : "default",
       ...(/^heading_[123]$/.test(type) ? { is_toggleable: payload.is_toggleable === true } : {}),
+    };
+  }
+  if (type === "code") {
+    return {
+      rich_text: canonicalRichText(payload.rich_text),
+      caption: canonicalRichText(payload.caption),
+      language: typeof payload.language === "string" ? payload.language : "plain text",
     };
   }
   const managedPayload = { ...payload };

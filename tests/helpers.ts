@@ -205,24 +205,45 @@ function propertyText(property: unknown): string {
   return richTextValue(record.title ?? record.rich_text);
 }
 
+/** Reads a rich text item back the way Notion does: every annotation, link, and href filled in. */
+function materializeRichText(item: unknown): Record<string, unknown> {
+  if (!item || typeof item !== "object") return {};
+  const value = item as Record<string, unknown>;
+  const text =
+    value.text && typeof value.text === "object" ? (value.text as Record<string, unknown>) : {};
+  const content =
+    typeof text.content === "string"
+      ? text.content
+      : typeof value.plain_text === "string"
+        ? value.plain_text
+        : "";
+  const link = text.link && typeof text.link === "object" ? text.link : null;
+  const annotations =
+    value.annotations && typeof value.annotations === "object" ? value.annotations : {};
+  return {
+    ...value,
+    type: typeof value.type === "string" ? value.type : "text",
+    text: { ...text, content, link },
+    annotations: {
+      bold: false,
+      italic: false,
+      strikethrough: false,
+      underline: false,
+      code: false,
+      color: "default",
+      ...annotations,
+    },
+    plain_text: content,
+    href: link ? ((link as Record<string, unknown>).url ?? null) : null,
+  };
+}
+
 function materializeBlock(id: string, source: Record<string, unknown>): Record<string, unknown> {
   const type = typeof source.type === "string" ? source.type : "paragraph";
   const content = source[type];
   const record = content && typeof content === "object" ? (content as Record<string, unknown>) : {};
   const richText = Array.isArray(record.rich_text)
-    ? (record.rich_text as unknown[]).map((item) => {
-        if (!item || typeof item !== "object") return {};
-        const value = item as Record<string, unknown>;
-        const text = value.text;
-        const contentValue =
-          text && typeof text === "object"
-            ? (text as Record<string, unknown>).content
-            : value.plain_text;
-        return {
-          ...value,
-          ...(typeof contentValue === "string" ? { plain_text: contentValue } : {}),
-        };
-      })
+    ? (record.rich_text as unknown[]).map(materializeRichText)
     : [];
   return { ...source, id, type, [type]: { ...record, rich_text: richText } };
 }

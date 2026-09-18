@@ -32,8 +32,11 @@ import {
 
 export const DESCRIPTION_EXCERPT_LENGTH = 1900;
 
+/** The leading text of a description; a cut through an emoji drops the half Notion would reject. */
 export function descriptionExcerpt(source: ExternalAssignment): string {
-  return (source.descriptionPlainText ?? "").slice(0, DESCRIPTION_EXCERPT_LENGTH);
+  return (source.descriptionPlainText ?? "")
+    .slice(0, DESCRIPTION_EXCERPT_LENGTH)
+    .replace(/\p{Surrogate}$/u, "");
 }
 
 export async function readAssignments(
