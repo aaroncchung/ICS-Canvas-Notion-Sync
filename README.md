@@ -11,7 +11,7 @@ An ICS feed is narrower than the Canvas API:
 - It has no submission state, grades, points, availability windows, or authenticated assignment metadata.
 - It cannot tell whether an assignment is complete or submitted.
 - It can import only assignments present in Canvas's current calendar-feed window.
-- Real institutions can vary slightly in their Canvas UID, description, and course-label formats. The classifier is deliberately conservative; inspect the dry-run warnings after the first real feed is available.
+- Real institutions can vary slightly in their Canvas UID, description, and course-label formats. The classifier is deliberately conservative; inspect the dry-run warnings whenever the sync is pointed at a new institution's feed.
 
 Personal Status, Priority, Notes, Override Due Date, and an assignment's manually edited Assignment Type are never overwritten.
 
@@ -24,7 +24,7 @@ Personal Status, Priority, Notes, Override Due Date, and an assignment's manuall
 5. Courses and active assignments are written conservatively. Only after all active writes succeed can guarded removal markers be applied.
 6. Live runs write a detailed Canvas Sync Log page. Dry-run and validate modes make no data changes.
 
-The implementation uses an `AssignmentProvider` whose `fetchAssignments()` method returns one `AssignmentFeed` containing active assignments, cancelled assignments, and structured diagnostics. `CanvasIcsProvider` is the initial provider; a future authenticated provider can return the same normalized feed without mutable side channels or reconciliation changes.
+The implementation uses an `AssignmentProvider` whose `fetchAssignments()` method returns one `AssignmentFeed` containing active assignments, cancelled assignments, and structured diagnostics. `CanvasIcsProvider` is the only provider; any other provider can return the same normalized feed without mutable side channels or reconciliation changes.
 
 The synchronization core collects course evidence first, finalizes each assignment decision once, and then plans guarded removal evidence. Execution and Sync Log reporting share one ordered command sequence. See [the core architecture](docs/sync-core.md) for its boundaries and recovery invariants.
 
@@ -33,7 +33,7 @@ The synchronization core collects course evidence first, finalizes each assignme
 - Node.js 24 LTS
 - A private Canvas ICS calendar-feed URL
 - A Notion internal integration with read, insert, and update content capabilities
-- Existing Assignments and Courses data sources, plus a manually created Canvas Sync Log data source
+- Assignments, Courses, and Canvas Sync Log data sources in Notion, created manually
 - A GitHub repository with Actions enabled
 
 The Notion API version is explicitly pinned to `2026-03-11`.
@@ -69,14 +69,7 @@ NOTION_TIMEZONE
 CANVAS_MISSING_EVIDENCE_MINIMUM_HOURS
 ```
 
-`NOTION_TIMEZONE` defaults to `America/Los_Angeles` in the GitHub workflow. `CANVAS_MISSING_EVIDENCE_MINIMUM_HOURS` defaults to `6` and rejects values below six hours. The known starting IDs are:
-
-```text
-Assignments: 118ccb50-6027-4ccb-ba19-c0b6ac292ab7
-Courses:     e2c63549-089a-4461-9f19-52cd0626e386
-```
-
-All IDs remain configurable. Supply the new Sync Log data-source ID after creating it.
+`NOTION_TIMEZONE` defaults to `America/Los_Angeles` in the GitHub workflow. `CANVAS_MISSING_EVIDENCE_MINIMUM_HOURS` defaults to `6` and rejects values below six hours. The three data-source IDs have no defaults; copy each one from its database's **Manage data sources** menu in Notion.
 
 ### Course aliases
 
@@ -104,7 +97,7 @@ npm run sync -- --mode dry-run --trigger manual
 npm run sync -- --mode sync --trigger manual
 ```
 
-Add `--disable-removals` to a sync or dry-run command to suppress removal planning. Fatal configuration, feed, schema, or write errors return a nonzero exit code. Validate reports active, cancelled, ordinary ignored, suspicious, malformed, duplicate, and quarantined counts plus removal safety without printing UIDs, titles, descriptions, or feed contents. Ordinary events and deterministically normalized cancellations do not cause warning status; unsafe assignment diagnostics do. `Skipped` now counts assignment reconciliation work withheld for safety, not ordinary events, quarantined diagnostics, and cancellations combined into one number.
+Add `--disable-removals` to a sync or dry-run command to suppress removal planning. Fatal configuration, feed, schema, or write errors return a nonzero exit code. Validate reports active, cancelled, ordinary ignored, suspicious, malformed, duplicate, and quarantined counts plus removal safety without printing UIDs, titles, descriptions, or feed contents. Ordinary events and deterministically normalized cancellations do not cause warning status; unsafe assignment diagnostics do. `Skipped` counts only assignment reconciliation work withheld for safety; ordinary events, quarantined diagnostics, and cancellations each have their own count.
 
 Development checks:
 
@@ -125,7 +118,7 @@ Tests use synthetic ICS and in-memory Notion doubles; they require no live crede
 
 ## GitHub Actions
 
-Add the two secrets, four required variables, and optional health-grace variable under **Settings → Secrets and variables → Actions**. Then open **Actions → Canvas–Notion sync → Run workflow** and run in this order:
+Add the two secrets, the three required data-source ID variables, and any optional variables under **Settings → Secrets and variables → Actions**. Then open **Actions → Canvas–Notion sync → Run workflow** and run in this order:
 
 1. `validate`
 2. `dry-run`
@@ -181,13 +174,13 @@ The audit requires exactly one canonical toggle, no pending replacement toggle, 
 
 The hash version (`canvas-description:v3`) changes whenever the rendered blocks change for the same Canvas input, so every page stored under an older version differs from its current hash and is audited on the next live run. That audit is the ordinary one: a page whose body already matches the new rendering (for example the `No description provided.` placeholder) passes and receives only the new hash and timestamp; any other page is rewritten once through the pending marker, verified, and only then given its metadata. A run that fails midway leaves the old hash in place, so the remaining pages are simply picked up by the next run. The cost is about eight Notion requests for a typical rewritten page (four reads, four writes), three for a page whose body already matches, plus one extra append per hundred blocks of a long description; under Notion's three-requests-per-second budget that is a few seconds per page. Dry-run and live reports count these pages as `Description format upgrades` without reading any body, so a dry run shows the size of the one-time migration before it happens. Upgrading changes only the managed toggle's children; user-owned sections are never touched.
 
-The Sync Log separates planned changes from successfully applied changes, failed or ambiguous work, and operations that were not attempted. Live create metrics distinguish confirmed normal creates from ambiguous creates later recovered as existing: logical pages added equals `created + recovered` for both courses and assignments. Recovery never increments the confirmed-create counter, and recovered applied operations are labeled accordingly. Dry-run counts remain proposed operations rather than runtime create/recovery metrics. Debug logs, the Sync Log body, and the GitHub job summary distinguish description audits, audit-only passes, repairs, managed-section replacements, and avoided body reads alongside the existing non-sensitive request/retry, recovery, course, and assignment-page metrics.
+The Sync Log separates planned changes from successfully applied changes, failed or ambiguous work, and operations that were not attempted. Live create metrics distinguish confirmed normal creates from ambiguous creates later recovered as existing: logical pages added equals `created + recovered` for both courses and assignments. Recovery never increments the confirmed-create counter, and recovered applied operations are labeled accordingly. Dry-run counts remain proposed operations rather than runtime create/recovery metrics. Debug logs, the Sync Log body, and the GitHub job summary distinguish description audits, audit-only passes, repairs, managed-section replacements, and avoided description updates alongside the non-sensitive request/retry, recovery, course, and assignment-page metrics.
 
 ### Removal safety
 
 Assignments are never deleted. A safe scheduled run records a first in-window absence in `Canvas Missing Since` and `Canvas Missing Count` without marking the assignment removed. Later safe scheduled runs advance the count; removal requires at least two safe scheduled absences, a count of at least two, and the configured minimum interval since the first observation. A second run before that interval only advances evidence. Manual live runs report candidates but never advance the count. Dry-run follows its declared trigger and shows proposed transitions without writes.
 
-Absence evidence advances only after a complete, nonempty, nontruncated feed under 1,000 events, an absent raw `VEVENT` UID, an in-window stored due date (approximately 30 days back through 366 days ahead), and all existing duplicate, ambiguity, and removal suppressors. Unsafe feeds leave prior evidence unchanged and report why it was not advanced. A present active UID clears its own evidence and reactivates a removed assignment while preserving status, priority, notes, type, override, and page content. A deterministic `STATUS:CANCELLED` match may remove immediately and clears stale missing evidence because cancellation is stronger than inferred absence.
+Absence evidence advances only after a complete, nonempty, nontruncated feed under 1,000 events, an absent raw `VEVENT` UID, an in-window stored due date (approximately 30 days back through 366 days ahead), and no active duplicate, ambiguity, or removal suppressor. Unsafe feeds leave prior evidence unchanged and report why it was not advanced. A present active UID clears its own evidence and reactivates a removed assignment while preserving status, priority, notes, type, override, and page content. A deterministic `STATUS:CANCELLED` match may remove immediately and clears stale missing evidence because cancellation is stronger than inferred absence.
 
 ## Security and troubleshooting
 

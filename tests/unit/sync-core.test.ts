@@ -3,9 +3,10 @@ import { describe, expect, it } from "vitest";
 import { readAssignments } from "../../src/notion/assignments.ts";
 import { managedDescriptionHash } from "../../src/notion/descriptions.ts";
 import { buildPlan } from "../../src/sync/plan.ts";
-import { ApplyPlanError, applyPlan, plannedOperations } from "../../src/sync/reconcile.ts";
+import { ApplyPlanError, applyPlan } from "../../src/sync/reconcile.ts";
+import { hasAssignmentSignals } from "../../src/sync/removal-detector.ts";
 import type { AssignmentRecord, CourseRecord, ExternalAssignment } from "../../src/types.ts";
-import { assignmentFeed, config, FakeGateway } from "../helpers.ts";
+import { assignmentFeed, config, FakeGateway, plannedOperations } from "../helpers.ts";
 
 const now = new Date("2026-07-13T12:00:00Z");
 const timezone = "America/Los_Angeles";
@@ -132,7 +133,7 @@ describe("finalized reconciliation decisions", () => {
     expect(result.unchanged).toBe(0);
     expect(result.skipped).toBe(2);
     expect(result.assignmentsToUpdate).toEqual([]);
-    expect(metrics.descriptionBodyReadsAvoided).toBe(0);
+    expect(metrics.descriptionUpdatesAvoided).toBe(0);
   });
 
   it("protects absent duplicate Notion UIDs from removal evidence", () => {
@@ -265,5 +266,43 @@ describe("execution ledger", () => {
     expect(failure?.execution.failedOperation?.kind).toBe("assignment-page-create");
     expect(failure?.execution.notAttempted).toEqual(plannedOperations(result).slice(2));
     expect(gateway.assignments).toEqual([]);
+  });
+});
+
+describe("assignment signals", () => {
+  const diagnostics = assignmentFeed().diagnostics;
+
+  it("finds none in an empty feed or one holding only ordinary events", () => {
+    expect(hasAssignmentSignals(assignmentFeed())).toBe(false);
+    expect(
+      hasAssignmentSignals(
+        assignmentFeed({
+          diagnostics: {
+            ...diagnostics,
+            totalEvents: 1,
+            events: [{ kind: "ignored", reason: "ordinary-calendar-event", indicators: [] }],
+          },
+        }),
+      ),
+    ).toBe(false);
+  });
+
+  // The feed type does not tie these fields together, so each one must count on its own.
+  it.each<[string, Parameters<typeof assignmentFeed>[0]]>([
+    ["an active assignment", { assignments: [source("a")] }],
+    ["a cancelled assignment", { cancelledAssignments: [source("a")] }],
+    ["a normalized UID", { diagnostics: { ...diagnostics, normalizedAssignmentUids: ["a"] } }],
+    ["a quarantined UID", { diagnostics: { ...diagnostics, quarantinedUids: ["a"] } }],
+    [
+      "a non-ignored event",
+      {
+        diagnostics: {
+          ...diagnostics,
+          events: [{ kind: "suspicious", reason: "assignment-like-event", indicators: [] }],
+        },
+      },
+    ],
+  ])("treats %s alone as a signal", (_label, overrides) => {
+    expect(hasAssignmentSignals(assignmentFeed(overrides))).toBe(true);
   });
 });

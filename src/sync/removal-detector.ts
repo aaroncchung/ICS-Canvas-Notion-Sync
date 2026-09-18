@@ -9,6 +9,10 @@ import type {
 
 const DAY = 86_400_000;
 
+/**
+ * Each field is checked directly. `parseIcs` keeps them consistent, but `AssignmentFeed` does not
+ * enforce that, and this gates absence removal for any provider.
+ */
 export function hasAssignmentSignals(feed: AssignmentFeed): boolean {
   return (
     feed.assignments.length > 0 ||

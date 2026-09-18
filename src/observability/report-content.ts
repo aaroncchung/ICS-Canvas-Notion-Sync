@@ -123,12 +123,6 @@ function reportFields(config: AppConfig, result: RunResult): ReportField[] {
       "Description integrity",
       "Repairs performed",
     ),
-    field(
-      "Description body reads avoided",
-      metrics.descriptionBodyReadsAvoided,
-      "Description integrity",
-      "Body reads avoided",
-    ),
     field("Managed-section replacements", metrics.descriptionReplacements, "Description integrity"),
     field("Ambiguous write recoveries", metrics.ambiguousWriteRecoveries),
     field("Assignments fully synchronized", result.execution?.assignmentsSynchronized.length ?? 0),

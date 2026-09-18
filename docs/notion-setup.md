@@ -10,25 +10,7 @@ The sync validates this setup but never changes database schemas. Perform every 
 
 ## 2. Prepare Assignments
 
-In the existing Assignments data source, rename:
-
-- `Due` → `Effective Due Date` (Date)
-- `Canvas Key` → `Canvas UID` (Rich text)
-- `Sync Updated At` → `Last Synced` (Date)
-
-Add:
-
-- `Canvas Due Date` — Date
-- `Override Due Date` — Date
-- `Canvas Missing Since` — Date
-- `Canvas Missing Count` — Number
-- `Imported From` — Select, with option `Canvas ICS`
-- `Removed from Canvas` — Checkbox
-- `Raw Description` — Rich text
-- `Canvas Description Hash` — Rich text
-- `Canvas Description Verified At` — Date
-
-Confirm all required properties:
+The Assignments data source needs every property below, with these exact names and types:
 
 | Property                       | Type      | Required options or target                                                |
 | ------------------------------ | --------- | ------------------------------------------------------------------------- |
@@ -53,13 +35,13 @@ Confirm all required properties:
 | Canvas Description Verified At | Date      | —                                                                         |
 | Notes                          | Rich text | —                                                                         |
 
-Leave older API-oriented properties in place. The ICS sync ignores `Canvas Assignment ID`, `Canvas Course ID`, `Canvas Submitted`, `Canvas Updated At`, `Available From`, `Available Until`, `Points Possible`, `Submission Types`, and `Submitted At`.
+Any other property in the data source is ignored and left untouched.
 
-For an existing installation, manually add the two missing-evidence properties and `Canvas Description Verified At` with the exact names and types above before upgrading. Leave them blank on existing assignments. The first qualifying scheduled absence initializes missing evidence, and the next live sync audits each matching-hash description whose verification date is blank. The application validates these properties but never creates, renames, converts, or backfills schema fields automatically.
+`Canvas Missing Since`, `Canvas Missing Count`, and `Canvas Description Verified At` may be blank on any page. The first qualifying scheduled absence initializes missing evidence, and a live sync audits every description whose verification date is blank. The application validates these properties but never creates, renames, converts, or backfills schema fields automatically.
 
 ## 3. Check Courses
 
-Confirm these existing properties:
+The Courses data source needs these properties:
 
 | Property         | Type      |
 | ---------------- | --------- |
@@ -75,7 +57,7 @@ The sync does not overwrite Term, Instructor, Notes, Drive Folder, Color, or oth
 
 ## 4. Configure the assignment template
 
-- Keep user-owned sections such as Plan, Notes, and Submission check in the existing assignment template.
+- Put user-owned sections such as Plan, Notes, and Submission check in an assignment template.
 - Set that template as the Assignments data source's **default** template.
 - Share the template with the integration if it is not inherited automatically from the database connection.
 
@@ -107,7 +89,7 @@ Create a database named `Canvas Sync Log` with exactly:
 | Workflow URL       | URL       | —                                         |
 | Commit SHA         | Rich text | —                                         |
 
-Copy its data-source ID for GitHub configuration.
+Copy its data-source ID (database menu → **Manage data sources** → **Copy data source ID**) for GitHub configuration.
 
 ## 6. Share databases
 
@@ -128,10 +110,10 @@ Under **Settings → Secrets and variables → Actions**, add secrets:
 
 Add variables:
 
-- `NOTION_ASSIGNMENTS_DATA_SOURCE_ID` (known starting value `118ccb50-6027-4ccb-ba19-c0b6ac292ab7`)
-- `NOTION_COURSES_DATA_SOURCE_ID` (known starting value `e2c63549-089a-4461-9f19-52cd0626e386`)
-- `NOTION_SYNC_LOG_DATA_SOURCE_ID` (the ID created above)
-- `NOTION_TIMEZONE` (recommended `America/Los_Angeles`)
+- `NOTION_ASSIGNMENTS_DATA_SOURCE_ID`
+- `NOTION_COURSES_DATA_SOURCE_ID`
+- `NOTION_SYNC_LOG_DATA_SOURCE_ID`
+- `NOTION_TIMEZONE` (optional; an IANA zone, defaults to `America/Los_Angeles`)
 - `CANVAS_MISSING_EVIDENCE_MINIMUM_HOURS` (optional; defaults to `6`, minimum `6`)
 - `HEALTH_ACTIVATION_GRACE_HOURS` (optional; defaults to `14` hours)
 

@@ -1,4 +1,5 @@
 import type { AppConfig } from "../config.ts";
+import { ASSIGNMENT_TYPES } from "../types.ts";
 import { settleReads, type NotionGateway } from "./client.ts";
 
 type Expected = Record<string, string | string[]>;
@@ -79,7 +80,7 @@ function validateOptions(
   label: string,
   properties: Record<string, Record<string, unknown>>,
   propertyName: string,
-  required: string[],
+  required: readonly string[],
 ): void {
   const property = properties[propertyName];
   if (!property) throw new Error(`${label} schema is incompatible: ${propertyName} is missing`);
@@ -120,16 +121,7 @@ export async function validateNotionSchemas(
     "In progress",
     "Done",
   ]);
-  validateOptions("Assignments", assignmentProperties, "Assignment Type", [
-    "Homework",
-    "Lab",
-    "Quiz",
-    "Exam",
-    "Paper",
-    "Project",
-    "Reading",
-    "Other",
-  ]);
+  validateOptions("Assignments", assignmentProperties, "Assignment Type", ASSIGNMENT_TYPES);
   validateOptions("Assignments", assignmentProperties, "Canvas State", ["Active", "Removed"]);
   validateOptions("Assignments", assignmentProperties, "Imported From", ["Canvas ICS"]);
   validateOptions("Sync Log", syncLogProperties, "Status", [
