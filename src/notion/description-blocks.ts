@@ -27,14 +27,25 @@ function annotations(run: InlineRun): Record<string, true> | undefined {
   return Object.keys(value).length ? value : undefined;
 }
 
+/**
+ * The serialized form of an absolute link, or undefined when Notion cannot hold it. Serializing
+ * percent-encodes spaces and non-ASCII characters, so a Canvas file link such as `.../a b.pdf`
+ * stays a link and the URL is written in the one form a URL parser reads back unchanged.
+ */
+function notionLink(url: string): string | undefined {
+  if (!URL.canParse(url)) return;
+  const { href } = new URL(url);
+  return LINK_URL.test(href) ? href : undefined;
+}
+
 /** Drops links Notion cannot hold, then re-merges neighbours so the written form is normal form. */
 function notionRuns(runs: InlineRun[]): InlineRun[] {
   return normalizeRuns(
-    runs.map((run) =>
-      run.link !== undefined && !LINK_URL.test(run.link)
-        ? { text: run.text, bold: run.bold, italic: run.italic, code: run.code }
-        : run,
-    ),
+    runs.map((run) => {
+      const { link: url, ...plain } = run;
+      const link = url === undefined ? undefined : notionLink(url);
+      return link === undefined ? plain : { ...plain, link };
+    }),
   );
 }
 

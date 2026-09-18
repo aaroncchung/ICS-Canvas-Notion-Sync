@@ -47,8 +47,7 @@ export interface DescriptionIntegrityAuditDecision {
 
 /** The version prefix of a stored hash, or undefined when the value is not a versioned hash. */
 export function descriptionHashVersion(hash: string | undefined): string | undefined {
-  const separator = hash?.lastIndexOf(":") ?? -1;
-  return hash && separator > 0 ? hash.slice(0, separator) : undefined;
+  return hash?.match(/^(canvas-description:v\d+):[0-9a-f]{64}$/)?.[1];
 }
 
 /** True when a stored hash was produced by an older representation and needs a format upgrade. */

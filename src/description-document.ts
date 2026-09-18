@@ -36,9 +36,21 @@ const FENCE = /^ {0,3}(`{3,}|~{3,})/;
 const QUOTE = /^ {0,3}> ?(.*)$/;
 const BULLET = /^( {0,3})([-*+])(?:([ \t]+)(.*)|$)/;
 const ORDERED = /^( {0,3})(\d{1,9})[.)](?:([ \t]+)(.*)|$)/;
-/** Control-delimited tags distinguish generated table syntax from literal pipe-wrapped text. */
+/**
+ * Control-delimited tags distinguish generated table syntax from literal pipe-wrapped text. Canvas
+ * input has its control characters stripped before conversion, so only the table rules emit them
+ * and cell content needs no escaping: a pipe in a cell, even inside inline code, stays a pipe.
+ */
 export const TABLE_ROW_MARKER = "\u001eC2N_TABLE_ROW\u001f";
 export const TABLE_SEPARATOR_MARKER = "\u001eC2N_TABLE_SEPARATOR\u001f";
+export const TABLE_CELL_SEPARATOR = "\u001f";
+/** Stands in for a line break inside a cell, because a row must stay on one line. */
+export const TABLE_CELL_LINE_BREAK = "\u001d";
+/** Backstop: generated syntax that ends up anywhere but a row's own line must never be shown. */
+const STRAY_TABLE_SYNTAX = new RegExp(
+  `${TABLE_ROW_MARKER}|${TABLE_SEPARATOR_MARKER}|[^\\P{Cc}\\t\\n]`,
+  "gu",
+);
 /** Turndown renders `<br>` as two trailing spaces; that is the only hard break it emits. */
 const HARD_BREAK = / {2,}$/;
 
@@ -220,7 +232,8 @@ function codeSpanContent(span: string): string {
 }
 
 /** Converts one line of inline Markdown into styled runs. */
-export function parseInline(text: string, style: InlineStyle = PLAIN): InlineRun[] {
+export function parseInline(source: string, style: InlineStyle = PLAIN): InlineRun[] {
+  const text = source.replace(STRAY_TABLE_SYNTAX, "");
   const runs: InlineRun[] = [];
   let buffer = "";
   let index = 0;
@@ -284,31 +297,47 @@ function paragraphText(lines: string[]): string {
   return text;
 }
 
-function splitTableRow(line: string): string[] {
-  const inner = line.slice(TABLE_ROW_MARKER.length).trim().slice(1, -1);
-  const cells: string[] = [];
-  let cell = "";
-  for (let index = 0; index < inner.length; index += 1) {
-    const char = inner[index]!;
-    if (char === "\\" && inner[index + 1] !== undefined) {
-      cell += char + inner[index + 1];
-      index += 1;
-    } else if (char === "|") {
-      cells.push(cell);
-      cell = "";
-    } else cell += char;
-  }
-  cells.push(cell);
-  return cells.map((value) => value.trim());
+/** Trims the outer whitespace of a run list, which an empty first or last table cell leaves. */
+function trimRuns(runs: InlineRun[]): InlineRun[] {
+  const result = runs.map((item) => ({ ...item }));
+  const first = result[0];
+  if (first) first.text = first.text.trimStart();
+  const last = result[result.length - 1];
+  if (last) last.text = last.text.trimEnd();
+  return normalizeRuns(result);
 }
 
-function tableRowNode(line: string, header: boolean): DescriptionNode {
-  const runs: InlineRun[] = [];
-  for (const [position, cell] of splitTableRow(line).entries()) {
-    if (position > 0) runs.push(run(" | ", PLAIN));
-    runs.push(...parseInline(cell, { ...PLAIN, bold: header }));
-  }
-  return { kind: "paragraph", runs: normalizeRuns(runs) };
+/**
+ * A cell holds ordinary block Markdown (a list, a heading, several paragraphs), so it is parsed as
+ * blocks and folded onto one line; block syntax never shows up as cell text.
+ */
+function tableCellRuns(cell: string, header: boolean): InlineRun[] {
+  const runs = parseBlocks(cell.split(TABLE_CELL_LINE_BREAK))
+    .filter((node) => node.kind === "code" || node.runs.length > 0)
+    .flatMap((node, position) => [
+      ...(position > 0 ? [run(" ", PLAIN)] : []),
+      ...(node.kind === "code" ? [run(node.text, { ...PLAIN, code: true })] : node.runs),
+    ]);
+  return normalizeRuns(
+    runs.map((item) => ({
+      ...item,
+      text: item.text.replace(/\s*\n\s*/g, " "),
+      bold: item.bold || header,
+    })),
+  );
+}
+
+/** One paragraph per row, cells joined by ` | `; a row whose cells are all empty yields nothing. */
+function tableRowNode(line: string, header: boolean): DescriptionNode | undefined {
+  const cells = line
+    .slice(TABLE_ROW_MARKER.length)
+    .split(TABLE_CELL_SEPARATOR)
+    .map((cell) => tableCellRuns(cell, header));
+  if (cells.every((cell) => cell.length === 0)) return;
+  const runs = cells.flatMap((cell, position) =>
+    position > 0 ? [run(" | ", PLAIN), ...cell] : cell,
+  );
+  return { kind: "paragraph", runs: trimRuns(runs) };
 }
 
 function quoteNode(node: DescriptionNode): DescriptionNode {
@@ -398,7 +427,9 @@ function parseBlocks(lines: string[]): DescriptionNode[] {
     if (listMatch) {
       const indent = listMatch[1]!.length;
       const spaces = listMatch[3]?.length ?? 1;
-      const contentIndent = indent + listMatch[2]!.length + (spaces > 4 ? 1 : spaces);
+      // An ordered marker is its digits plus the delimiter, which the pattern does not capture.
+      const markerLength = listMatch[2]!.length + (ordered ? 1 : 0);
+      const contentIndent = indent + markerLength + (spaces > 4 ? 1 : spaces);
       const body: string[] = [listMatch[4] ?? ""];
       index += 1;
       while (index < lines.length) {
@@ -423,17 +454,20 @@ function parseBlocks(lines: string[]): DescriptionNode[] {
     }
 
     if (isTableRow(line) || isTableSeparator(line)) {
+      // A separator marks the row before it as a header, wherever in the table that row sits.
       const rows: string[] = [];
-      let headerRow = -1;
+      const headerRows = new Set<number>();
       while (index < lines.length) {
         const candidate = lines[index]!;
-        if (isTableSeparator(candidate)) {
-          if (rows.length && headerRow < 0) headerRow = rows.length - 1;
-        } else if (isTableRow(candidate)) rows.push(candidate);
+        if (isTableSeparator(candidate)) headerRows.add(rows.length - 1);
+        else if (isTableRow(candidate)) rows.push(candidate);
         else break;
         index += 1;
       }
-      nodes.push(...rows.map((row, position) => tableRowNode(row, position === headerRow)));
+      for (const [position, row] of rows.entries()) {
+        const node = tableRowNode(row, headerRows.has(position));
+        if (node) nodes.push(node);
+      }
       continue;
     }
 

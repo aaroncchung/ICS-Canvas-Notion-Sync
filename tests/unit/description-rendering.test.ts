@@ -1,12 +1,14 @@
 import { describe, expect, it } from "vitest";
 import { sanitizeDescription } from "../../src/canvas/normalize-assignment.ts";
 import {
+  TABLE_CELL_SEPARATOR,
   TABLE_ROW_MARKER,
   TABLE_SEPARATOR_MARKER,
   descriptionPlainText,
   parseDescriptionMarkdown,
   parseInline,
 } from "../../src/description-document.ts";
+import { DESCRIPTION_EXCERPT_LENGTH, descriptionExcerpt } from "../../src/notion/assignments.ts";
 import { PARAGRAPH_TEXT_LIMIT, paragraph, splitText, toggle } from "../../src/notion/blocks.ts";
 import { descriptionBlocks } from "../../src/notion/description-blocks.ts";
 import {
@@ -92,9 +94,9 @@ describe("description document parsing", () => {
       "    return x",
       "```",
       "",
-      `${TABLE_ROW_MARKER}| Col A | Col B |`,
+      `${TABLE_ROW_MARKER}Col A${TABLE_CELL_SEPARATOR}Col B`,
       TABLE_SEPARATOR_MARKER,
-      `${TABLE_ROW_MARKER}| 1 \\| one | 2 |`,
+      `${TABLE_ROW_MARKER}1 | one${TABLE_CELL_SEPARATOR}2`,
       "",
       "#### Deep heading",
     ].join("\n");
@@ -185,6 +187,159 @@ describe("Canvas HTML to Notion blocks", () => {
     expect(richText(blocks[1]!)[0]).not.toHaveProperty("annotations");
   });
 
+  it("keeps pipes and backslashes in table cells exactly, including inside inline code", () => {
+    const { markdown, plainText } = sanitizeDescription(
+      "<table><tr><td><code>a|b</code></td><td><code>c\\|d</code></td><td>e\\|f | g</td></tr></table>",
+    );
+    const [row, ...rest] = descriptionBlocks(markdown ?? "");
+    expect(rest).toEqual([]);
+    expect(richText(row!)).toEqual([
+      { type: "text", text: { content: "a|b" }, annotations: { code: true } },
+      { type: "text", text: { content: " | " } },
+      { type: "text", text: { content: "c\\|d" }, annotations: { code: true } },
+      { type: "text", text: { content: " | e\\|f | g" } },
+    ]);
+    expect(plainText).toBe("a|b | c\\|d | e\\|f | g");
+  });
+
+  it("keeps cell positions, drops empty rows, and folds nested tables into their cell", () => {
+    const { markdown } = sanitizeDescription(
+      "<table><tr><td></td><td>late</td></tr><tr><td></td><td></td></tr>" +
+        "<tr><td><table><tr><td>in</td><td>ner</td></tr></table></td><td>outer</td></tr></table>",
+    );
+    const blocks = descriptionBlocks(markdown ?? "");
+    expect(blocks.map(blockText)).toEqual(["| late", "in | ner | outer"]);
+  });
+
+  it("folds block content inside a cell into the row without exposing Markdown syntax", () => {
+    const { markdown, plainText } = sanitizeDescription(
+      "<table><tr><th>Task</th><th>Notes</th></tr>" +
+        "<tr><td><h3>Essay</h3><p>two<br>lines</p></td>" +
+        "<td><ul><li>5 - 3 <strong>pages</strong></li><li>cite</li></ul>" +
+        "<blockquote>q</blockquote><pre><code>x = 1\ny = 2</code></pre></td></tr>" +
+        "<tr><th>Total</th></tr></table>",
+    );
+    const blocks = descriptionBlocks(markdown ?? "");
+    expect(blocks.map(blockText)).toEqual([
+      "Task | Notes",
+      "Essay two lines | 5 - 3 pages cite q x = 1 y = 2",
+      "Total",
+    ]);
+    expect(richText(blocks[1]!)).toEqual([
+      { type: "text", text: { content: "Essay two lines | 5 - 3 " } },
+      { type: "text", text: { content: "pages" }, annotations: { bold: true } },
+      { type: "text", text: { content: " cite q " } },
+      { type: "text", text: { content: "x = 1 y = 2" }, annotations: { code: true } },
+    ]);
+    // Every all-header row is bold, not only the first row of the table.
+    expect(richText(blocks[2]!)).toEqual([
+      { type: "text", text: { content: "Total" }, annotations: { bold: true } },
+    ]);
+    expect(plainText).toBe("Task | Notes Essay two lines | 5 - 3 pages cite q x = 1 y = 2 Total");
+  });
+
+  it("keeps code blocks and tables inside numbered and bulleted list items intact", () => {
+    for (const list of ["ol", "ul"]) {
+      const { markdown } = sanitizeDescription(
+        `<${list}><li>Run this:<pre><code>npm test\n  npm run build</code></pre></li>` +
+          `<li>Fill in:<table><tr><td>d</td><td>e</td></tr></table></li></${list}>`,
+      );
+      const item = list === "ol" ? "numbered_list_item" : "bulleted_list_item";
+      expect(
+        descriptionBlocks(markdown ?? "").map((block) => [block.type, blockText(block)]),
+      ).toEqual([
+        [item, "Run this:"],
+        ["code", "npm test\n  npm run build"],
+        [item, "Fill in:\nd | e"],
+      ]);
+    }
+  });
+
+  it("never lets generated table syntax reach Notion through inline code", () => {
+    const { markdown, plainText } = sanitizeDescription(
+      "<p><code><table><tr><th>a</th><td>b|c</td></tr></table></code></p>",
+    );
+    expect(descriptionBlocks(markdown ?? "").map(blockText)).toEqual(["a b|c"]);
+    expect(plainText).toBe("a b|c");
+    // The parser drops stray syntax even if some other route were to produce it.
+    expect(parseInline(`x ${TABLE_ROW_MARKER}y${TABLE_CELL_SEPARATOR}z`)).toEqual([
+      { text: "x yz", bold: false, italic: false, code: false },
+    ]);
+  });
+
+  it("keeps the text of inline elements that wrap blocks instead of stray delimiters", () => {
+    const { markdown } = sanitizeDescription(
+      "<b><p>one</p><p>two</p></b>" +
+        '<a href="https://example.edu/x"><h2>Title</h2><p>body</p></a><em><ul><li>item</li></ul></em>',
+    );
+    const blocks = descriptionBlocks(markdown ?? "");
+    expect(blocks.map((block) => [block.type, blockText(block)])).toEqual([
+      ["paragraph", "one"],
+      ["paragraph", "two"],
+      ["heading_2", "Title"],
+      ["paragraph", "body"],
+      ["bulleted_list_item", "item"],
+    ]);
+  });
+
+  it("writes links in serialized form and keeps links whose URL has spaces or non-ASCII", () => {
+    const { markdown } = sanitizeDescription(
+      '<p><a href="https://example.edu/files/a b.pdf">file</a> ' +
+        '<a href="https://example.edu/café?q=ü">menu</a> <a href="HTTPS://Example.edu">home</a> ' +
+        '<a href="mailto:ta@example.edu">mail</a> <a href="https://exa mple.edu/">broken</a></p>',
+    );
+    const [block] = descriptionBlocks(markdown ?? "");
+    expect(
+      richText(block!).map((item) => {
+        const text = item.text as { content: string; link?: { url: string } };
+        return [text.content, text.link?.url];
+      }),
+    ).toEqual([
+      ["file", "https://example.edu/files/a%20b.pdf"],
+      [" ", undefined],
+      ["menu", "https://example.edu/caf%C3%A9?q=%C3%BC"],
+      [" ", undefined],
+      ["home", "https://example.edu/"],
+      [" ", undefined],
+      ["mail", "mailto:ta@example.edu"],
+      [" broken", undefined],
+    ]);
+  });
+
+  it("strips control characters so Canvas text can never forge table syntax", () => {
+    const { markdown, plainText } = sanitizeDescription(
+      `<p>${TABLE_ROW_MARKER}forged${TABLE_CELL_SEPARATOR}row</p>` +
+        "<p>&#x1e;C2N_TABLE_SEPARATOR&#31;</p><p><code>&#x1e;x&#x1f;y</code> tab\there</p>",
+    );
+    expect(markdown).not.toMatch(/[^\P{Cc}\t\n]/u);
+    expect(descriptionBlocks(markdown ?? "").map(blockText)).toEqual([
+      "C2N_TABLE_ROWforgedrow",
+      "C2N_TABLE_SEPARATOR",
+      "xy tab here",
+    ]);
+    expect(plainText).toBe("C2N_TABLE_ROWforgedrow C2N_TABLE_SEPARATOR xy tab here");
+  });
+
+  it("renders redundant same-style nesting as a single style", () => {
+    const { markdown } = sanitizeDescription(
+      "<p><em><em>a</em></em> <i><em>b</em></i> <strong><strong>c</strong></strong> " +
+        "<b>d <strong>e</strong></b> <em>f <strong>g <em>h</em></strong></em></p>",
+    );
+    const [block] = descriptionBlocks(markdown ?? "");
+    expect(richText(block!)).toEqual([
+      { type: "text", text: { content: "a" }, annotations: { italic: true } },
+      { type: "text", text: { content: " " } },
+      { type: "text", text: { content: "b" }, annotations: { italic: true } },
+      { type: "text", text: { content: " " } },
+      { type: "text", text: { content: "c" }, annotations: { bold: true } },
+      { type: "text", text: { content: " " } },
+      { type: "text", text: { content: "d e" }, annotations: { bold: true } },
+      { type: "text", text: { content: " " } },
+      { type: "text", text: { content: "f " }, annotations: { italic: true } },
+      { type: "text", text: { content: "g h" }, annotations: { bold: true, italic: true } },
+    ]);
+  });
+
   it("preserves literal pipe-wrapped text instead of treating it as a table", () => {
     const { markdown, plainText } = sanitizeDescription("<p>| important |</p><p>| --- |</p>");
     const blocks = descriptionBlocks(markdown ?? "");
@@ -246,6 +401,14 @@ describe("Canvas HTML to Notion blocks", () => {
       expect(piece.length).toBeLessThanOrEqual(PARAGRAPH_TEXT_LIMIT);
       expect(piece).not.toMatch(/\p{Surrogate}/u);
     }
+    // The Raw Description excerpt is cut at a fixed length and must not end in half an emoji.
+    const excerpt = descriptionExcerpt({
+      uid: "uid",
+      title: "Assignment",
+      inferredType: "Other",
+      descriptionPlainText: text,
+    });
+    expect(excerpt).toBe("a".repeat(DESCRIPTION_EXCERPT_LENGTH - 1));
   });
 });
 
@@ -257,6 +420,8 @@ describe("managed description hashes", () => {
     expect(isOutdatedDescriptionHash(hash)).toBe(false);
     expect(isOutdatedDescriptionHash(undefined)).toBe(false);
     expect(isOutdatedDescriptionHash("not-a-hash")).toBe(false);
+    // A hand-typed value with a colon is not an older format.
+    expect(isOutdatedDescriptionHash("See: notes")).toBe(false);
     expect(isOutdatedDescriptionHash(managedDescriptionHash("x", "canvas-description:v2"))).toBe(
       true,
     );
