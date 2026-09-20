@@ -548,6 +548,36 @@ describe("managed description verification with native blocks", () => {
     },
   );
 
+  it.each<[string, (item: Record<string, unknown>) => void, string]>([
+    [
+      "style",
+      (item) => delete item.annotations,
+      "payload.rich_text[0].annotations.bold: read false, expected true",
+    ],
+    [
+      "text",
+      (item) => (item.text = { content: "Bold text" }),
+      'payload.rich_text[0].text.content: read 9 chars, expected 10, differ at 5: "Bold text" vs "Bold  text"',
+    ],
+  ])(
+    "names the first %s difference when read-back cannot be verified",
+    async (_, alter, detail) => {
+      class AlteringGateway extends FakeGateway {
+        override async listBlocks(id: string) {
+          const blocks = structuredClone(await super.listBlocks(id));
+          for (const block of blocks) {
+            if (block.type === "paragraph") richText(block).forEach(alter);
+          }
+          return blocks;
+        }
+      }
+      const gateway = new AlteringGateway();
+      await expect(replaceManagedDescription(gateway, "page", "**Bold  text**")).rejects.toThrow(
+        `could not be verified: block 1 of 1: ${detail}`,
+      );
+    },
+  );
+
   it("reuses a complete pending replacement whose text chunks were merged", async () => {
     const gateway = new FakeGateway();
     const markdown = "word ".repeat(500).trim();
