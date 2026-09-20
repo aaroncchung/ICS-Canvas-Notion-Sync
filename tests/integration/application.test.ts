@@ -1436,8 +1436,13 @@ describe("managed descriptions", () => {
     ],
     ["block color", { rich_text: [{ plain_text: "Old description" }], color: "red" }],
     [
-      "rich-text segmentation",
-      { rich_text: [{ plain_text: "Old " }, { plain_text: "description" }] },
+      "annotation boundary",
+      {
+        rich_text: [
+          { plain_text: "Old ", annotations: { bold: true } },
+          { plain_text: "description" },
+        ],
+      },
     ],
   ])("repairs unchanged visible text when its %s changes", async (_label, paragraph) => {
     const gateway = descriptionGateway();

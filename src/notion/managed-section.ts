@@ -84,8 +84,15 @@ function canonicalAnnotations(value: unknown): CanonicalValue {
 
 function canonicalRichText(value: unknown): CanonicalValue[] {
   if (!Array.isArray(value)) return [];
-  return value.map((item) => {
-    if (!item || typeof item !== "object") return { type: "invalid", value: canonicalValue(item) };
+  const result: CanonicalValue[] = [];
+  let previousText: { content: string; link: { url: string } | null } | undefined;
+  let previousAnnotations: string | undefined;
+  for (const item of value) {
+    if (!item || typeof item !== "object") {
+      result.push({ type: "invalid", value: canonicalValue(item) });
+      previousText = undefined;
+      continue;
+    }
     const record = item as Record<string, unknown>;
     const type = typeof record.type === "string" ? record.type : "text";
     const annotations = canonicalAnnotations(record.annotations);
@@ -104,21 +111,34 @@ function canonicalRichText(value: unknown): CanonicalValue[] {
           : typeof record.plain_text === "string"
             ? record.plain_text
             : "";
-      return {
-        type,
-        text: {
-          content,
-          link: typeof link?.url === "string" ? { url: link.url } : null,
-        },
-        annotations,
+      const canonicalText = {
+        content,
+        link: typeof link?.url === "string" ? { url: link.url } : null,
       };
+      const annotationSignature = JSON.stringify(annotations);
+      // Rich-text item boundaries are transport details, not content. Notion can
+      // merge or re-split adjacent text; retain every style and link boundary.
+      if (
+        previousText &&
+        previousText.link?.url === canonicalText.link?.url &&
+        previousAnnotations === annotationSignature
+      ) {
+        previousText.content += content;
+      } else {
+        result.push({ type, text: canonicalText, annotations });
+        previousText = canonicalText;
+        previousAnnotations = annotationSignature;
+      }
+      continue;
     }
-    return {
+    previousText = undefined;
+    result.push({
       type,
       payload: canonicalValue(record[type]),
       annotations,
-    };
-  });
+    });
+  }
+  return result;
 }
 
 /** Block types whose payload is rich text plus a color, as written and as Notion reads them back. */
