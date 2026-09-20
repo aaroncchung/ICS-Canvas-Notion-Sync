@@ -14,6 +14,7 @@ import { descriptionBlocks } from "../../src/notion/description-blocks.ts";
 import {
   DESCRIPTION_HASH_VERSION,
   MANAGED_DESCRIPTION_TITLE,
+  PENDING_MANAGED_DESCRIPTION_TITLE,
   descriptionHashVersion,
   isOutdatedDescriptionHash,
   managedDescriptionHash,
@@ -496,6 +497,106 @@ describe("managed description verification with native blocks", () => {
         replaced: true,
       });
     }
+  });
+
+  it.each(["plain", "bold-link", "code"])(
+    "verifies long %s text when Notion returns different rich-text chunks",
+    async (format) => {
+      const content = "word ".repeat(799) + "last";
+      const markdown =
+        format === "bold-link"
+          ? `**[${content}](https://example.edu/reading)**`
+          : format === "code"
+            ? `\`\`\`\n${content}\n\`\`\``
+            : content;
+      class RechunkingGateway extends FakeGateway {
+        override async listBlocks(id: string) {
+          const blocks = structuredClone(await super.listBlocks(id));
+          for (const block of blocks) {
+            if (block.type !== "paragraph" && block.type !== "code") continue;
+            const payload = block[block.type] as { rich_text: RichText };
+            const items = payload.rich_text;
+            if (items.length < 2) continue;
+            const text = items.map((item) => (item.text as { content: string }).content).join("");
+            // The API need not preserve the request's 1,900-character boundaries.
+            payload.rich_text = [text.slice(0, 2000), text.slice(2000)].map((content) => ({
+              ...items[0],
+              text: { ...(items[0]!.text as object), content },
+              plain_text: content,
+            }));
+          }
+          return blocks;
+        }
+      }
+      const gateway = new RechunkingGateway();
+      expect(richText(descriptionBlocks(markdown)[0]!).length).toBe(3);
+      gateway.seedBlock("page", {
+        ...toggle(MANAGED_DESCRIPTION_TITLE, [paragraph("Old description")]),
+        id: "old",
+      });
+      expect(await replaceManagedDescription(gateway, "page", markdown)).toEqual({
+        repaired: true,
+        replaced: true,
+      });
+      expect(gateway.blocks.get("page")).toHaveLength(1);
+      const writes = gateway.writes.length;
+      expect(await replaceManagedDescription(gateway, "page", markdown)).toEqual({
+        repaired: false,
+        replaced: false,
+      });
+      expect(gateway.writes).toHaveLength(writes);
+    },
+  );
+
+  it.each<[string, (item: Record<string, unknown>) => void, string]>([
+    [
+      "style",
+      (item) => delete item.annotations,
+      "payload.rich_text[0].annotations.bold: read false, expected true",
+    ],
+    [
+      "text",
+      (item) => (item.text = { content: "Bold text" }),
+      'payload.rich_text[0].text.content: read 9 chars, expected 10, differ at 5: "Bold text" vs "Bold  text"',
+    ],
+  ])(
+    "names the first %s difference when read-back cannot be verified",
+    async (_, alter, detail) => {
+      class AlteringGateway extends FakeGateway {
+        override async listBlocks(id: string) {
+          const blocks = structuredClone(await super.listBlocks(id));
+          for (const block of blocks) {
+            if (block.type === "paragraph") richText(block).forEach(alter);
+          }
+          return blocks;
+        }
+      }
+      const gateway = new AlteringGateway();
+      await expect(replaceManagedDescription(gateway, "page", "**Bold  text**")).rejects.toThrow(
+        `could not be verified: block 1 of 1: ${detail}`,
+      );
+    },
+  );
+
+  it("reuses a complete pending replacement whose text chunks were merged", async () => {
+    const gateway = new FakeGateway();
+    const markdown = "word ".repeat(500).trim();
+    gateway.seedBlock("page", {
+      ...toggle(MANAGED_DESCRIPTION_TITLE, [paragraph("Old description")]),
+      id: "old",
+    });
+    gateway.seedBlock("page", {
+      ...toggle(PENDING_MANAGED_DESCRIPTION_TITLE, [paragraph(markdown)]),
+      id: "pending",
+    });
+    expect(await replaceManagedDescription(gateway, "page", markdown)).toEqual({
+      repaired: true,
+      replaced: true,
+    });
+    expect(gateway.writes.map(({ kind, id }) => [kind, id])).toEqual([
+      ["update-block", "pending"],
+      ["delete", "old"],
+    ]);
   });
 });
 

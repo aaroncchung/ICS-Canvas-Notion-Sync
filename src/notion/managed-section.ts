@@ -84,8 +84,15 @@ function canonicalAnnotations(value: unknown): CanonicalValue {
 
 function canonicalRichText(value: unknown): CanonicalValue[] {
   if (!Array.isArray(value)) return [];
-  return value.map((item) => {
-    if (!item || typeof item !== "object") return { type: "invalid", value: canonicalValue(item) };
+  const result: CanonicalValue[] = [];
+  // The text item that a following item with the same link and style extends.
+  let open: { text: { content: string; link: { url: string } | null }; style: string } | undefined;
+  for (const item of value) {
+    if (!item || typeof item !== "object") {
+      result.push({ type: "invalid", value: canonicalValue(item) });
+      open = undefined;
+      continue;
+    }
     const record = item as Record<string, unknown>;
     const type = typeof record.type === "string" ? record.type : "text";
     const annotations = canonicalAnnotations(record.annotations);
@@ -104,21 +111,29 @@ function canonicalRichText(value: unknown): CanonicalValue[] {
           : typeof record.plain_text === "string"
             ? record.plain_text
             : "";
-      return {
-        type,
-        text: {
-          content,
-          link: typeof link?.url === "string" ? { url: link.url } : null,
-        },
-        annotations,
+      const canonicalText = {
+        content,
+        link: typeof link?.url === "string" ? { url: link.url } : null,
       };
+      const style = JSON.stringify(annotations);
+      // Rich-text item boundaries are transport details, not content. Notion can
+      // merge or re-split adjacent text; retain every style and link boundary.
+      if (open && open.text.link?.url === canonicalText.link?.url && open.style === style) {
+        open.text.content += content;
+      } else {
+        result.push({ type, text: canonicalText, annotations });
+        open = { text: canonicalText, style };
+      }
+      continue;
     }
-    return {
+    open = undefined;
+    result.push({
       type,
       payload: canonicalValue(record[type]),
       annotations,
-    };
-  });
+    });
+  }
+  return result;
 }
 
 /** Block types whose payload is rich text plus a color, as written and as Notion reads them back. */
@@ -202,6 +217,64 @@ function isPrefix(actual: string[], expected: string[]): boolean {
   return (
     actual.length <= expected.length && actual.every((value, index) => value === expected[index])
   );
+}
+
+function brief(value: CanonicalValue | undefined): string {
+  return String(JSON.stringify(value)).slice(0, 48);
+}
+
+/** Where two canonical values first differ, with text reduced to a short excerpt. */
+function firstDifference(
+  actual: CanonicalValue | undefined,
+  expected: CanonicalValue | undefined,
+  path: string,
+): string | undefined {
+  if (typeof actual === "string" && typeof expected === "string") {
+    if (actual === expected) return;
+    let index = 0;
+    while (actual[index] === expected[index]) index += 1;
+    const excerpt = (text: string) => brief(text.slice(Math.max(0, index - 8), index + 16));
+    return `${path}: read ${actual.length} chars, expected ${expected.length}, differ at ${index}: ${excerpt(actual)} vs ${excerpt(expected)}`;
+  }
+  if (Array.isArray(actual) && Array.isArray(expected)) {
+    for (let index = 0; index < Math.min(actual.length, expected.length); index += 1) {
+      const difference = firstDifference(actual[index], expected[index], `${path}[${index}]`);
+      if (difference) return difference;
+    }
+    if (actual.length === expected.length) return;
+    return `${path}: read ${actual.length} items, expected ${expected.length}`;
+  }
+  if (
+    actual &&
+    expected &&
+    typeof actual === "object" &&
+    typeof expected === "object" &&
+    !Array.isArray(actual) &&
+    !Array.isArray(expected)
+  ) {
+    // Expected keys first, in written order, so a block reports its type before its payload.
+    for (const key of new Set([...Object.keys(expected), ...Object.keys(actual)])) {
+      const difference = firstDifference(actual[key], expected[key], path ? `${path}.${key}` : key);
+      if (difference) return difference;
+    }
+    return;
+  }
+  if (actual === expected) return;
+  return `${path}: read ${brief(actual)}, expected ${brief(expected)}`;
+}
+
+/** Names the first block that differs, so a failed verification says what Notion changed. */
+function signatureMismatch(actual: string[], expected: string[]): string {
+  const index = actual.findIndex((value, position) => value !== expected[position]);
+  if (index < 0 || index >= expected.length) {
+    return `read ${actual.length} blocks, expected ${expected.length}`;
+  }
+  const difference = firstDifference(
+    JSON.parse(actual[index]!) as CanonicalValue,
+    JSON.parse(expected[index]!) as CanonicalValue,
+    "",
+  );
+  return `block ${index + 1} of ${expected.length}: ${difference ?? "signatures differ"}`;
 }
 
 function markerBlocks(blocks: Block[], title: string): Block[] {
@@ -418,7 +491,9 @@ export async function reconcileManagedSection(
       ? await childSignatures(gateway, snapshot, replacementId)
       : snapshot.expectedSignatures.slice(0, appendedLength);
   if (!isPrefix(actual, snapshot.expectedSignatures)) {
-    throw new AmbiguousNotionWriteError("Managed section replacement has unexpected content");
+    throw new AmbiguousNotionWriteError(
+      `Managed section replacement has unexpected content: ${signatureMismatch(actual, snapshot.expectedSignatures)}`,
+    );
   }
 
   // Acknowledged writes advance a cursor, not a verified snapshot. Observe once at
@@ -465,7 +540,9 @@ export async function reconcileManagedSection(
     }
   }
   if (!signaturesEqual(actual, snapshot.expectedSignatures)) {
-    throw new AmbiguousNotionWriteError("Managed section replacement could not be verified");
+    throw new AmbiguousNotionWriteError(
+      `Managed section replacement could not be verified: ${signatureMismatch(actual, snapshot.expectedSignatures)}`,
+    );
   }
 
   try {
