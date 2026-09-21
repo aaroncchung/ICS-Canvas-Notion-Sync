@@ -7,7 +7,12 @@ export const DEFAULT_ACTIVATION_GRACE_HOURS = 14;
 /** A 12-hour watchdog plus one hour of scheduler delay. */
 export const SUCCESS_WATCHDOG_HOURS = 13;
 export const ACTIVE_RUN_GRACE_HOURS = 2;
+/** Reaches every run that could still satisfy the watchdog or defer its alert. */
+const VERIFICATION_WINDOW_HOURS = SUCCESS_WATCHDOG_HOURS + ACTIVE_RUN_GRACE_HOURS;
+/** Default-branch commits whose scheduled runs are queried directly during verification. */
+const VERIFICATION_COMMITS = 3;
 const WORKFLOW_FILE = "sync.yml";
+const RUNS_PATH = `/actions/workflows/${WORKFLOW_FILE}/runs?event=schedule&per_page=100`;
 const RUNS_SHOWN = 5;
 const PAGE_SIZE = 100;
 const MAX_ISSUE_PAGES = 10;
@@ -51,6 +56,8 @@ export interface HealthAssessment {
   workflow: Workflow;
   latestSuccess?: WorkflowRun;
   latestFailure?: WorkflowRun;
+  /** Verification found a scheduled run newer than every run in the broad history listing. */
+  staleListing?: true;
 }
 
 /** Sends one REST request scoped to the repository; `path` follows `/repos/{owner}/{repo}`. */
@@ -73,6 +80,7 @@ const isCompleted = (run: WorkflowRun): boolean => run.status === "completed";
 const isSuccess = (run: WorkflowRun): boolean => isCompleted(run) && run.conclusion === "success";
 const isFailure = (run: WorkflowRun): boolean =>
   isCompleted(run) && run.conclusion !== null && FAILURE_CONCLUSIONS.has(run.conclusion);
+const createdAt = (run: WorkflowRun): number => Date.parse(run.created_at);
 const updatedAt = (run: WorkflowRun): number => Date.parse(run.updated_at);
 const activatedAt = (workflow: Workflow): string => workflow.updated_at ?? workflow.created_at;
 
@@ -99,7 +107,7 @@ export function assessScheduledHealth(
     const activeRun = runs.some(
       (run) =>
         ACTIVE_STATUSES.has(run.status) &&
-        now.getTime() - Date.parse(run.created_at) <= ACTIVE_RUN_GRACE_HOURS * HOUR,
+        now.getTime() - createdAt(run) <= ACTIVE_RUN_GRACE_HOURS * HOUR,
     );
     const deadline = latestSuccess
       ? updatedAt(latestSuccess) + SUCCESS_WATCHDOG_HOURS * HOUR
@@ -120,6 +128,22 @@ export function assessScheduledHealth(
     ...(latestSuccess ? { latestSuccess } : {}),
     ...(latestFailure ? { latestFailure } : {}),
   };
+}
+
+/** Unions run listings by run id, keeping the newest attempt, so a stale listing cannot hide what another saw. */
+export function mergeRuns(...listings: WorkflowRun[][]): WorkflowRun[] {
+  const byId = new Map<number, WorkflowRun>();
+  for (const run of listings.flat()) {
+    const seen = byId.get(run.id);
+    if (
+      !seen ||
+      run.run_attempt > seen.run_attempt ||
+      (run.run_attempt === seen.run_attempt && updatedAt(run) > updatedAt(seen))
+    ) {
+      byId.set(run.id, run);
+    }
+  }
+  return [...byId.values()];
 }
 
 /** Healthy, and a scheduled success is strictly newer than every scheduled failure. */
@@ -277,6 +301,10 @@ async function ensureLabel(request: GitHubRequest): Promise<void> {
   }
 }
 
+interface RunListing {
+  workflow_runs: WorkflowRun[];
+}
+
 export interface HealthMonitorOptions {
   now?: Date;
   activationGraceHours?: number;
@@ -296,21 +324,49 @@ async function listLabeledIssues(request: GitHubRequest): Promise<HealthIssue[]>
   return issues;
 }
 
+/**
+ * Recent scheduled runs from queries shaped differently from the broad history listing, which can
+ * intermittently come back days stale: a narrow `created` window, and point queries by the `head_sha`
+ * of recent default-branch commits, which is what scheduled runs check out.
+ */
+async function listVerificationRuns(request: GitHubRequest, now: Date): Promise<WorkflowRun[]> {
+  const since = new Date(now.getTime() - VERIFICATION_WINDOW_HOURS * HOUR)
+    .toISOString()
+    .replace(/\.\d{3}Z$/, "Z");
+  const [recent, commits] = (await Promise.all([
+    request("GET", `${RUNS_PATH}&created=${encodeURIComponent(`>=${since}`)}`),
+    request("GET", `/commits?per_page=${VERIFICATION_COMMITS}`),
+  ])) as [RunListing, Array<{ sha: string }>];
+  const byCommit = (await Promise.all(
+    commits.map(({ sha }) => request("GET", `${RUNS_PATH}&head_sha=${sha}`)),
+  )) as RunListing[];
+  return mergeRuns(...[recent, ...byCommit].map((listing) => listing.workflow_runs));
+}
+
 export async function monitorScheduledHealth(
   request: GitHubRequest,
   options: HealthMonitorOptions = {},
 ): Promise<HealthAssessment> {
-  const [runs, workflow, issues] = (await Promise.all([
-    request("GET", `/actions/workflows/${WORKFLOW_FILE}/runs?event=schedule&per_page=100`),
+  const now = options.now ?? new Date();
+  const [listing, workflow, issues] = (await Promise.all([
+    request("GET", RUNS_PATH),
     request("GET", `/actions/workflows/${WORKFLOW_FILE}`),
     listLabeledIssues(request),
-  ])) as [{ workflow_runs: WorkflowRun[] }, Workflow, HealthIssue[]];
-  const assessment = assessScheduledHealth(
-    runs.workflow_runs,
-    workflow,
-    options.now,
-    options.activationGraceHours,
-  );
+  ])) as [RunListing, Workflow, HealthIssue[]];
+  // One listing is never the sole evidence for run history: the newer runs a stale one omits can
+  // fake an alert, hide a failure streak, or hide a recovery. A disabled workflow alerts regardless.
+  const verification = workflow.state === "active" ? await listVerificationRuns(request, now) : [];
+  const newestListed = Math.max(...listing.workflow_runs.map(createdAt));
+  const staleListing = verification.some((run) => createdAt(run) > newestListed);
+  const assessment: HealthAssessment = {
+    ...assessScheduledHealth(
+      mergeRuns(listing.workflow_runs, verification),
+      workflow,
+      now,
+      options.activationGraceHours,
+    ),
+    ...(staleListing ? { staleListing } : {}),
+  };
   const issue = issues
     .filter((candidate) => !candidate.pull_request && candidate.title === HEALTH_ISSUE_TITLE)
     .sort((left, right) => left.number - right.number)[0];
@@ -355,6 +411,11 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
     ...(env.GITHUB_API_URL ? { apiUrl: env.GITHUB_API_URL } : {}),
   });
   const assessment = await monitorScheduledHealth(request, { activationGraceHours });
+  if (assessment.staleListing) {
+    console.log(
+      "The workflow-run listing was stale; verification found the recent scheduled runs it missed.",
+    );
+  }
   console.log(
     assessment.reasons.length === 0
       ? "Scheduled sync is healthy."

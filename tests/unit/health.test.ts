@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   assessScheduledHealth,
+  mergeRuns,
   recoveredFromIncident,
   SUCCESS_WATCHDOG_HOURS,
   type Workflow,
@@ -166,6 +167,25 @@ describe("scheduled health assessment", () => {
       run({ id: 1, updated_at: hoursAgo(20) }),
     ];
     expect(assessScheduledHealth(runs, workflow(hoursAgo(48)), now).reasons).toHaveLength(1);
+  });
+});
+
+describe("run listing merge", () => {
+  it("unions listings by run id and keeps the newest attempt of a duplicated run", () => {
+    const merged = mergeRuns(
+      [run({ id: 1, conclusion: "failure", updated_at: hoursAgo(3) }), run({ id: 2 })],
+      [
+        run({ id: 1, run_attempt: 2, updated_at: hoursAgo(1) }),
+        run({ id: 2, updated_at: hoursAgo(30) }),
+        run({ id: 3 }),
+      ],
+    );
+    expect(merged.map((item) => [item.id, item.run_attempt, item.conclusion])).toEqual([
+      [1, 2, "success"],
+      [2, 1, "success"],
+      [3, 1, "success"],
+    ]);
+    expect(merged[1]?.updated_at).toBe("2026-07-13T11:02:00Z");
   });
 });
 
