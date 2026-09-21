@@ -56,11 +56,7 @@ export interface HealthAssessment {
   workflow: Workflow;
   latestSuccess?: WorkflowRun;
   latestFailure?: WorkflowRun;
-  /** The three-consecutive-failures alert fired. Like `successOverdue`, a stale run listing can fake it. */
-  failureStreak: boolean;
-  /** The no-recent-success alert fired. */
-  successOverdue: boolean;
-  /** Verification found recent runs, missing from the first listing, that cleared an alert. */
+  /** Verification found a scheduled run newer than every run in the broad history listing. */
   staleListing?: true;
 }
 
@@ -84,6 +80,7 @@ const isCompleted = (run: WorkflowRun): boolean => run.status === "completed";
 const isSuccess = (run: WorkflowRun): boolean => isCompleted(run) && run.conclusion === "success";
 const isFailure = (run: WorkflowRun): boolean =>
   isCompleted(run) && run.conclusion !== null && FAILURE_CONCLUSIONS.has(run.conclusion);
+const createdAt = (run: WorkflowRun): number => Date.parse(run.created_at);
 const updatedAt = (run: WorkflowRun): number => Date.parse(run.updated_at);
 const activatedAt = (workflow: Workflow): string => workflow.updated_at ?? workflow.created_at;
 
@@ -100,26 +97,22 @@ export function assessScheduledHealth(
   const latestSuccess = completed.find(isSuccess);
   const latestFailure = completed.find(isFailure);
   const reasons: string[] = [];
-  let failureStreak = false;
-  let successOverdue = false;
 
   if (workflow.state !== "active") {
     reasons.push(`The scheduled sync workflow is not active (GitHub state: ${workflow.state}).`);
   } else {
     if (completed.length >= 3 && completed.slice(0, 3).every(isFailure)) {
-      failureStreak = true;
       reasons.push("The three most recent completed scheduled runs failed.");
     }
     const activeRun = runs.some(
       (run) =>
         ACTIVE_STATUSES.has(run.status) &&
-        now.getTime() - Date.parse(run.created_at) <= ACTIVE_RUN_GRACE_HOURS * HOUR,
+        now.getTime() - createdAt(run) <= ACTIVE_RUN_GRACE_HOURS * HOUR,
     );
     const deadline = latestSuccess
       ? updatedAt(latestSuccess) + SUCCESS_WATCHDOG_HOURS * HOUR
       : Date.parse(activatedAt(workflow)) + activationGraceHours * HOUR;
     if (now.getTime() >= deadline && !activeRun) {
-      successOverdue = true;
       reasons.push(
         latestSuccess
           ? `No scheduled run has succeeded in the last ${SUCCESS_WATCHDOG_HOURS} hours.`
@@ -134,8 +127,6 @@ export function assessScheduledHealth(
     workflow,
     ...(latestSuccess ? { latestSuccess } : {}),
     ...(latestFailure ? { latestFailure } : {}),
-    failureStreak,
-    successOverdue,
   };
 }
 
@@ -362,20 +353,20 @@ export async function monitorScheduledHealth(
     request("GET", `/actions/workflows/${WORKFLOW_FILE}`),
     listLabeledIssues(request),
   ])) as [RunListing, Workflow, HealthIssue[]];
-  const assess = (runs: WorkflowRun[]): HealthAssessment =>
-    assessScheduledHealth(runs, workflow, now, options.activationGraceHours);
-  let assessment = assess(listing.workflow_runs);
-  if (assessment.failureStreak || assessment.successOverdue) {
-    // One listing is never the sole evidence for an alert read from run history: a newer run it
-    // omits can end a failure streak or satisfy the watchdog, so both must survive independent queries.
-    const verified = assess(
-      mergeRuns(listing.workflow_runs, await listVerificationRuns(request, now)),
-    );
-    const cleared =
-      (assessment.failureStreak && !verified.failureStreak) ||
-      (assessment.successOverdue && !verified.successOverdue);
-    assessment = cleared ? { ...verified, staleListing: true } : verified;
-  }
+  // One listing is never the sole evidence for run history: the newer runs a stale one omits can
+  // fake an alert, hide a failure streak, or hide a recovery. A disabled workflow alerts regardless.
+  const verification = workflow.state === "active" ? await listVerificationRuns(request, now) : [];
+  const newestListed = Math.max(...listing.workflow_runs.map(createdAt));
+  const staleListing = verification.some((run) => createdAt(run) > newestListed);
+  const assessment: HealthAssessment = {
+    ...assessScheduledHealth(
+      mergeRuns(listing.workflow_runs, verification),
+      workflow,
+      now,
+      options.activationGraceHours,
+    ),
+    ...(staleListing ? { staleListing } : {}),
+  };
   const issue = issues
     .filter((candidate) => !candidate.pull_request && candidate.title === HEALTH_ISSUE_TITLE)
     .sort((left, right) => left.number - right.number)[0];

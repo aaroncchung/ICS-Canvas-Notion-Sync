@@ -217,19 +217,16 @@ describe("GitHub health issue lifecycle", () => {
   it("closes the issue and leaves one recovery comment once a newer scheduled run succeeds", async () => {
     const github = fakeGitHub({ issues: [openIssue()] });
     github.runs = [run(10, "success", "2026-07-13T11:30:00Z"), ...threeFailures];
+    const writes = (): string[] => github.calls.filter((call) => !call.startsWith("GET "));
     await monitorScheduledHealth(github.request, { now });
-    expect(github.calls.slice(3)).toEqual(["PATCH /issues/1", "POST /issues/1/comments"]);
+    expect(writes()).toEqual(["PATCH /issues/1", "POST /issues/1/comments"]);
     expect(github.issues[0]).toMatchObject({ state: "closed", state_reason: "completed" });
     expect(github.comments).toEqual([
       "Scheduled run [10](https://github.test/runs/10) succeeded after the last failure, so the health check closed this issue.",
     ]);
 
     await monitorScheduledHealth(github.request, { now });
-    expect(github.calls.slice(5)).toEqual([
-      "GET /actions/workflows/sync.yml/runs",
-      "GET /actions/workflows/sync.yml",
-      "GET /issues",
-    ]);
+    expect(writes()).toHaveLength(2);
     expect(github.comments).toHaveLength(1);
   });
 
@@ -409,6 +406,46 @@ describe("stale run listing verification", () => {
     expect(assessment.reasons).toEqual(["The three most recent completed scheduled runs failed."]);
     expect(assessment.staleListing).toBeUndefined();
     expect(afterInitialReads(github).slice(-2)).toEqual(["POST /labels", "POST /issues"]);
+  });
+
+  it("alerts on three newer failures hidden behind a listing that still looks healthy", async () => {
+    const staleSuccess = run(5, "success", "2026-07-13T07:00:00Z");
+    const github = fakeGitHub({
+      runs: [staleSuccess],
+      recentRuns: [...threeFailures, staleSuccess],
+      commitRuns: [],
+    });
+    const assessment = await monitorScheduledHealth(github.request, { now });
+    expect(assessment.reasons).toEqual(["The three most recent completed scheduled runs failed."]);
+    expect(assessment.staleListing).toBe(true);
+    expect(github.issues[0]).toMatchObject({ title: HEALTH_ISSUE_TITLE, state: "open" });
+    expect(github.issues[0]?.body).toContain("https://github.test/runs/1)");
+  });
+
+  it("closes an open incident when only verification sees the recovering success", async () => {
+    const staleRuns = [...threeFailures.slice(0, 2), run(5, "success", "2026-07-13T07:00:00Z")];
+    const github = fakeGitHub({
+      runs: staleRuns,
+      recentRuns: [run(11, "success", "2026-07-13T11:30:00Z"), ...staleRuns],
+      commitRuns: [],
+      issues: [openIssue()],
+    });
+    const assessment = await monitorScheduledHealth(github.request, { now });
+    expect(assessment.staleListing).toBe(true);
+    expect(github.issues[0]).toMatchObject({ state: "closed", state_reason: "completed" });
+    expect(github.comments[0]).toContain("runs/11)");
+  });
+
+  it("verifies a healthy listing without calling it stale when every source agrees", async () => {
+    const github = fakeGitHub({ runs: [run(5, "success", "2026-07-13T07:00:00Z")] });
+    const assessment = await monitorScheduledHealth(github.request, { now });
+    expect(assessment.reasons).toEqual([]);
+    expect(assessment.staleListing).toBeUndefined();
+    expect(afterInitialReads(github)).toEqual([
+      "GET /actions/workflows/sync.yml/runs",
+      "GET /commits",
+      "GET /actions/workflows/sync.yml/runs",
+    ]);
   });
 
   it("alerts on a disabled workflow immediately, without verification requests", async () => {
