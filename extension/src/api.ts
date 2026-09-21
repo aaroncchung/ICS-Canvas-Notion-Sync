@@ -66,15 +66,14 @@ export class Api implements SyncApi {
       options.pause ??
       ((ms) =>
         new Promise((resolve) => {
-          const timer = setTimeout(resolve, ms);
-          this.signal?.addEventListener(
-            "abort",
-            () => {
-              clearTimeout(timer);
-              resolve();
-            },
-            { once: true },
-          );
+          // The signal outlives every wait in a scan, so each wait removes its own listener.
+          const done = () => {
+            clearTimeout(timer);
+            this.signal?.removeEventListener("abort", done);
+            resolve();
+          };
+          const timer = setTimeout(done, ms);
+          this.signal?.addEventListener("abort", done);
         }));
     this.now = options.now ?? Date.now;
     this.beat = options.beat;
@@ -113,7 +112,11 @@ export class Api implements SyncApi {
     await this.beat?.();
     this.nextRequest = this.now() + 400;
     const url = new URL(path, service === "Canvas" ? this.config.origin : "https://api.notion.com");
-    const headers: Record<string, string> = { Accept: "application/json" };
+    // Canvas IDs are 64-bit. As JSON numbers they can exceed what JSON.parse represents exactly,
+    // so Canvas is asked for string IDs; model.ts `id` still rejects any unsafe number it is sent.
+    const headers: Record<string, string> = {
+      Accept: service === "Canvas" ? "application/json+canvas-string-ids" : "application/json",
+    };
     if (service === "Notion") {
       headers.Authorization = `Bearer ${this.config.token}`;
       headers["Notion-Version"] = "2026-03-11";

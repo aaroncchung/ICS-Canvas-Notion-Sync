@@ -20,6 +20,8 @@ const config = {
   userId: "7",
   enabled: true,
 };
+/** Number.MAX_SAFE_INTEGER + 2: a valid 64-bit Canvas ID that a JSON number cannot hold exactly. */
+const BIG_ID = "9007199254740993";
 function page(uid = "event-assignment-123", url: string | null = null) {
   return {
     id: "page-123",
@@ -151,9 +153,42 @@ describe("identity and completion", () => {
       completion(submission({ score: 80, workflow_state: "graded" }), "42", "7")?.evidence,
     ).toBe(completion(submission(), "42", "7")?.evidence);
   });
+  it("keeps 64-bit Canvas IDs exact as strings and never trusts a number JSON cannot represent", () => {
+    expect(Number(BIG_ID)).toBeGreaterThan(Number.MAX_SAFE_INTEGER);
+    expect(targetFromPage(page(`event-assignment-${BIG_ID}`))?.assignmentId).toBe(BIG_ID);
+    expect(completion(submission({ user_id: BIG_ID }), "42", BIG_ID)?.eligible).toBe(true);
+    // Parsed as a number this ID is rounded to a neighbor, so it must not match anything.
+    expect(completion(submission({ user_id: Number(BIG_ID) }), "42", BIG_ID)).toBeUndefined();
+  });
 });
 
 describe("scan", () => {
+  it("matches users, courses and assignments whose IDs exceed Number.MAX_SAFE_INTEGER", async () => {
+    const { api } = fixture();
+    const big = target({ assignmentId: BIG_ID, uid: `event-assignment-${BIG_ID}` });
+    api.user = vi.fn(async () => BIG_ID);
+    api.targets = vi.fn(async () => ({ items: [big] }));
+    api.courses = vi.fn(async () => ({ items: [BIG_ID] }));
+    api.assignments = vi.fn(async () => ({
+      items: [
+        {
+          id: BIG_ID,
+          course_id: BIG_ID,
+          submission: submission({ assignment_id: BIG_ID, user_id: BIG_ID }),
+        },
+      ],
+    }));
+    api.target = vi.fn(async () => big);
+    const report = newReport("sync", Date.now());
+    await scan({ ...config, userId: BIG_ID }, report, {
+      api,
+      acknowledged: {},
+      saveAcknowledged: async () => undefined,
+      progress: () => undefined,
+    });
+    expect(report.updated).toBe(1);
+    expect(api.assignments).toHaveBeenCalledWith(BIG_ID, undefined);
+  });
   it("marks once, respects reopening, handles a new attempt, and leaves past courses alone", async () => {
     const { api, run, reopen, saveAcknowledged } = fixture();
     expect((await run()).updated).toBe(1);
@@ -328,6 +363,24 @@ describe("HTTP boundary", () => {
     expect(JSON.parse(fetcher.mock.calls[1]?.[1]?.body as string)).toEqual({
       properties: { "Personal Status": { status: { name: "Done" } } },
     });
+  });
+  it("asks Canvas for string IDs so 64-bit IDs survive, and rejects a rounded numeric ID", async () => {
+    const { api, fetcher } = setup([
+      json({ id: BIG_ID }),
+      json([{ id: BIG_ID }]),
+      json({ results: [], has_more: false }),
+      // The raw wire form of a server that ignored the request for string IDs.
+      new Response(`{"id":${BIG_ID}}`, { headers: { "Content-Type": "application/json" } }),
+    ]);
+    expect(await api.user()).toBe(BIG_ID);
+    expect((await api.courses("active")).items).toEqual([BIG_ID]);
+    await api.targets();
+    const accept = (call: number) =>
+      (fetcher.mock.calls[call]?.[1]?.headers as Record<string, string>).Accept;
+    expect(accept(0)).toBe("application/json+canvas-string-ids");
+    expect(accept(1)).toBe("application/json+canvas-string-ids");
+    expect(accept(2)).toBe("application/json");
+    await expect(api.user()).rejects.toThrow("did not return a user identity");
   });
   it("rejects foreign-host and different-endpoint pagination before fetching it", async () => {
     for (const next of [
