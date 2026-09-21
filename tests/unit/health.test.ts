@@ -188,11 +188,20 @@ describe("run listing merge", () => {
     expect(merged[1]?.updated_at).toBe("2026-07-13T11:02:00Z");
   });
 
-  it("flags only the no-recent-success alert as needing verification", () => {
+  it("flags the alerts that depend on run history, and not a disabled workflow", () => {
     const failures = [1, 2, 3].map((id) => run({ id, conclusion: "failure" }));
     const recent = run({ id: 4, updated_at: hoursAgo(5) });
     const active = workflow(hoursAgo(48));
-    expect(assessScheduledHealth([...failures, recent], active, now).successOverdue).toBe(false);
+    expect(assessScheduledHealth([...failures, recent], active, now)).toMatchObject({
+      failureStreak: true,
+      successOverdue: false,
+    });
+    expect(
+      assessScheduledHealth(failures, workflow(hoursAgo(1), "disabled_manually"), now),
+    ).toMatchObject({ failureStreak: false, successOverdue: false });
+    expect(
+      assessScheduledHealth([run({ updated_at: hoursAgo(20) })], active, now).failureStreak,
+    ).toBe(false);
     expect(
       assessScheduledHealth([run({ updated_at: hoursAgo(20) })], active, now).successOverdue,
     ).toBe(true);

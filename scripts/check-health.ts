@@ -56,9 +56,11 @@ export interface HealthAssessment {
   workflow: Workflow;
   latestSuccess?: WorkflowRun;
   latestFailure?: WorkflowRun;
-  /** The no-recent-success alert fired; it is the one alert a stale run listing can fake. */
+  /** The three-consecutive-failures alert fired. Like `successOverdue`, a stale run listing can fake it. */
+  failureStreak: boolean;
+  /** The no-recent-success alert fired. */
   successOverdue: boolean;
-  /** Verification found recent runs, missing from the first listing, that cleared the alert. */
+  /** Verification found recent runs, missing from the first listing, that cleared an alert. */
   staleListing?: true;
 }
 
@@ -98,12 +100,14 @@ export function assessScheduledHealth(
   const latestSuccess = completed.find(isSuccess);
   const latestFailure = completed.find(isFailure);
   const reasons: string[] = [];
+  let failureStreak = false;
   let successOverdue = false;
 
   if (workflow.state !== "active") {
     reasons.push(`The scheduled sync workflow is not active (GitHub state: ${workflow.state}).`);
   } else {
     if (completed.length >= 3 && completed.slice(0, 3).every(isFailure)) {
+      failureStreak = true;
       reasons.push("The three most recent completed scheduled runs failed.");
     }
     const activeRun = runs.some(
@@ -130,6 +134,7 @@ export function assessScheduledHealth(
     workflow,
     ...(latestSuccess ? { latestSuccess } : {}),
     ...(latestFailure ? { latestFailure } : {}),
+    failureStreak,
     successOverdue,
   };
 }
@@ -360,12 +365,16 @@ export async function monitorScheduledHealth(
   const assess = (runs: WorkflowRun[]): HealthAssessment =>
     assessScheduledHealth(runs, workflow, now, options.activationGraceHours);
   let assessment = assess(listing.workflow_runs);
-  if (assessment.successOverdue) {
-    // One listing is never the sole evidence for this alert; it must survive independent queries.
+  if (assessment.failureStreak || assessment.successOverdue) {
+    // One listing is never the sole evidence for an alert read from run history: a newer run it
+    // omits can end a failure streak or satisfy the watchdog, so both must survive independent queries.
     const verified = assess(
       mergeRuns(listing.workflow_runs, await listVerificationRuns(request, now)),
     );
-    assessment = verified.successOverdue ? verified : { ...verified, staleListing: true };
+    const cleared =
+      (assessment.failureStreak && !verified.failureStreak) ||
+      (assessment.successOverdue && !verified.successOverdue);
+    assessment = cleared ? { ...verified, staleListing: true } : verified;
   }
   const issue = issues
     .filter((candidate) => !candidate.pull_request && candidate.title === HEALTH_ISSUE_TITLE)

@@ -380,12 +380,40 @@ describe("stale run listing verification", () => {
     expect(github.issues[0]?.body).toContain("https://github.test/runs/3");
   });
 
-  it("alerts promptly on three failures after a recent success without verifying", async () => {
+  it("stays healthy when a newer success ends a failure streak the listing showed", async () => {
+    const recentEnough = run(5, "success", "2026-07-13T08:00:00Z");
+    const newest = run(11, "success", "2026-07-13T11:30:00Z");
+    const github = fakeGitHub({
+      runs: [...threeFailures, recentEnough],
+      recentRuns: [newest, ...threeFailures, recentEnough],
+      commitRuns: [],
+      issues: [openIssue(threeFailures, "closed")],
+    });
+    const assessment = await monitorScheduledHealth(github.request, { now });
+    expect(assessment.reasons).toEqual([]);
+    expect(assessment.staleListing).toBe(true);
+    expect(assessment.latestSuccess?.id).toBe(11);
+    expect(afterInitialReads(github)).toEqual([
+      "GET /actions/workflows/sync.yml/runs",
+      "GET /commits",
+      "GET /actions/workflows/sync.yml/runs",
+    ]);
+    expect(github.issues[0]?.state).toBe("closed");
+  });
+
+  it("alerts on the first check when verification confirms three failures after a recent success", async () => {
     const github = fakeGitHub({
       runs: [...threeFailures, run(5, "success", "2026-07-13T08:00:00Z")],
     });
     const assessment = await monitorScheduledHealth(github.request, { now });
     expect(assessment.reasons).toEqual(["The three most recent completed scheduled runs failed."]);
+    expect(assessment.staleListing).toBeUndefined();
+    expect(afterInitialReads(github).slice(-2)).toEqual(["POST /labels", "POST /issues"]);
+  });
+
+  it("alerts on a disabled workflow immediately, without verification requests", async () => {
+    const github = fakeGitHub({ workflow: { ...activeWorkflow, state: "disabled_manually" } });
+    await monitorScheduledHealth(github.request, { now });
     expect(afterInitialReads(github)).toEqual(["POST /labels", "POST /issues"]);
   });
 

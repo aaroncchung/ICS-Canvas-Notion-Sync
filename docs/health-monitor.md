@@ -18,12 +18,12 @@ A scheduled run that is still active and was created within the previous two hou
 
 ## Stale listing verification
 
-GitHub's workflow-run history listing can intermittently return a stale but valid-looking page, days behind the real history, particularly when queried from inside Actions. That listing alone is therefore never enough to raise the no-recent-success alert. When the first assessment reports it, the checker gathers runs from differently shaped queries before deciding:
+GitHub's workflow-run history listing can intermittently return a stale but valid-looking page, days behind the real history, particularly when queried from inside Actions. That listing alone is therefore never enough to raise an alert read from run history: a newer run it omits can satisfy the watchdog or end a run of failures. When the first assessment reports the no-recent-success alert or three consecutive failures, the checker gathers runs from differently shaped queries before deciding:
 
 - the scheduled runs created in the last 15 hours (the 13-hour watchdog plus the two-hour active-run grace), using the `created` filter, and
 - the scheduled runs for each of the three newest default-branch commits, using the `head_sha` filter. Scheduled runs always check out the default branch, so these point queries reach recent runs without going through the history listing.
 
-All listings are merged by run id, keeping the newest attempt of a run seen twice, and health is assessed again on the merged runs. The alert is raised only if it survives; if verification finds a recent success or a recently started run, the alert is dropped and the check logs that the listing was stale. The merged runs also feed the issue's run table and the recovery decision, so a stale listing cannot hide a recovery or newer failures either. The other alerts are not verified: three consecutive failures with a recent success, or a disabled workflow, open the issue on the first check. A failed verification request fails the check without touching the issue, and the next scheduled check retries.
+All listings are merged by run id, keeping the newest attempt of a run seen twice, and health is assessed again on the merged runs. An alert is raised only if it survives; if verification finds runs that clear one, such as a newer success or a recently started run, that alert is dropped and the check logs that the listing was stale. The merged runs also feed the issue's run table and the recovery decision, so a stale listing cannot hide a recovery or newer failures either. Verification happens within the same check, so genuine consecutive failures still open the issue on the first check that sees them. A disabled workflow does not depend on the run listing and alerts without verification. A failed verification request fails the check without touching the issue, and the next scheduled check retries.
 
 ## Issue lifecycle
 
