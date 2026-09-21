@@ -2,7 +2,7 @@
 
 A strict TypeScript/Node.js service that imports Canvas assignments from a private Canvas ICS calendar feed into Notion. It is designed for institutions that do not permit students to create Canvas API tokens. It runs on a configured daily schedule in GitHub Actions and also supports manual validation, dry-run, and live-sync runs.
 
-The sync never uses Canvas OAuth, API tokens, scraping, or browser automation. Completion state belongs entirely to Notion.
+The scheduled ICS sync never uses Canvas OAuth, API tokens, scraping, or browser automation. It preserves completion state in Notion. The optional [Chrome companion extension](docs/chrome-extension.md) uses your signed-in Canvas session to mark submitted, graded, or excused assignments Done while respecting work you manually reopen.
 
 ## ICS limitations
 
@@ -13,7 +13,7 @@ An ICS feed is narrower than the Canvas API:
 - It can import only assignments present in Canvas's current calendar-feed window.
 - Real institutions can vary slightly in their Canvas UID, description, and course-label formats. The classifier is deliberately conservative; inspect the dry-run warnings whenever the sync is pointed at a new institution's feed.
 
-Personal Status, Priority, Notes, Override Due Date, and an assignment's manually edited Assignment Type are never overwritten.
+The ICS importer never overwrites Personal Status, Priority, Notes, Override Due Date, or an assignment's manually edited Assignment Type. The optional extension can set only Personal Status to Done.
 
 ## How it works
 
