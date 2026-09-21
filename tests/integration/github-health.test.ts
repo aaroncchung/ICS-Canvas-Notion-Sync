@@ -42,7 +42,13 @@ const threeFailures = [
 ];
 
 interface FakeGitHub {
+  /** The broad history listing. */
   runs: WorkflowRun[];
+  /** What the `created`-window query sees; defaults to `runs`. */
+  recentRuns?: WorkflowRun[];
+  /** What the `head_sha` point queries see; defaults to `runs`. */
+  commitRuns?: WorkflowRun[];
+  commits: string[];
   workflow: Workflow;
   issues: HealthIssue[];
   labelExists: boolean;
@@ -54,6 +60,7 @@ interface FakeGitHub {
 function fakeGitHub(overrides: Partial<FakeGitHub> = {}): FakeGitHub {
   const github: FakeGitHub = {
     runs: threeFailures,
+    commits: ["sha-1"],
     workflow: activeWorkflow,
     issues: [],
     labelExists: true,
@@ -63,7 +70,24 @@ function fakeGitHub(overrides: Partial<FakeGitHub> = {}): FakeGitHub {
       github.calls.push(`${method} ${path.split("?")[0]}`);
       const issueMatch = /^\/issues\/(\d+)(\/comments)?$/.exec(path);
       if (method === "GET" && path.startsWith("/actions/workflows/sync.yml/runs")) {
-        return Promise.resolve({ workflow_runs: github.runs });
+        const query = new URLSearchParams(path.split("?")[1]);
+        const created = query.get("created");
+        const headSha = query.get("head_sha");
+        let workflow_runs = github.runs;
+        if (created) {
+          const since = Date.parse(created.replace(/^>=/, ""));
+          workflow_runs = (github.recentRuns ?? github.runs).filter(
+            (item) => Date.parse(item.created_at) >= since,
+          );
+        } else if (headSha) {
+          workflow_runs = (github.commitRuns ?? github.runs).filter(
+            (item) => item.head_sha === headSha,
+          );
+        }
+        return Promise.resolve({ workflow_runs });
+      }
+      if (method === "GET" && path.startsWith("/commits?")) {
+        return Promise.resolve(github.commits.map((sha) => ({ sha })));
       }
       if (method === "GET" && path === "/actions/workflows/sync.yml") {
         return Promise.resolve(github.workflow);
@@ -112,6 +136,9 @@ describe("GitHub health issue lifecycle", () => {
       "GET /actions/workflows/sync.yml/runs",
       "GET /actions/workflows/sync.yml",
       "GET /issues",
+      "GET /actions/workflows/sync.yml/runs",
+      "GET /commits",
+      "GET /actions/workflows/sync.yml/runs",
       "POST /labels",
       "POST /issues",
     ]);
@@ -276,6 +303,118 @@ describe("GitHub health issue lifecycle", () => {
     github.workflow = activeWorkflow;
     await monitorScheduledHealth(github.request, { now });
     expect(github.issues[0]?.state).toBe("closed");
+  });
+});
+
+describe("stale run listing verification", () => {
+  const oldSuccesses = [
+    run(21, "success", "2026-07-09T20:00:00Z"),
+    run(22, "success", "2026-07-09T17:00:00Z"),
+  ];
+  const oldFailures = [
+    run(1, "failure", "2026-07-09T20:00:00Z"),
+    run(2, "failure", "2026-07-09T19:00:00Z"),
+    run(3, "failure", "2026-07-09T18:00:00Z"),
+  ];
+  const recentSuccess = run(10, "success", "2026-07-13T11:00:00Z");
+  const afterInitialReads = (github: FakeGitHub): string[] => github.calls.slice(3);
+
+  it("stays healthy when the created-window query shows a recent success the listing missed", async () => {
+    const github = fakeGitHub({
+      runs: oldSuccesses,
+      recentRuns: [recentSuccess],
+      commitRuns: [],
+      issues: [openIssue(oldSuccesses, "closed")],
+    });
+    const assessment = await monitorScheduledHealth(github.request, { now });
+    expect(assessment.reasons).toEqual([]);
+    expect(assessment.staleListing).toBe(true);
+    expect(assessment.latestSuccess?.id).toBe(10);
+    expect(assessment.runs.map((item) => item.id)).toEqual([10, 21, 22]);
+    expect(afterInitialReads(github)).toEqual([
+      "GET /actions/workflows/sync.yml/runs",
+      "GET /commits",
+      "GET /actions/workflows/sync.yml/runs",
+    ]);
+    expect(github.issues[0]?.state).toBe("closed");
+  });
+
+  it("stays healthy when only a head_sha point query shows the recent success", async () => {
+    const github = fakeGitHub({
+      runs: oldSuccesses,
+      recentRuns: [],
+      commitRuns: [recentSuccess],
+      commits: ["sha-10", "sha-9"],
+    });
+    const assessment = await monitorScheduledHealth(github.request, { now });
+    expect(assessment.reasons).toEqual([]);
+    expect(assessment.staleListing).toBe(true);
+    expect(github.calls).not.toContain("POST /issues");
+  });
+
+  it("stays healthy when a stale listing is empty after the activation grace", async () => {
+    const github = fakeGitHub({ runs: [], recentRuns: [recentSuccess] });
+    const assessment = await monitorScheduledHealth(github.request, { now });
+    expect(assessment.reasons).toEqual([]);
+    expect(github.issues).toEqual([]);
+  });
+
+  it("reopens the issue when every source agrees that no recent run succeeded", async () => {
+    const github = fakeGitHub({
+      runs: oldSuccesses,
+      issues: [openIssue(oldSuccesses, "closed")],
+    });
+    const assessment = await monitorScheduledHealth(github.request, { now });
+    expect(assessment.reasons).toEqual(["No scheduled run has succeeded in the last 13 hours."]);
+    expect(assessment.staleListing).toBeUndefined();
+    expect(github.issues[0]?.state).toBe("open");
+  });
+
+  it("still alerts on three failures that only verification can see", async () => {
+    const github = fakeGitHub({ runs: oldSuccesses, recentRuns: threeFailures });
+    const assessment = await monitorScheduledHealth(github.request, { now });
+    expect(assessment.reasons).toEqual([
+      "The three most recent completed scheduled runs failed.",
+      "No scheduled run has succeeded in the last 13 hours.",
+    ]);
+    expect(github.issues[0]?.body).toContain("https://github.test/runs/3");
+  });
+
+  it("alerts promptly on three failures after a recent success without verifying", async () => {
+    const github = fakeGitHub({
+      runs: [...threeFailures, run(5, "success", "2026-07-13T08:00:00Z")],
+    });
+    const assessment = await monitorScheduledHealth(github.request, { now });
+    expect(assessment.reasons).toEqual(["The three most recent completed scheduled runs failed."]);
+    expect(afterInitialReads(github)).toEqual(["POST /labels", "POST /issues"]);
+  });
+
+  it("closes an open incident idempotently once verification shows the recovery", async () => {
+    const github = fakeGitHub({
+      runs: oldFailures,
+      recentRuns: [recentSuccess],
+      issues: [openIssue()],
+    });
+    await monitorScheduledHealth(github.request, { now });
+    await monitorScheduledHealth(github.request, { now });
+    expect(github.issues[0]).toMatchObject({ state: "closed", state_reason: "completed" });
+    expect(github.comments).toHaveLength(1);
+  });
+
+  it("requests the verification window and recent commits with the expected queries", async () => {
+    const paths: string[] = [];
+    const github = fakeGitHub({ runs: oldSuccesses, commits: ["abc", "def"] });
+    const recording: GitHubRequest = (method, path, body) => {
+      paths.push(path);
+      return github.request(method, path, body);
+    };
+    await monitorScheduledHealth(recording, { now });
+    expect(paths.slice(3, 7)).toEqual([
+      "/actions/workflows/sync.yml/runs?event=schedule&per_page=100&created=%3E%3D2026-07-12T21%3A00%3A00Z",
+      "/commits?per_page=3",
+      "/actions/workflows/sync.yml/runs?event=schedule&per_page=100&head_sha=abc",
+      "/actions/workflows/sync.yml/runs?event=schedule&per_page=100&head_sha=def",
+    ]);
   });
 });
 

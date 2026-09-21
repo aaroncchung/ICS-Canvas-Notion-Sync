@@ -16,6 +16,15 @@ The scheduled sync is unhealthy when any of these holds:
 
 A scheduled run that is still active and was created within the previous two hours defers the no-success alert only; it never masks completed failures, and a run stuck in the queue for longer than two hours no longer defers anything.
 
+## Stale listing verification
+
+GitHub's workflow-run history listing can intermittently return a stale but valid-looking page, days behind the real history, particularly when queried from inside Actions. That listing alone is therefore never enough to raise the no-recent-success alert. When the first assessment reports it, the checker gathers runs from differently shaped queries before deciding:
+
+- the scheduled runs created in the last 15 hours (the 13-hour watchdog plus the two-hour active-run grace), using the `created` filter, and
+- the scheduled runs for each of the three newest default-branch commits, using the `head_sha` filter. Scheduled runs always check out the default branch, so these point queries reach recent runs without going through the history listing.
+
+All listings are merged by run id, keeping the newest attempt of a run seen twice, and health is assessed again on the merged runs. The alert is raised only if it survives; if verification finds a recent success or a recently started run, the alert is dropped and the check logs that the listing was stale. The merged runs also feed the issue's run table and the recovery decision, so a stale listing cannot hide a recovery or newer failures either. The other alerts are not verified: three consecutive failures with a recent success, or a disabled workflow, open the issue on the first check. A failed verification request fails the check without touching the issue, and the next scheduled check retries.
+
 ## Issue lifecycle
 
 The checker keeps one issue titled `Canvas–Notion sync is unhealthy` with the `sync-failure` label. The label is created on first use, and the oldest matching issue is reused. The labeled-issue listing is paginated (up to ten pages of 100), so newer labeled issues can never hide the durable one, and pull requests returned by the issues endpoint are ignored.
@@ -30,7 +39,7 @@ Closing patches the issue first and then adds one comment naming the recovering 
 
 ## GitHub API access
 
-Requests go to the repository's `actions` and `issues` endpoints with the workflow token. Reads and idempotent `PATCH` requests retry twice on network failures, server errors, and rate limiting, where rate limiting means a `429` or a `403` carrying `Retry-After` or `x-ratelimit-remaining: 0`. Rate-limit delays follow GitHub's guidance in full: the request waits the whole `Retry-After`, otherwise until `x-ratelimit-reset` when `x-ratelimit-remaining` is `0`, and otherwise one minute. One request may wait at most five minutes in total across its retries, well inside the workflow's ten-minute timeout; a longer required wait fails the check immediately with the required delay in the error message, and the next scheduled check retries. Other transient failures wait one second per attempt. `POST` requests are never retried. Error messages include the method, path, and status only, never the token or the response body.
+Requests go to the repository's `actions` and `issues` endpoints with the workflow token; verification also reads the newest default-branch commits, which the workflow's `contents: read` permission covers. Reads and idempotent `PATCH` requests retry twice on network failures, server errors, and rate limiting, where rate limiting means a `429` or a `403` carrying `Retry-After` or `x-ratelimit-remaining: 0`. Rate-limit delays follow GitHub's guidance in full: the request waits the whole `Retry-After`, otherwise until `x-ratelimit-reset` when `x-ratelimit-remaining` is `0`, and otherwise one minute. One request may wait at most five minutes in total across its retries, well inside the workflow's ten-minute timeout; a longer required wait fails the check immediately with the required delay in the error message, and the next scheduled check retries. Other transient failures wait one second per attempt. `POST` requests are never retried. Error messages include the method, path, and status only, never the token or the response body.
 
 `HEALTH_ACTIVATION_GRACE_HOURS` must be a positive finite number; anything else fails the check before any request is made.
 
