@@ -36,6 +36,12 @@ const COOLDOWN = 5 * 60_000;
 const FAILURE_COOLDOWN = 60_000;
 /** The most a Retry-After header may hold automatic scans back; Sync now is never held back. */
 const LONGEST_COOLDOWN = 60 * 60_000;
+/** Declared in the manifest, but Chrome still lets the user withhold it under site access. */
+const NOTION_SITE = "https://api.notion.com/*";
+const withdrawn = (site: "Canvas" | "Notion") =>
+  new UserError(
+    `${site} host access was removed. Allow that site for the extension in chrome://extensions.`,
+  );
 /** The scan in progress. It lives and dies with this worker; nothing about it is persisted. */
 let active: Scanning | undefined;
 /** Every scan that is queued or running, so Pause also reaches one that has not started yet. */
@@ -111,12 +117,9 @@ async function execute(state: Configured, scanning: Scanning): Promise<void> {
     // instead. It comes back by itself once access is restored, so automatic sync stays on.
     for (const [site, pattern] of [
       ["Canvas", `${state.config.origin}/*`],
-      ["Notion", "https://api.notion.com/*"],
+      ["Notion", NOTION_SITE],
     ] as const)
-      if (!(await chrome.permissions.contains({ origins: [pattern] })))
-        throw new UserError(
-          `${site} host access was removed. Allow that site for the extension in chrome://extensions.`,
-        );
+      if (!(await chrome.permissions.contains({ origins: [pattern] }))) throw withdrawn(site);
     await scan(state.config, report, {
       api,
       acknowledged: state.acknowledged,
@@ -219,6 +222,8 @@ async function verified(
     throw new UserError("Enter a Notion data-source ID (UUID).");
   if (!(await chrome.permissions.contains({ origins: [`${origin}/*`] })))
     throw new UserError("Canvas host access has not been granted.");
+  // Otherwise the schema check below fails like a dead network, which says nothing useful.
+  if (!(await chrome.permissions.contains({ origins: [NOTION_SITE] }))) throw withdrawn("Notion");
   const api = new Api({ origin, token, dataSourceId });
   const userId = await api.user();
   await api.validateSchema();

@@ -359,7 +359,10 @@ describe("settings", () => {
       expect((await configure({ origin })).error).toContain("without a path");
     expect((await configure({ dataSourceId: "not-a-uuid" })).error).toContain("data-source ID");
     hostAccess = false;
-    expect((await configure({})).error).toContain("host access");
+    expect((await configure({})).error).toContain("Canvas host access");
+    hostAccess = true;
+    notionAccess = false;
+    expect((await configure({})).error).toContain("Notion host access");
     expect(requests).toEqual([]);
   });
   it("saves the data-source ID in the lowercase form Notion answers with", async () => {

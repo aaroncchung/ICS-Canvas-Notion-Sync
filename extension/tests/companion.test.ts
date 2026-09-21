@@ -695,6 +695,19 @@ describe("HTTP boundary", () => {
     expect(Date.now() - started).toBeLessThan(500);
     expect(fetcher).toHaveBeenCalledTimes(1);
   });
+  it("reports a Pause that lands mid-request as the Pause, whatever the answer says", async () => {
+    // A refusal is not retried, so nothing later would notice the abort and turn it into one.
+    for (const status of [401, 404]) {
+      const controller = new AbortController();
+      const fetcher = vi.fn<typeof fetch>(async () => {
+        controller.abort();
+        return new Response("", { status });
+      });
+      const api = new Api(config, { fetcher, signal: controller.signal });
+      await expect(api.user()).rejects.not.toBeInstanceOf(ApiError);
+      expect(fetcher).toHaveBeenCalledTimes(1);
+    }
+  });
   it("sends nothing once the scan has been cancelled", async () => {
     const controller = new AbortController();
     const { api, fetcher } = setup([json({ id: 7 })], controller.signal);
