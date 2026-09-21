@@ -1,6 +1,7 @@
 import {
   object,
   id,
+  notionId,
   scalarText,
   targetFromPage,
   UserError,
@@ -13,16 +14,25 @@ export class ApiError extends UserError {
   readonly service: "Canvas" | "Notion";
   readonly status: number;
   readonly retryAfter: number;
-  constructor(service: "Canvas" | "Notion", status: number, retryAfter = 0, detail?: string) {
+  /** Canvas reports throttling as 403 "Rate Limit Exceeded" rather than 429. */
+  readonly throttled: boolean;
+  constructor(
+    service: "Canvas" | "Notion",
+    status: number,
+    retryAfter = 0,
+    detail?: string,
+    throttled = false,
+  ) {
     super(
       `${service}: ${detail ?? (status === 0 ? "network failure or sign-in redirect" : `HTTP ${status}`)}`,
     );
     this.service = service;
     this.status = status;
     this.retryAfter = retryAfter;
+    this.throttled = throttled || status === 429;
   }
   get retryable(): boolean {
-    return this.status === 0 || this.status === 429 || this.status >= 500;
+    return this.status === 0 || this.throttled || this.status >= 500;
   }
 }
 export interface Page<T> {
@@ -66,6 +76,11 @@ export class Api implements SyncApi {
       options.pause ??
       ((ms) =>
         new Promise((resolve) => {
+          // A listener added after the abort would never fire, leaving Pause to wait this out.
+          if (this.signal?.aborted) {
+            resolve();
+            return;
+          }
           // The signal outlives every wait in a scan, so each wait removes its own listener.
           const done = () => {
             clearTimeout(timer);
@@ -145,16 +160,31 @@ export class Api implements SyncApi {
           : retry
             ? Date.parse(retry) - this.now()
             : 0;
-      throw new ApiError(service, response.status, Number.isFinite(delay) ? Math.max(0, delay) : 0);
+      const wait = Number.isFinite(delay) ? Math.max(0, delay) : 0;
+      // A throttled 403 passes with time; any other 403 is a refusal that will not.
+      const throttled =
+        service === "Canvas" &&
+        response.status === 403 &&
+        /rate limit exceeded/i.test(await response.text().catch(() => ""));
+      this.signal?.throwIfAborted();
+      throw throttled
+        ? new ApiError(service, 403, wait, "rate limit exceeded", true)
+        : new ApiError(service, response.status, wait);
     }
     // A login page or other non-JSON answer will not improve on retry.
     const unexpected = new ApiError(service, response.status, 0, "unexpected response");
     if (!response.headers.get("Content-Type")?.includes("application/json")) throw unexpected;
+    let text: string;
     try {
-      const data: unknown = JSON.parse((await response.text()).replace(/^while\s*\(1\);\s*/, ""));
-      return { data, response };
+      text = await response.text();
     } catch {
+      // The timeout also covers the body, so a download cut short is a network failure to retry.
       this.signal?.throwIfAborted();
+      throw new ApiError(service, 0);
+    }
+    try {
+      return { data: JSON.parse(text.replace(/^while\s*\(1\);\s*/, "")) as unknown, response };
+    } catch {
       throw unexpected;
     }
   }
@@ -256,6 +286,8 @@ export class Api implements SyncApi {
     };
   }
   assignments(courseId: string, cursor?: string): Promise<Page<unknown>> {
+    // This listing cannot leave out the description (Canvas ignores exclude_response_fields here),
+    // and the submissions listing that can does not carry the name the title check needs.
     return this.canvasList(
       `/api/v1/courses/${courseId}/assignments?include%5B%5D=submission&per_page=100`,
       cursor,
@@ -272,11 +304,7 @@ export class Api implements SyncApi {
     }
     // A moved page is no longer a valid destination even if its properties look similar.
     const parent = object(object(data).parent);
-    if (
-      scalarText(parent.data_source_id).replaceAll("-", "") !==
-      this.config.dataSourceId.replaceAll("-", "")
-    )
-      return;
+    if (notionId(scalarText(parent.data_source_id)) !== notionId(this.config.dataSourceId)) return;
     return targetFromPage(data);
   }
   async markDone(pageId: string): Promise<void> {

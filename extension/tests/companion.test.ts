@@ -1,13 +1,16 @@
 /* eslint @typescript-eslint/require-await: "off", @typescript-eslint/unbound-method: "off" -- Async API doubles and Vitest spy assertions. */
 import { describe, expect, it, vi } from "vitest";
 import { Api, ApiError, type SyncApi } from "../src/api.ts";
-import { scan, serialExecutor } from "../src/engine.ts";
+import { scan, serialExecutor, WriteAccessDenied } from "../src/engine.ts";
 import {
   completion,
   alreadyHandled,
   newReport,
+  record,
+  note,
   targetFromPage,
   targetKey,
+  UserError,
   type Report,
   type Target,
 } from "../src/model.ts";
@@ -64,7 +67,10 @@ function fixture() {
       items: enrollment === "active" ? ["42"] : ["42", "43"],
     })),
     assignments: vi.fn(async (courseId) => ({
-      items: courseId === "42" ? [{ id: 123, course_id: 42, submission: submission() }] : [],
+      items:
+        courseId === "42"
+          ? [{ id: 123, name: "Homework", course_id: 42, submission: submission() }]
+          : [],
     })),
     target: vi.fn(async () => current),
     markDone: vi.fn(async () => {
@@ -142,6 +148,19 @@ describe("identity and completion", () => {
     [{ workflow_state: "unsubmitted", submitted_at: null, excused: true, missing: true }, true],
     [{ redo_request: true }, false],
     [{ missing: true }, true],
+    // Complete/incomplete grading: "incomplete" comes with a score of 0 and means still owed.
+    [{ workflow_state: "graded", submitted_at: null, attempt: null, grade: "complete" }, true],
+    [
+      {
+        workflow_state: "graded",
+        submitted_at: null,
+        attempt: null,
+        grade: "Incomplete",
+        score: 0,
+      },
+      false,
+    ],
+    [{ workflow_state: "graded", grade: "incomplete", score: 0 }, true],
   ])("classifies completion conservatively: %j", (override, eligible) => {
     expect(completion(submission(override), "42", "7")?.eligible).toBe(eligible);
   });
@@ -152,6 +171,31 @@ describe("identity and completion", () => {
     expect(
       completion(submission({ score: 80, workflow_state: "graded" }), "42", "7")?.evidence,
     ).toBe(completion(submission(), "42", "7")?.evidence);
+  });
+  it("keeps the rows worth reading when a scan has more rows than the report holds", () => {
+    const report = newReport("preview", 0);
+    for (let index = 0; index < 150; index++)
+      record(report, { title: `Routine ${index}` }, "skipped", "No completion evidence");
+    note(report, "Course 41", "unchecked", "Not accessible");
+    record(report, { title: "Essay" }, "eligible", "Submitted");
+    record(report, { title: "Quiz" }, "failed", "Notion: HTTP 400");
+    note(report, "Scan", "skipped", "Paused before finishing", 0);
+    expect(report.details).toHaveLength(100);
+    expect(report.details.slice(-4).map((detail) => detail.title)).toEqual([
+      "Course 41",
+      "Essay",
+      "Quiz",
+      "Scan",
+    ]);
+    // The totals still count every assignment, and the report says how many rows it left out.
+    expect(report).toMatchObject({ skipped: 150, eligible: 1, failed: 1, omitted: 54 });
+    // A routine row never displaces anything, and nothing displaces a failure.
+    record(report, { title: "Late routine" }, "skipped", "Already Done");
+    expect(report.details.at(-1)?.title).toBe("Scan");
+    const failures = newReport("sync", 0);
+    for (let index = 0; index < 101; index++)
+      record(failures, { title: `Failure ${index}` }, "failed", "Notion: HTTP 400");
+    expect(failures.details.at(-1)?.title).toBe("Failure 99");
   });
   it("keeps 64-bit Canvas IDs exact as strings and never trusts a number JSON cannot represent", () => {
     expect(Number(BIG_ID)).toBeGreaterThan(Number.MAX_SAFE_INTEGER);
@@ -173,6 +217,7 @@ describe("scan", () => {
       items: [
         {
           id: BIG_ID,
+          name: "Homework",
           course_id: BIG_ID,
           submission: submission({ assignment_id: BIG_ID, user_id: BIG_ID }),
         },
@@ -202,6 +247,7 @@ describe("scan", () => {
       items: [
         {
           id: 123,
+          name: "Homework",
           course_id: 42,
           submission: submission({ attempt: 2, submitted_at: "2026-09-22T12:00:00Z" }),
         },
@@ -213,7 +259,10 @@ describe("scan", () => {
   it("reads completed courses while an assignment is unaccounted for, visiting each course once", async () => {
     const { api, run } = fixture();
     api.assignments = vi.fn(async (courseId) => ({
-      items: courseId === "43" ? [{ id: 123, course_id: 43, submission: submission() }] : [],
+      items:
+        courseId === "43"
+          ? [{ id: 123, name: "Homework", course_id: 43, submission: submission() }]
+          : [],
     }));
     expect((await run()).updated).toBe(1);
     expect(api.courses).toHaveBeenCalledWith("completed", undefined);
@@ -231,7 +280,10 @@ describe("scan", () => {
       courseId === "42" && !cursor
         ? { items: [], next: "page2" }
         : {
-            items: courseId === "42" ? [{ id: 123, course_id: 42, submission: submission() }] : [],
+            items:
+              courseId === "42"
+                ? [{ id: 123, name: "Homework", course_id: 42, submission: submission() }]
+                : [],
           },
     );
     expect((await run()).updated).toBe(1);
@@ -291,11 +343,67 @@ describe("scan", () => {
   });
   it("reports a page Notion refuses and carries on", async () => {
     const { api, run, acknowledged } = fixture();
-    vi.mocked(api.markDone).mockRejectedValueOnce(new ApiError("Notion", 403));
+    vi.mocked(api.markDone).mockRejectedValueOnce(new ApiError("Notion", 400));
     const report = await run();
     expect(report.failed).toBe(1);
-    expect(report.details[0]?.reason).toContain("HTTP 403");
+    expect(report.details[0]?.reason).toContain("HTTP 400");
     expect(acknowledged).toEqual({});
+  });
+  it("treats a refused write to a readable page as missing write access, not a bad page", async () => {
+    const { api, run, acknowledged } = fixture();
+    vi.mocked(api.markDone).mockRejectedValueOnce(new ApiError("Notion", 403));
+    await expect(run()).rejects.toBeInstanceOf(WriteAccessDenied);
+    await expect(run()).resolves.toMatchObject({ updated: 1 });
+    expect(acknowledged[targetKey(target())]).toBe("attempt:1");
+  });
+  it("writes only where the Notion title is the Canvas assignment's name", async () => {
+    // Assignment 123 exists in this Canvas too, but it is some other piece of work.
+    const foreign = fixture();
+    foreign.api.assignments = vi.fn(async () => ({
+      items: [{ id: 123, name: "Lab report", course_id: 42, submission: submission() }],
+    }));
+    for (const mode of ["preview", "sync"] as const) {
+      const report = await foreign.run(mode);
+      expect(report).toMatchObject({ skipped: 1, eligible: 0, updated: 0 });
+      expect(report.details[0]?.reason).toContain("Title differs");
+    }
+    expect(foreign.api.target).not.toHaveBeenCalled();
+    expect(foreign.api.markDone).not.toHaveBeenCalled();
+    expect(foreign.acknowledged).toEqual({});
+    // A missing name or title proves nothing either.
+    const unnamed = fixture();
+    unnamed.api.assignments = vi.fn(async () => ({
+      items: [{ id: 123, course_id: 42, submission: submission() }],
+    }));
+    expect((await unnamed.run()).skipped).toBe(1);
+    const untitled = fixture();
+    untitled.api.targets = vi.fn(async () => ({ items: [target({ title: "" })] }));
+    untitled.api.assignments = vi.fn(async () => ({
+      items: [{ id: 123, name: "", course_id: 42, submission: submission() }],
+    }));
+    expect((await untitled.run()).skipped).toBe(1);
+    // Spacing, case and Unicode form are not differences.
+    const respaced = fixture();
+    respaced.api.assignments = vi.fn(async () => ({
+      items: [{ id: 123, name: "  HOMEＷORK ", course_id: 42, submission: submission() }],
+    }));
+    expect((await respaced.run()).updated).toBe(1);
+    // The title is checked again on the page as it is just before the write.
+    const retitled = fixture();
+    retitled.api.target = vi.fn(async () => target({ title: "Lab report" }));
+    expect((await retitled.run()).skipped).toBe(1);
+    expect(retitled.api.markDone).not.toHaveBeenCalled();
+  });
+  it("acknowledges a page the query already shows as Done without reading it again", async () => {
+    const { api, run, acknowledged } = fixture();
+    api.targets = vi.fn(async () => ({ items: [target({ status: "Done" })] }));
+    expect((await run("preview")).skipped).toBe(1);
+    expect(acknowledged).toEqual({});
+    const report = await run();
+    expect(report.details[0]?.reason).toBe("Already Done");
+    expect(acknowledged[targetKey(target())]).toBe("attempt:1");
+    expect(api.target).not.toHaveBeenCalled();
+    expect(api.markDone).not.toHaveBeenCalled();
   });
   it("does not write if the destination or the signed-in account changed", async () => {
     const changed = fixture();
@@ -321,6 +429,65 @@ describe("scan", () => {
       throw new ApiError("Canvas", 503);
     });
     await expect(run()).rejects.toBeInstanceOf(ApiError);
+  });
+  it("keeps one broken course from holding back the others", async () => {
+    for (const failure of [
+      new ApiError("Canvas", 503),
+      new UserError("Canvas pagination did not advance"),
+    ]) {
+      const { api, run } = fixture();
+      api.courses = vi.fn(async () => ({ items: ["41", "42"] }));
+      const working = api.assignments;
+      api.assignments = vi.fn<SyncApi["assignments"]>(async (courseId, cursor) => {
+        if (courseId === "41") throw failure;
+        return working(courseId, cursor);
+      });
+      const report = await run();
+      expect(report.updated).toBe(1);
+      expect(report.details).toContainEqual({
+        title: "Course 41",
+        outcome: "unchecked",
+        reason: `Could not be read (${failure.message})`,
+      });
+    }
+  });
+  it("ends the scan when Canvas throttles or the network fails, which is not about one course", async () => {
+    for (const failure of [
+      new ApiError("Canvas", 403, 0, "rate limit exceeded", true),
+      new ApiError("Canvas", 429),
+      new ApiError("Canvas", 0),
+    ]) {
+      const { api, run } = fixture();
+      api.courses = vi.fn(async () => ({ items: ["41", "42"] }));
+      api.assignments = vi.fn(async () => {
+        throw failure;
+      });
+      await expect(run()).rejects.toBe(failure);
+      expect(api.assignments).toHaveBeenCalledTimes(1);
+    }
+  });
+  it("tells a course that answers 401 from a session that expired during the scan", async () => {
+    const forbidden = fixture();
+    forbidden.api.courses = vi.fn(async () => ({ items: ["41", "42"] }));
+    const working = forbidden.api.assignments;
+    forbidden.api.assignments = vi.fn<SyncApi["assignments"]>(async (courseId, cursor) => {
+      if (courseId === "41") throw new ApiError("Canvas", 401);
+      return working(courseId, cursor);
+    });
+    const report = await forbidden.run();
+    expect(report.updated).toBe(1);
+    expect(report.details[0]).toMatchObject({ title: "Course 41", outcome: "unchecked" });
+    const expired = fixture();
+    const signedOut = new ApiError("Canvas", 401);
+    expired.api.user = vi
+      .fn<SyncApi["user"]>()
+      .mockResolvedValueOnce("7")
+      .mockRejectedValue(signedOut);
+    expired.api.assignments = vi.fn(async () => {
+      throw new ApiError("Canvas", 401);
+    });
+    await expect(expired.run()).rejects.toBe(signedOut);
+    expect(expired.api.markDone).not.toHaveBeenCalled();
   });
   it("serializes overlapping triggers and recovers the queue after rejection", async () => {
     const serial = serialExecutor(),
@@ -437,6 +604,51 @@ describe("HTTP boundary", () => {
     const refused = setup([new Response("", { status: 401 }), json({ id: 7 })]);
     await expect(refused.api.user()).rejects.toMatchObject({ status: 401 });
     expect(refused.fetcher).toHaveBeenCalledTimes(1);
+  });
+  it("retries a 403 that is Canvas throttling, and only that kind", async () => {
+    const limited = () => new Response("403 Forbidden (Rate Limit Exceeded)", { status: 403 });
+    const recovered = setup([limited(), json({ id: 7 })]);
+    expect(await recovered.api.user()).toBe("7");
+    const stuck = setup([limited(), limited(), limited()]);
+    await expect(stuck.api.user()).rejects.toMatchObject({ status: 403, throttled: true });
+    expect(stuck.fetcher).toHaveBeenCalledTimes(3);
+    const refused = setup([new Response("user not authorized", { status: 403 }), json({ id: 7 })]);
+    await expect(refused.api.user()).rejects.toMatchObject({ status: 403, throttled: false });
+    expect(refused.fetcher).toHaveBeenCalledTimes(1);
+    // Notion has no such convention, so its 403 is always a refusal.
+    const notion = setup([limited(), json({})]);
+    await expect(notion.api.markDone("page-123")).rejects.toMatchObject({ throttled: false });
+  });
+  it("retries a body that stopped arriving instead of calling it a non-JSON answer", async () => {
+    const cut = json({ id: 7 });
+    vi.spyOn(cut, "text").mockRejectedValue(new DOMException("timed out", "TimeoutError"));
+    const { api, fetcher } = setup([cut, json({ id: 7 })]);
+    expect(await api.user()).toBe("7");
+    expect(fetcher).toHaveBeenCalledTimes(2);
+  });
+  it("accepts the destination whatever the case of the configured data-source ID", async () => {
+    const fetcher = vi.fn<typeof fetch>(async () => json(page()));
+    const api = new Api(
+      { ...config, dataSourceId: "ABCDEF12-1234-1234-1234-123456789ABC" },
+      { fetcher, pause: async () => undefined },
+    );
+    const raw = page();
+    raw.parent.data_source_id = "abcdef12-1234-1234-1234-123456789abc";
+    fetcher.mockResolvedValueOnce(json(raw));
+    expect((await api.target("page-123"))?.assignmentId).toBe("123");
+  });
+  it("does not wait out a retry delay once the scan has been cancelled", async () => {
+    const controller = new AbortController();
+    const fetcher = vi.fn<typeof fetch>(async () => {
+      // Pause lands while the request is out; the answer then asks for a one-second retry wait.
+      controller.abort();
+      return new Response("", { status: 503 });
+    });
+    const api = new Api(config, { fetcher, signal: controller.signal });
+    const started = Date.now();
+    await expect(api.user()).rejects.not.toBeInstanceOf(ApiError);
+    expect(Date.now() - started).toBeLessThan(500);
+    expect(fetcher).toHaveBeenCalledTimes(1);
   });
   it("sends nothing once the scan has been cancelled", async () => {
     const controller = new AbortController();

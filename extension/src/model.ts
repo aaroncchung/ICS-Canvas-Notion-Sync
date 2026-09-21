@@ -1,5 +1,13 @@
 import { canvasAssignmentIdFromUid } from "../../src/canvas/assignment-uid.ts";
 import { canvasAssignmentUrlIdentity } from "../../src/canvas/canvas-url.ts";
+import {
+  pageProperties,
+  readCheckbox,
+  readRichText,
+  readSelect,
+  readTitle,
+  readUrl,
+} from "../../src/notion/property-helpers.ts";
 
 export interface Config {
   origin: string;
@@ -20,6 +28,8 @@ export interface Target {
 }
 export interface Observation {
   courseId: string;
+  /** The assignment's name in Canvas. It must match the Notion title before anything is written. */
+  name: string;
   eligible: boolean;
   evidence: string;
   reason: string;
@@ -39,6 +49,8 @@ export interface Report {
   unchecked: number;
   failed: number;
   details: Detail[];
+  /** Rows left out of `details` once it was full. */
+  omitted?: number;
 }
 /** Scans live only in worker memory; an interrupted scan is simply rerun from the start. */
 export interface State {
@@ -56,7 +68,10 @@ export const emptyState = (): State => ({
 });
 /** An error whose message is safe and useful to show in the popup. */
 export class UserError extends Error {}
-/** The signed-in Canvas user or the Notion schema no longer matches what was verified. */
+/**
+ * Something only the user can put right: the signed-in Canvas user or the Notion schema no longer
+ * matches what was verified, or the integration may not write. It turns automatic sync off.
+ */
 export class VerificationError extends UserError {}
 export function object(value: unknown): Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value)
@@ -87,52 +102,47 @@ export function canvasOrigin(value: string): string | undefined {
     return;
   }
 }
-function rich(value: unknown, kind: string): string {
-  const parts: unknown = object(value)[kind];
-  if (!Array.isArray(parts)) return "";
-  return parts
-    .map((part: unknown) => {
-      const p = object(part);
-      return typeof p.plain_text === "string" ? p.plain_text : scalarText(object(p.text).content);
-    })
-    .join("");
+/** Notion IDs are accepted with or without dashes and in either case; Notion answers in lowercase. */
+export function notionId(value: string): string {
+  return value.replaceAll("-", "").toLowerCase();
+}
+/**
+ * Whether a Notion title and a Canvas assignment name are the same text. The importer writes the
+ * Canvas name as the title, so a page whose title differs was not imported from that assignment.
+ */
+export function sameTitle(title: string, name: string): boolean {
+  const key = (value: string) => value.normalize("NFKC").replace(/\s+/g, " ").trim().toLowerCase();
+  return key(title) !== "" && key(title) === key(name);
 }
 export function targetFromPage(value: unknown): Target | undefined {
   const page = object(value),
-    p = object(page.properties);
-  if (
-    typeof page.id !== "string" ||
-    object(p["Imported From"]).type !== "select" ||
-    object(object(p["Imported From"]).select).name !== "Canvas ICS"
-  )
-    return;
-  const uid = rich(p["Canvas UID"], "rich_text");
+    p = pageProperties(page);
+  if (typeof page.id !== "string" || readSelect(p, "Imported From") !== "Canvas ICS") return;
+  const uid = readRichText(p, "Canvas UID") ?? "";
   const uidId = canvasAssignmentIdFromUid(uid);
-  const url = object(p["Canvas URL"]).url;
-  const route = typeof url === "string" ? canvasAssignmentUrlIdentity(url) : undefined;
-  const courseId = id(rich(p["Canvas Course ID"], "rich_text")) ?? route?.courseId;
+  // Assignment pages hold no course ID of their own, so an assignment URL is its only source.
+  const route = canvasAssignmentUrlIdentity(readUrl(p, "Canvas URL") ?? "");
   const assignmentId = uidId ?? route?.assignmentId ?? "";
   return {
     pageId: page.id,
     uid,
-    title: rich(p.Assignment, "title").slice(0, 200),
+    title: readTitle(p, "Assignment"),
     assignmentId: uid ? assignmentId : "",
-    ...(courseId ? { courseId } : {}),
+    ...(route ? { courseId: route.courseId } : {}),
     status: scalarText(object(object(p["Personal Status"]).status).name),
     removed:
       page.archived === true ||
       page.in_trash === true ||
-      object(p["Removed from Canvas"]).checkbox === true ||
-      object(object(p["Canvas State"]).select).name === "Removed",
-    conflict:
-      Boolean(uidId && route && uidId !== route.assignmentId) ||
-      Boolean(courseId && route && courseId !== route.courseId),
+      readCheckbox(p, "Removed from Canvas") ||
+      readSelect(p, "Canvas State") === "Removed",
+    conflict: Boolean(uidId && route && uidId !== route.assignmentId),
   };
 }
 export function completion(
   value: unknown,
   courseId: string,
   userId: string,
+  name = "",
 ): Observation | undefined {
   const s = object(value);
   if (
@@ -148,9 +158,12 @@ export function completion(
       ? s.submitted_at
       : "";
   const submitted = Boolean(submittedAt) || s.workflow_state === "submitted";
+  // Complete/incomplete and pass/fail work is graded "complete" or "incomplete". An incomplete
+  // arrives with a score of 0 but says the work is still owed, so it does not count as a grade.
+  const grade = typeof s.grade === "string" ? s.grade.trim().toLowerCase() : "";
+  const incomplete = grade === "incomplete";
   const graded =
-    (typeof s.grade === "string" && s.grade.trim() !== "") ||
-    (typeof s.score === "number" && Number.isFinite(s.score));
+    !incomplete && (grade !== "" || (typeof s.score === "number" && Number.isFinite(s.score)));
   const missing = s.missing === true || s.late_policy_status === "missing";
   const eligible =
     s.redo_request !== true && (submitted || s.excused === true || (graded && !missing));
@@ -163,6 +176,7 @@ export function completion(
       : "completion";
   return {
     courseId,
+    name,
     eligible,
     evidence,
     reason:
@@ -176,7 +190,9 @@ export function completion(
               ? "Graded"
               : missing
                 ? "Missing work"
-                : "No completion evidence",
+                : incomplete
+                  ? "Marked incomplete"
+                  : "No completion evidence",
   };
 }
 export function targetKey(target: Target): string {
@@ -206,9 +222,36 @@ export function newReport(mode: Report["mode"], now: number): Report {
   };
 }
 type Outcome = keyof Pick<Report, "updated" | "eligible" | "skipped" | "unchecked" | "failed">;
-/** A diagnostic row that is not an assignment, so it does not change the totals. */
-export function note(report: Report, title: string, outcome: Outcome, reason: string): void {
-  if (report.details.length < 100) report.details.push({ title, outcome, reason });
+const MAX_DETAILS = 100;
+/** Lower is kept longer: rows that need reading outrank the routine skips that fill most scans. */
+const RANK: Record<string, number> = { failed: 0, updated: 1, eligible: 1, unchecked: 2 };
+const ROUTINE = 3;
+/**
+ * A diagnostic row that is not an assignment, so it does not change the totals. Once the list is
+ * full, a row is kept only by dropping the newest row that matters less than it does.
+ */
+export function note(
+  report: Report,
+  title: string,
+  outcome: Outcome,
+  reason: string,
+  rank = RANK[outcome] ?? ROUTINE,
+): void {
+  const row = { title: title.slice(0, 200), outcome, reason };
+  if (report.details.length < MAX_DETAILS) {
+    report.details.push(row);
+    return;
+  }
+  report.omitted = (report.omitted ?? 0) + 1;
+  let evict = -1,
+    worst = rank;
+  for (const [index, detail] of report.details.entries()) {
+    const other = RANK[detail.outcome] ?? ROUTINE;
+    if (other > rank && other >= worst) [evict, worst] = [index, other];
+  }
+  if (evict < 0) return;
+  report.details.splice(evict, 1);
+  report.details.push(row);
 }
 export function record(
   report: Report,

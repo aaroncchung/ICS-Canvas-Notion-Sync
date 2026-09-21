@@ -1,10 +1,11 @@
-import { Api } from "./api.ts";
+import { Api, ApiError } from "./api.ts";
 import { scan, serialExecutor, verifyAccount } from "./engine.ts";
 import {
   canvasOrigin,
   emptyState,
   newReport,
   note,
+  notionId,
   object,
   scalarText,
   UserError,
@@ -33,6 +34,8 @@ const ready = (async () => {
 const STATE_KEY = "companion-v1";
 const COOLDOWN = 5 * 60_000;
 const FAILURE_COOLDOWN = 60_000;
+/** The most a Retry-After header may hold automatic scans back; Sync now is never held back. */
+const LONGEST_COOLDOWN = 60 * 60_000;
 /** The scan in progress. It lives and dies with this worker; nothing about it is persisted. */
 let active: Scanning | undefined;
 /** Every scan that is queued or running, so Pause also reaches one that has not started yet. */
@@ -109,13 +112,16 @@ async function execute(state: Configured, scanning: Scanning): Promise<void> {
     state.nextScanAt = Date.now() + COOLDOWN;
   } catch (error) {
     if (controller.signal.aborted) {
-      note(report, "Scan", "skipped", "Paused before finishing");
+      // Ranked with failures, so a full list of routine rows cannot crowd it out.
+      note(report, "Scan", "skipped", "Paused before finishing", 0);
     } else {
       state.error = message(error);
       report.failed++;
-      state.nextScanAt = Date.now() + FAILURE_COOLDOWN;
-      // Outages and expired sessions pass by themselves. Only a changed account or schema
-      // needs the user to look before anything is written again.
+      // A service that says how long to stay away is not asked again every minute meanwhile.
+      const asked = error instanceof ApiError ? Math.min(error.retryAfter, LONGEST_COOLDOWN) : 0;
+      state.nextScanAt = Date.now() + Math.max(FAILURE_COOLDOWN, asked);
+      // Outages and expired sessions pass by themselves. Only a changed account or schema, or
+      // an integration that may not write, needs the user to look before the next write.
       if (error instanceof VerificationError) {
         state.config.enabled = false;
         state.previewReady = false;
@@ -178,35 +184,48 @@ function wake(checkVisibility: boolean, origin?: string): void {
     await launch("sync", false);
   })().catch(() => undefined);
 }
-async function configure(raw: Record<string, unknown>): Promise<void> {
-  const previous = await load();
-  const origin = canvasOrigin(scalarText(raw.origin ?? ""));
-  if (!origin) throw new UserError("Enter the Canvas HTTPS origin, without a path.");
+/** Checks the form and then the connection itself. Nothing is saved here. */
+async function verified(
+  origin: string,
+  raw: Record<string, unknown>,
+  previous: State,
+): Promise<Config> {
   const token =
     typeof raw.token === "string" && raw.token.trim() ? raw.token.trim() : previous.config?.token;
-  const dataSourceId = scalarText(raw.dataSourceId ?? "").trim();
+  // Stored in the lowercase form Notion answers with, so later comparisons are exact.
+  const dataSourceId = scalarText(raw.dataSourceId ?? "")
+    .trim()
+    .toLowerCase();
   if (!token || token.length > 512 || /[\r\n]/.test(token))
     throw new UserError("Enter a valid Notion integration token.");
-  if (!/^(?:[0-9a-f]{32}|[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})$/i.test(dataSourceId))
+  if (!/^(?:[0-9a-f]{32}|[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})$/.test(dataSourceId))
     throw new UserError("Enter a Notion data-source ID (UUID).");
   if (!(await chrome.permissions.contains({ origins: [`${origin}/*`] })))
     throw new UserError("Canvas host access has not been granted.");
   const api = new Api({ origin, token, dataSourceId });
-  let userId: string;
+  const userId = await api.user();
+  await api.validateSchema();
+  return { origin, token, dataSourceId, userId, enabled: false };
+}
+async function configure(raw: Record<string, unknown>): Promise<void> {
+  const previous = await load();
+  // The settings page asks for host access only for an origin that passes this same check.
+  const origin = canvasOrigin(scalarText(raw.origin ?? ""));
+  if (!origin) throw new UserError("Enter the Canvas HTTPS origin, without a path.");
+  let config: Config;
   try {
-    userId = await api.user();
-    await api.validateSchema();
+    config = await verified(origin, raw, previous);
   } catch (error) {
-    // Host access granted for this attempt is not kept for a connection that did not verify.
+    // Host access granted for this attempt is not kept for a connection that did not verify,
+    // whether it was the form or the connection that failed.
     if (origin !== previous.config?.origin)
       await chrome.permissions.remove({ origins: [`${origin}/*`] }).catch(() => undefined);
     throw error;
   }
-  const config: Config = { origin, token, dataSourceId, userId, enabled: false };
   const same =
     previous.config?.origin === origin &&
-    previous.config.userId === userId &&
-    previous.config.dataSourceId.replaceAll("-", "") === dataSourceId.replaceAll("-", "");
+    previous.config.userId === config.userId &&
+    notionId(previous.config.dataSourceId) === notionId(config.dataSourceId);
   const state = same ? previous : emptyState();
   state.config = config;
   state.previewReady = false;

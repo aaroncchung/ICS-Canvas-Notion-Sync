@@ -6,6 +6,7 @@ import {
   note,
   object,
   record,
+  sameTitle,
   targetKey,
   UserError,
   VerificationError,
@@ -20,8 +21,22 @@ export class AccountMismatch extends VerificationError {
     super("Canvas account changed. Verify your settings again before syncing.");
   }
 }
+/** Notion let the page be read but not updated, which no later scan can fix by itself. */
+export class WriteAccessDenied extends VerificationError {
+  constructor() {
+    super(
+      "Notion refused the update. Give the integration Update content access, then verify your settings again.",
+    );
+  }
+}
 export async function verifyAccount(config: Pick<Config, "userId">, api: SyncApi): Promise<void> {
   if ((await api.user()) !== config.userId) throw new AccountMismatch();
+}
+/** A failure that says something about one course only, so the other courses are still read. */
+function confinedToCourse(error: unknown): error is UserError {
+  if (!(error instanceof UserError) || error instanceof VerificationError) return false;
+  // Pagination faults are plain UserErrors. An outage or throttling is not about this course.
+  return !(error instanceof ApiError) || (error.status !== 0 && !error.throttled);
 }
 export interface ScanContext {
   api: SyncApi;
@@ -72,6 +87,8 @@ async function observe(
   const found = new Set<string>();
   const observations = new Map<string, Observation>();
   const visited = new Set<string>();
+  let readAny = false;
+  let fault: UserError | undefined;
   for (const enrollment of ["active", "completed"] as const) {
     // Past courses are read only while a tracked assignment is still unaccounted for.
     if (found.size === wanted.size) break;
@@ -100,24 +117,45 @@ async function observe(
                 id(assignment.course_id) === courseId &&
                 id(object(assignment.submission).assignment_id) === assignmentId
               )
-                seen.set(assignmentId, completion(assignment.submission, courseId, config.userId));
+                seen.set(
+                  assignmentId,
+                  completion(
+                    assignment.submission,
+                    courseId,
+                    config.userId,
+                    typeof assignment.name === "string" ? assignment.name : "",
+                  ),
+                );
             }
           },
         );
       } catch (error) {
-        // Canvas answers 401 as well as 403 for a course this user may not read. If the session
-        // itself has expired, nothing is observed and the next scan reports it.
-        if (!(error instanceof ApiError) || ![401, 403, 404].includes(error.status)) throw error;
+        if (!confinedToCourse(error)) throw error;
+        const status = error instanceof ApiError ? error.status : 0;
+        // Canvas answers 401 as well as 403 for a course this user may not read, but 401 is also
+        // what an expired session looks like. Asking who is signed in tells them apart: it throws,
+        // ending the scan, unless the session is still good.
+        if (status === 401) await verifyAccount(config, api);
+        const refused = [401, 403, 404].includes(status);
+        if (!refused) fault = error;
         // A partly read course cannot prove coverage, so none of it is kept.
-        note(report, `Course ${courseId}`, "unchecked", `Not accessible (${error.message})`);
+        note(
+          report,
+          `Course ${courseId}`,
+          "unchecked",
+          `${refused ? "Not accessible" : "Could not be read"} (${error.message})`,
+        );
         continue;
       }
+      readAny = true;
       for (const [assignmentId, observation] of seen) {
         found.add(assignmentId);
         if (observation) observations.set(assignmentId, observation);
       }
     }
   }
+  // One broken course does not hold back the rest. When none could be read, the fault is wider.
+  if (fault && !readAny) throw fault;
   return observations;
 }
 /**
@@ -148,10 +186,22 @@ export async function scan(config: Config, report: Report, context: ScanContext)
       record(report, target, "unchecked", "No accessible submission record");
     } else if (target.courseId && observation.courseId !== target.courseId) {
       record(report, target, "skipped", "Conflicting course identity");
+    } else if (!sameTitle(target.title, observation.name)) {
+      // Assignment IDs are only unique within one Canvas. The importer keeps the title equal to
+      // the Canvas name, so a differing title means this page came from some other assignment:
+      // a database imported from another Canvas, or a title the importer has yet to refresh.
+      record(report, target, "skipped", "Title differs from Canvas; not confirmed as this work");
     } else if (!observation.eligible) {
       record(report, target, "skipped", observation.reason);
     } else if (alreadyHandled(acknowledged[key], observation.evidence)) {
       record(report, target, "skipped", "Already handled; preserving your status");
+    } else if (target.status === "Done") {
+      // Nothing would be written, so the status from the query is enough without a reread.
+      if (report.mode === "sync") {
+        acknowledged[key] = observation.evidence;
+        await saveAcknowledged();
+      }
+      record(report, target, "skipped", "Already Done");
     } else {
       const current = await api.target(target.pageId);
       if (
@@ -160,6 +210,7 @@ export async function scan(config: Config, report: Report, context: ScanContext)
         current.conflict ||
         current.uid !== target.uid ||
         current.assignmentId !== target.assignmentId ||
+        !sameTitle(current.title, observation.name) ||
         (current.courseId && current.courseId !== observation.courseId)
       ) {
         record(report, target, "skipped", "Destination changed or is no longer eligible");
@@ -181,6 +232,9 @@ export async function scan(config: Config, report: Report, context: ScanContext)
         try {
           await api.markDone(target.pageId);
         } catch (error) {
+          // This page was just read, so a 403 on the write means the integration may not update
+          // content at all. Every later write would fail the same way until that is changed.
+          if (error instanceof ApiError && error.status === 403) throw new WriteAccessDenied();
           // Notion refusing this page is reported. Anything transient ends the scan instead; the
           // page is not acknowledged, so the next scan rereads it and writes again.
           if (

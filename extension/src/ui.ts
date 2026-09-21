@@ -36,13 +36,22 @@ function render(raw: unknown): void {
     element("summary").textContent =
       `${report.mode === "preview" ? "Preview" : "Sync"} · ${new Date(scalarText(report.finishedAt ?? report.startedAt)).toLocaleString()}${stage}\n${scalarText(report.updated)} updated · ${scalarText(report.eligible)} eligible · ${scalarText(report.skipped)} skipped · ${scalarText(report.unchecked)} unchecked · ${scalarText(report.failed)} failed`;
     element("details").replaceChildren();
+    const row = (text: string) => {
+      const item = document.createElement("li");
+      item.textContent = text;
+      element("details").append(item);
+    };
     if (Array.isArray(report.details))
       for (const rawDetail of report.details) {
-        const detail = object(rawDetail),
-          item = document.createElement("li");
-        item.textContent = `${scalarText(detail.title)} — ${scalarText(detail.reason)}`;
-        element("details").append(item);
+        const detail = object(rawDetail);
+        row(`${scalarText(detail.title)} — ${scalarText(detail.reason)}`);
       }
+    if (typeof report.omitted === "number" && report.omitted > 0)
+      row(`${report.omitted} more rows not shown; routine skips are left out first.`);
+  } else {
+    // Verifying another connection starts over, so the previous connection's scan goes too.
+    element("summary").textContent = "No scans yet.";
+    element("details").replaceChildren();
   }
 }
 async function send(action: string, config?: Record<string, string>): Promise<void> {

@@ -20,6 +20,7 @@ let stored: State;
 let userId: number;
 let notionStatus: string;
 let canvas: "up" | "signed-out" | "offline";
+let notion: "up" | "busy" | "read-only";
 let activeTabUrl: string;
 let hostAccess: boolean;
 let revoke: ReturnType<typeof vi.fn>;
@@ -61,6 +62,7 @@ beforeEach(async () => {
   userId = 7;
   notionStatus = "In progress";
   canvas = "up";
+  notion = "up";
   activeTabUrl = config.origin;
   hostAccess = true;
   revoke = vi.fn(async () => true);
@@ -122,12 +124,17 @@ beforeEach(async () => {
       const isCanvas = url.hostname !== "api.notion.com";
       if (isCanvas && canvas === "offline") throw new TypeError("offline");
       if (isCanvas && canvas === "signed-out") return new Response("{}", { status: 401 });
+      if (!isCanvas && notion === "busy")
+        return new Response("{}", { status: 429, headers: { "Retry-After": "600" } });
+      if (!isCanvas && notion === "read-only" && init?.method === "PATCH")
+        return new Response("{}", { status: 403 });
       if (url.pathname.endsWith("/profile")) return json({ id: userId });
       if (url.pathname === "/api/v1/courses") return json([{ id: 42 }]);
       if (url.pathname.endsWith("/assignments"))
         return json([
           {
             id: 123,
+            name: "Homework",
             course_id: 42,
             submission: {
               assignment_id: 123,
@@ -230,6 +237,34 @@ describe("worker orchestration", () => {
     expect(stored.error).toBeUndefined();
     expect(stored.report?.updated).toBe(1);
   });
+  it("turns automatic sync off when the integration may read but not update", async () => {
+    notion = "read-only";
+    updated(1, { status: "complete" }, { url: config.origin } as chrome.tabs.Tab);
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(stored.error).toContain("Update content");
+    expect(stored.config?.enabled).toBe(false);
+    expect(stored.previewReady).toBe(false);
+    expect(requests.filter((r) => r.method === "PATCH")).toHaveLength(1);
+  });
+  it("stays away for as long as a throttling service asks, up to an hour", async () => {
+    const tab = { url: config.origin } as chrome.tabs.Tab;
+    notion = "busy";
+    updated(1, { status: "complete" }, tab);
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(stored.error).toContain("HTTP 429");
+    expect(stored.config?.enabled).toBe(true);
+    notion = "up";
+    const before = requests.length;
+    // Past the usual one-minute wait after a failure, but inside the ten minutes Notion asked for.
+    await vi.advanceTimersByTimeAsync(5 * 60_000);
+    updated(1, { status: "complete" }, tab);
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(requests).toHaveLength(before);
+    await vi.advanceTimersByTimeAsync(5 * 60_000);
+    updated(1, { status: "complete" }, tab);
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(stored.report?.updated).toBe(1);
+  });
   it("answers the popup during a scan and stops promptly when paused", async () => {
     const started = await ask("sync");
     expect(object(started.state).running).toBe(true);
@@ -291,6 +326,23 @@ describe("settings", () => {
     expect((await configure({ dataSourceId: "not-a-uuid" })).error).toContain("data-source ID");
     hostAccess = false;
     expect((await configure({})).error).toContain("host access");
+    expect(requests).toEqual([]);
+  });
+  it("saves the data-source ID in the lowercase form Notion answers with", async () => {
+    const typed = "ABCDEF12-1234-1234-1234-123456789ABC";
+    expect((await configure({ dataSourceId: typed })).ok).toBe(true);
+    expect(stored.config?.dataSourceId).toBe(typed.toLowerCase());
+    expect(requests.some((r) => r.url.includes(typed))).toBe(false);
+  });
+  it("does not keep new host access when the form itself is rejected", async () => {
+    // First setup: there is no saved token for a blank field to fall back on.
+    stored = emptyState();
+    expect((await configure({ origin: "https://other.test" })).error).toContain("token");
+    expect(
+      (await configure({ origin: "https://other.test", dataSourceId: "x" })).error,
+    ).toBeTruthy();
+    expect(revoke).toHaveBeenCalledTimes(2);
+    expect(revoke).toHaveBeenCalledWith({ origins: ["https://other.test/*"] });
     expect(requests).toEqual([]);
   });
   it("keeps the saved token and history for the same connection, and requires a new preview", async () => {
