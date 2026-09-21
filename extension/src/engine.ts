@@ -103,7 +103,10 @@ async function observe(
       // Without the active courses there is nothing to go on. Past courses are an extra, so a
       // listing that keeps failing costs only them, not what the active courses already showed.
       if (enrollment === "active" || !confinedToCourse(error)) throw error;
-      if (error instanceof ApiError && error.status === 401) await verifyAccount(config, api);
+      const status = error instanceof ApiError ? error.status : 0;
+      if (status === 401) await verifyAccount(config, api);
+      // Still a fault if it turns out that no course was read at all.
+      if (![401, 403, 404].includes(status)) fault = error;
       note(report, "Completed courses", "unchecked", `Could not be listed (${error.message})`);
       break;
     }

@@ -106,13 +106,17 @@ async function execute(state: Configured, scanning: Scanning): Promise<void> {
     beat: () => chrome.storage.session.set({ beat: Date.now() }).catch(() => undefined),
   });
   try {
-    // Site access can be withdrawn in chrome://extensions at any time. Every Canvas request would
-    // then fail like a dead network, so it is named here instead. It comes back by itself once
-    // access is restored, so automatic sync stays on.
-    if (!(await chrome.permissions.contains({ origins: [`${state.config.origin}/*`] })))
-      throw new UserError(
-        "Canvas host access was removed. Allow this site for the extension, or verify Settings again.",
-      );
+    // Site access can be withdrawn in chrome://extensions at any time, for Notion as much as for
+    // Canvas. Every request to that site would then fail like a dead network, so it is named here
+    // instead. It comes back by itself once access is restored, so automatic sync stays on.
+    for (const [site, pattern] of [
+      ["Canvas", `${state.config.origin}/*`],
+      ["Notion", "https://api.notion.com/*"],
+    ] as const)
+      if (!(await chrome.permissions.contains({ origins: [pattern] })))
+        throw new UserError(
+          `${site} host access was removed. Allow that site for the extension in chrome://extensions.`,
+        );
     await scan(state.config, report, {
       api,
       acknowledged: state.acknowledged,

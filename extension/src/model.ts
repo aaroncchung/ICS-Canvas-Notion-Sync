@@ -1,5 +1,6 @@
 import { canvasAssignmentIdFromUid } from "../../src/canvas/assignment-uid.ts";
 import { canvasAssignmentUrlIdentity } from "../../src/canvas/canvas-url.ts";
+import { titleWithoutCourseLabel } from "../../src/canvas/summary-title.ts";
 import {
   pageProperties,
   readCheckbox,
@@ -107,12 +108,17 @@ export function notionId(value: string): string {
   return value.replaceAll("-", "").toLowerCase();
 }
 /**
- * Whether a Notion title and a Canvas assignment name are the same text. The importer writes the
- * Canvas name as the title, so a page whose title differs was not imported from that assignment.
+ * Whether a Notion title is what the importer would have written for a Canvas assignment name.
+ * The feed gives the name followed by a " [Course]" label, which the importer strips. Where a feed
+ * omits the label, a name that itself ends in brackets loses them instead, so that form of the
+ * name counts as well. A page whose title is neither was not imported from that assignment.
  */
 export function sameTitle(title: string, name: string): boolean {
   const key = (value: string) => value.normalize("NFKC").replace(/\s+/g, " ").trim().toLowerCase();
-  return key(title) !== "" && key(title) === key(name);
+  return (
+    key(title) !== "" &&
+    (key(title) === key(name) || key(title) === key(titleWithoutCourseLabel(name)))
+  );
 }
 export function targetFromPage(value: unknown): Target | undefined {
   const page = object(value),

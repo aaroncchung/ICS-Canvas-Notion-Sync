@@ -23,6 +23,7 @@ let canvas: "up" | "signed-out" | "offline";
 let notion: "up" | "busy" | "read-only";
 let activeTabUrl: string;
 let hostAccess: boolean;
+let notionAccess: boolean;
 let revoke: ReturnType<typeof vi.fn>;
 let requests: Array<{ url: string; method: string }>;
 let access: ReturnType<typeof vi.fn>;
@@ -65,6 +66,7 @@ beforeEach(async () => {
   notion = "up";
   activeTabUrl = config.origin;
   hostAccess = true;
+  notionAccess = true;
   revoke = vi.fn(async () => true);
   requests = [];
   access = vi.fn(async () => undefined);
@@ -114,7 +116,11 @@ beforeEach(async () => {
       },
     },
     action: { setBadgeText: vi.fn(async () => undefined) },
-    permissions: { contains: async () => hostAccess, remove: revoke },
+    permissions: {
+      contains: async ({ origins }: { origins: string[] }) =>
+        origins[0]?.includes("api.notion.com") ? notionAccess : hostAccess,
+      remove: revoke,
+    },
   });
   vi.stubGlobal(
     "fetch",
@@ -270,10 +276,17 @@ describe("worker orchestration", () => {
     hostAccess = false;
     updated(1, { status: "complete" }, tab);
     await vi.advanceTimersByTimeAsync(20_000);
-    expect(stored.error).toContain("host access was removed");
+    expect(stored.error).toContain("Canvas host access was removed");
     expect(stored.config?.enabled).toBe(true);
     expect(requests).toEqual([]);
     hostAccess = true;
+    notionAccess = false;
+    await vi.advanceTimersByTimeAsync(60_000);
+    updated(1, { status: "complete" }, tab);
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(stored.error).toContain("Notion host access was removed");
+    expect(requests).toEqual([]);
+    notionAccess = true;
     await vi.advanceTimersByTimeAsync(60_000);
     updated(1, { status: "complete" }, tab);
     await vi.advanceTimersByTimeAsync(20_000);

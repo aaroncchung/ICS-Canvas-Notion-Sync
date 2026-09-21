@@ -388,6 +388,14 @@ describe("scan", () => {
       items: [{ id: 123, name: "  HOMEＷORK ", course_id: 42, submission: submission() }],
     }));
     expect((await respaced.run()).updated).toBe(1);
+    // A feed without course labels costs a bracketed name its brackets at import.
+    const bracketed = fixture();
+    bracketed.api.assignments = vi.fn(async () => ({
+      items: [
+        { id: 123, name: "Homework [Extra Credit]", course_id: 42, submission: submission() },
+      ],
+    }));
+    expect((await bracketed.run()).updated).toBe(1);
     // The title is checked again on the page as it is just before the write.
     const retitled = fixture();
     retitled.api.target = vi.fn(async () => target({ title: "Lab report" }));
@@ -467,6 +475,12 @@ describe("scan", () => {
     const report = await run();
     expect(report).toMatchObject({ updated: 1, unchecked: 1 });
     expect(report.details.map((detail) => detail.title)).toContain("Completed courses");
+    // With no active course to read, that same failure means no course was read at all.
+    api.courses = vi.fn<SyncApi["courses"]>(async (enrollment) => {
+      if (enrollment === "completed") throw new ApiError("Canvas", 503);
+      return { items: [] };
+    });
+    await expect(run()).rejects.toMatchObject({ status: 503 });
     // The active listing is different: without it nothing was read at all.
     api.courses = vi.fn(async () => {
       throw new ApiError("Canvas", 503);

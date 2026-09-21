@@ -172,6 +172,7 @@ export class Api implements SyncApi {
           throw new ApiError(service, 0);
         }
       }
+      this.signal?.throwIfAborted();
       throw throttled
         ? new ApiError(service, 403, wait, "rate limit exceeded", true)
         : new ApiError(service, response.status, wait);
