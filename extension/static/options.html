@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Canvas companion settings</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body class="settings">
+    <main>
+      <p class="eyebrow">CANVAS COMPANION</p>
+      <h1>Connect your assignments</h1>
+      <p>
+        Sign in to Canvas in this Chrome profile, then verify the connection. Preview changes before
+        enabling automatic syncing.
+      </p>
+      <form id="config">
+        <label
+          >Canvas origin<input
+            id="origin"
+            type="url"
+            placeholder="https://canvas.your-school.edu"
+            required
+        /></label>
+        <label
+          >Notion Assignments data-source ID<input id="dataSourceId" required autocomplete="off"
+        /></label>
+        <label
+          >Notion integration token<input
+            id="token"
+            type="password"
+            autocomplete="off"
+            placeholder="Leave blank to keep your saved token"
+        /></label>
+        <p class="muted">
+          The token stays in this Chrome profile. It is not encrypted by the extension or synced
+          through Chrome. Share your Assignments database with this integration.
+        </p>
+        <button type="submit">Verify and save</button>
+      </form>
+      <p id="connection"></p>
+      <p id="message" role="status" aria-live="polite"></p>
+      <div class="actions">
+        <button data-action="preview">Preview</button
+        ><button data-action="enable">Enable sync</button
+        ><button data-action="sync">Sync now</button><button data-action="pause">Pause</button>
+      </div>
+      <section>
+        <h2>Latest scan</h2>
+        <p id="summary">No scans yet.</p>
+        <ul id="details"></ul>
+      </section>
+      <p class="muted">
+        Submitted, excused, and graded work can become Done. Grades marked missing do not count.
+        Removing the extension or clearing its storage forgets previously handled submissions.
+      </p>
+    </main>
+    <script type="module" src="ui.js"></script>
+  </body>
+</html>

@@ -1,0 +1,11 @@
+{
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "composite": true,
+    "types": ["chrome", "vitest/globals"],
+    "lib": ["ES2023", "DOM"],
+    "tsBuildInfoFile": "../dist/extension.tsbuildinfo"
+  },
+  "include": ["src", "tests"],
+  "references": [{ "path": "../tsconfig.build.json" }]
+}

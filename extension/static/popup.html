@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Canvas → Notion</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <main>
+      <p class="eyebrow">CANVAS COMPANION</p>
+      <h1>Canvas → Notion</h1>
+      <p id="connection">Connecting…</p>
+      <p id="message" role="status" aria-live="polite"></p>
+      <div class="actions">
+        <button data-action="sync">Sync now</button><button data-action="preview">Preview</button
+        ><button data-action="pause">Pause</button><button data-action="enable">Enable sync</button
+        ><button id="settings">Settings</button>
+      </div>
+      <section>
+        <h2>Latest scan</h2>
+        <p id="summary">No scans yet.</p>
+        <ul id="details"></ul>
+      </section>
+      <p class="muted">
+        Only Personal Status is updated. Reopened work stays open until a new submission.
+      </p>
+    </main>
+    <script type="module" src="ui.js"></script>
+  </body>
+</html>
