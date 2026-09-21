@@ -20,6 +20,9 @@ let stored: State;
 let userId: number;
 let notionStatus: string;
 let canvas: "up" | "signed-out" | "offline";
+let activeTabUrl: string;
+let hostAccess: boolean;
+let revoke: ReturnType<typeof vi.fn>;
 let requests: Array<{ url: string; method: string }>;
 let access: ReturnType<typeof vi.fn>;
 const json = (data: unknown) =>
@@ -58,6 +61,9 @@ beforeEach(async () => {
   userId = 7;
   notionStatus = "In progress";
   canvas = "up";
+  activeTabUrl = config.origin;
+  hostAccess = true;
+  revoke = vi.fn(async () => true);
   requests = [];
   access = vi.fn(async () => undefined);
   vi.stubGlobal("chrome", {
@@ -83,7 +89,7 @@ beforeEach(async () => {
       onInstalled: { addListener: vi.fn() },
     },
     tabs: {
-      query: async () => [{ url: config.origin }],
+      query: async () => [{ url: activeTabUrl }],
       onUpdated: {
         addListener: (fn: UpdatedListener) => {
           updated = fn;
@@ -106,16 +112,16 @@ beforeEach(async () => {
       },
     },
     action: { setBadgeText: vi.fn(async () => undefined) },
-    permissions: { contains: async () => true, remove: async () => true },
+    permissions: { contains: async () => hostAccess, remove: revoke },
   });
   vi.stubGlobal(
     "fetch",
     vi.fn<typeof fetch>(async (input, init) => {
       const url = new URL(input instanceof Request ? input.url : input);
       requests.push({ url: url.toString(), method: init?.method ?? "GET" });
-      if (url.origin === config.origin && canvas === "offline") throw new TypeError("offline");
-      if (url.origin === config.origin && canvas === "signed-out")
-        return new Response("{}", { status: 401 });
+      const isCanvas = url.hostname !== "api.notion.com";
+      if (isCanvas && canvas === "offline") throw new TypeError("offline");
+      if (isCanvas && canvas === "signed-out") return new Response("{}", { status: 401 });
       if (url.pathname.endsWith("/profile")) return json({ id: userId });
       if (url.pathname === "/api/v1/courses") return json([{ id: 42 }]);
       if (url.pathname.endsWith("/assignments"))
@@ -235,5 +241,84 @@ describe("worker orchestration", () => {
     expect(JSON.stringify(paused.report)).toContain("Paused before finishing");
     await vi.advanceTimersByTimeAsync(20_000);
     expect(requests.some((r) => r.method === "PATCH")).toBe(false);
+  });
+  it("still works where Chrome cannot restrict the local storage area", async () => {
+    // Chrome before 140 rejects setAccessLevel for storage.local.
+    access.mockRejectedValue(
+      new Error("This StorageArea is not available for setting access level"),
+    );
+    vi.mocked(chrome.alarms.create).mockClear();
+    vi.resetModules();
+    await import("../src/worker.ts");
+    expect((await ask("state")).ok).toBe(true);
+    expect(chrome.alarms.create).toHaveBeenCalledWith("tick", { periodInMinutes: 1 });
+    expect((await ask("sync")).ok).toBe(true);
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(stored.report?.updated).toBe(1);
+  });
+  it("pause also stops a scan that is queued but has not started", async () => {
+    // Not awaited: the scan is in the queue, still reading its state, when Pause arrives.
+    const syncing = ask("sync");
+    const paused = await ask("pause");
+    await syncing;
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(object(paused.state)).toMatchObject({ running: false, enabled: false });
+    expect(requests).toEqual([]);
+  });
+  it("scans on a timer only while Canvas is the visible tab", async () => {
+    activeTabUrl = "https://example.com/";
+    alarm({ name: "tick", scheduledTime: Date.now(), persistAcrossSessions: true });
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(requests).toEqual([]);
+    activeTabUrl = `${config.origin}/courses/42`;
+    alarm({ name: "tick", scheduledTime: Date.now(), persistAcrossSessions: true });
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(stored.report?.updated).toBe(1);
+  });
+});
+
+describe("settings", () => {
+  async function configure(values: Record<string, string>) {
+    const pending = ask("configure", {
+      config: { origin: config.origin, dataSourceId: config.dataSourceId, token: "", ...values },
+    });
+    await vi.advanceTimersByTimeAsync(20_000);
+    return pending;
+  }
+  it("refuses a malformed origin or missing host access before contacting anything", async () => {
+    for (const origin of ["https://canvas.test/courses", "http://canvas.test", "canvas.test"])
+      expect((await configure({ origin })).error).toContain("without a path");
+    expect((await configure({ dataSourceId: "not-a-uuid" })).error).toContain("data-source ID");
+    hostAccess = false;
+    expect((await configure({})).error).toContain("host access");
+    expect(requests).toEqual([]);
+  });
+  it("keeps the saved token and history for the same connection, and requires a new preview", async () => {
+    stored.acknowledged = { "page-123:123": "attempt:1" };
+    const result = await configure({ dataSourceId: config.dataSourceId.replaceAll("-", "") });
+    expect(result.ok).toBe(true);
+    expect(JSON.stringify(result)).not.toContain(config.token);
+    expect(stored.config).toMatchObject({ token: config.token, userId: "7", enabled: false });
+    expect(stored.previewReady).toBe(false);
+    expect(stored.acknowledged).toEqual({ "page-123:123": "attempt:1" });
+    expect(revoke).not.toHaveBeenCalled();
+  });
+  it("starts fresh history for another data source or Canvas, releasing the old host", async () => {
+    stored.acknowledged = { "page-123:123": "attempt:1" };
+    await configure({ dataSourceId: "99999999-1234-1234-1234-123456789012", token: "new-token" });
+    expect(stored.acknowledged).toEqual({});
+    expect(stored.config?.token).toBe("new-token");
+    expect(revoke).not.toHaveBeenCalled();
+    await configure({ origin: "https://other.test" });
+    expect(stored.config?.origin).toBe("https://other.test");
+    expect(revoke).toHaveBeenCalledWith({ origins: [`${config.origin}/*`] });
+  });
+  it("does not keep host access for a new Canvas that failed verification", async () => {
+    canvas = "signed-out";
+    expect((await configure({})).error).toContain("HTTP 401");
+    expect(revoke).not.toHaveBeenCalled();
+    expect((await configure({ origin: "https://other.test" })).error).toContain("HTTP 401");
+    expect(revoke).toHaveBeenCalledWith({ origins: ["https://other.test/*"] });
+    expect(stored.config?.origin).toBe(config.origin);
   });
 });

@@ -71,6 +71,22 @@ export function id(value: unknown): string | undefined {
   if (typeof value === "number" && Number.isSafeInteger(value) && value > 0) return String(value);
   return;
 }
+/** The origin of a bare HTTPS origin such as https://canvas.school.edu, or nothing. */
+export function canvasOrigin(value: string): string | undefined {
+  try {
+    const url = new URL(value.trim());
+    const bare =
+      url.protocol === "https:" &&
+      !url.username &&
+      !url.password &&
+      url.pathname === "/" &&
+      !url.search &&
+      !url.hash;
+    return bare ? url.origin : undefined;
+  } catch {
+    return;
+  }
+}
 function rich(value: unknown, kind: string): string {
   const parts: unknown = object(value)[kind];
   if (!Array.isArray(parts)) return "";

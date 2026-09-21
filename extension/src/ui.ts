@@ -1,4 +1,4 @@
-import { object, scalarText } from "./model.ts";
+import { canvasOrigin, object, scalarText } from "./model.ts";
 
 const element = (id: string): HTMLElement => document.getElementById(id)!;
 const input = (id: string): HTMLInputElement => element(id) as HTMLInputElement;
@@ -74,11 +74,10 @@ document.getElementById("settings")?.addEventListener("click", () => {
 });
 document.getElementById("config")?.addEventListener("submit", (event) => {
   event.preventDefault();
-  let origin: string;
-  try {
-    origin = new URL(input("origin").value).origin;
-  } catch {
-    element("message").textContent = "Enter a valid Canvas HTTPS origin.";
+  // Checked before asking for host access, so a mistyped address is never granted any.
+  const origin = canvasOrigin(input("origin").value);
+  if (!origin) {
+    element("message").textContent = "Enter the Canvas HTTPS origin, without a path.";
     return;
   }
   // Permissions must be requested directly from this user gesture.
@@ -89,7 +88,7 @@ document.getElementById("config")?.addEventListener("submit", (event) => {
       busy = true;
       element("message").textContent = "Verifying Canvas session and Notion schema…";
       await send("configure", {
-        origin: input("origin").value,
+        origin,
         dataSourceId: input("dataSourceId").value,
         token: input("token").value,
       });

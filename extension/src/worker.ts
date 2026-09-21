@@ -1,6 +1,7 @@
 import { Api } from "./api.ts";
 import { scan, serialExecutor, verifyAccount } from "./engine.ts";
 import {
+  canvasOrigin,
   emptyState,
   newReport,
   note,
@@ -20,12 +21,22 @@ interface Scanning {
   progress: string;
 }
 const serial = serialExecutor();
-const ready = chrome.storage.local.setAccessLevel({ accessLevel: "TRUSTED_CONTEXTS" });
+// Hardening only: Chrome before 140 rejects this for the local area, and with no content script
+// nothing untrusted can read it anyway. It must never stop the extension from loading its state.
+const ready = (async () => {
+  try {
+    await chrome.storage.local.setAccessLevel({ accessLevel: "TRUSTED_CONTEXTS" });
+  } catch {
+    /* Unsupported here. */
+  }
+})();
 const STATE_KEY = "companion-v1";
 const COOLDOWN = 5 * 60_000;
 const FAILURE_COOLDOWN = 60_000;
 /** The scan in progress. It lives and dies with this worker; nothing about it is persisted. */
 let active: Scanning | undefined;
+/** Every scan that is queued or running, so Pause also reaches one that has not started yet. */
+const launched = new Set<AbortController>();
 
 async function load(): Promise<State> {
   await ready;
@@ -116,6 +127,8 @@ async function execute(state: Configured, scanning: Scanning): Promise<void> {
 }
 /** Settles once the scan has started or been declined; the scan itself continues in the queue. */
 function launch(mode: Report["mode"], force: boolean): Promise<void> {
+  const controller = new AbortController();
+  launched.add(controller);
   return new Promise((started, declined) => {
     void serial(async () => {
       let state: Configured | undefined;
@@ -125,12 +138,13 @@ function launch(mode: Report["mode"], force: boolean): Promise<void> {
         declined(error instanceof Error ? error : new Error("The scan could not start"));
         return;
       }
-      if (!state) {
+      // Pause may have arrived while this scan was still waiting its turn.
+      if (!state || controller.signal.aborted) {
         started();
         return;
       }
       const scanning: Scanning = {
-        controller: new AbortController(),
+        controller,
         report: newReport(mode, Date.now()),
         progress: "Starting",
       };
@@ -142,7 +156,9 @@ function launch(mode: Report["mode"], force: boolean): Promise<void> {
         active = undefined;
         await badge(state);
       }
-    }).catch(() => undefined);
+    })
+      .catch(() => undefined)
+      .finally(() => launched.delete(controller));
   });
 }
 async function visibleCanvas(origin: string): Promise<boolean> {
@@ -152,7 +168,7 @@ async function visibleCanvas(origin: string): Promise<boolean> {
   return tabs.some((tab) => tab.url && new URL(tab.url).origin === origin);
 }
 function wake(checkVisibility: boolean, origin?: string): void {
-  if (active) return;
+  if (launched.size) return;
   void (async () => {
     const state = await load();
     if (!state.config?.enabled || Date.now() < state.nextScanAt) return;
@@ -164,22 +180,8 @@ function wake(checkVisibility: boolean, origin?: string): void {
 }
 async function configure(raw: Record<string, unknown>): Promise<void> {
   const previous = await load();
-  let origin: string;
-  try {
-    const url = new URL(scalarText(raw.origin ?? ""));
-    if (
-      url.protocol !== "https:" ||
-      url.username ||
-      url.password ||
-      url.pathname !== "/" ||
-      url.search ||
-      url.hash
-    )
-      throw new Error();
-    origin = url.origin;
-  } catch {
-    throw new UserError("Enter the Canvas HTTPS origin, without a path.");
-  }
+  const origin = canvasOrigin(scalarText(raw.origin ?? ""));
+  if (!origin) throw new UserError("Enter the Canvas HTTPS origin, without a path.");
   const token =
     typeof raw.token === "string" && raw.token.trim() ? raw.token.trim() : previous.config?.token;
   const dataSourceId = scalarText(raw.dataSourceId ?? "").trim();
@@ -190,8 +192,16 @@ async function configure(raw: Record<string, unknown>): Promise<void> {
   if (!(await chrome.permissions.contains({ origins: [`${origin}/*`] })))
     throw new UserError("Canvas host access has not been granted.");
   const api = new Api({ origin, token, dataSourceId });
-  const userId = await api.user();
-  await api.validateSchema();
+  let userId: string;
+  try {
+    userId = await api.user();
+    await api.validateSchema();
+  } catch (error) {
+    // Host access granted for this attempt is not kept for a connection that did not verify.
+    if (origin !== previous.config?.origin)
+      await chrome.permissions.remove({ origins: [`${origin}/*`] }).catch(() => undefined);
+    throw error;
+  }
   const config: Config = { origin, token, dataSourceId, userId, enabled: false };
   const same =
     previous.config?.origin === origin &&
@@ -223,10 +233,10 @@ async function handle(request: Record<string, unknown>): Promise<void> {
   if (action === "state") return;
   if (action === "pause") {
     // Stop the requests at once; the setting is written as soon as the scan has unwound.
-    active?.controller.abort();
+    for (const controller of launched) controller.abort();
     return serial(() => setEnabled(false));
   }
-  if (active) throw new UserError("A scan is running. Wait for it to finish, or pause it.");
+  if (launched.size) throw new UserError("A scan is running. Wait for it to finish, or pause it.");
   if (action === "preview" || action === "sync") return launch(action, true);
   if (action === "configure") return serial(() => configure(object(request.config)));
   if (action === "enable") return serial(() => setEnabled(true));

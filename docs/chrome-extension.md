@@ -17,7 +17,7 @@ After updating the source, rebuild and click **Reload** on the extension in Chro
 
 ## Matching and completion
 
-Assignment IDs come first from Canvas UID (such as `event-assignment-123`), falling back to assignment URLs. This supports imported pages with blank URLs. Conflicting identities, duplicates, and removed pages are skipped. Active courses are read first; completed enrollments are read only while a tracked assignment is still unaccounted for. Assignments in courses Canvas will not let you read are reported as unchecked. The configured database must belong to this one Canvas instance/account. Hostname aliases in Notion links do not affect identity and are never used as request destinations.
+Assignment IDs come first from Canvas UID (such as `event-assignment-123`), falling back to assignment URLs. This supports imported pages with blank URLs. Conflicting identities, duplicates, and removed pages are skipped. Active courses are read first; completed enrollments are read only while a tracked assignment is still unaccounted for. Assignments in courses Canvas will not let you read are reported as unchecked. The configured database must belong to this one Canvas instance/account. Hostname aliases in Notion links do not affect identity and are never used as request destinations. Canvas IDs are handled as text, so 64-bit IDs match exactly.
 
 The extension sets only **Personal Status** to **Done** for actual submissions, excused work, or graded work not marked missing. A zero grade counts unless Canvas marks it missing. Redo requests are deferred. No grades, submissions, descriptions, or dates are written into Notion.
 
@@ -31,7 +31,7 @@ An expired Canvas login, a network outage, or a service error ends that scan wit
 
 Changing Canvas accounts turns syncing off; sign into the intended account, verify Settings again, then run Preview and enable sync. Changing the configured instance, account, or Notion data source starts fresh local history. Session-cookie restrictions, expired login, missing host access, or institution-specific restrictions can prevent worker access. Verification must succeed in your Chrome profile; the extension does not scrape pages or work around login restrictions.
 
-The token stays in `chrome.storage.local`, restricted to trusted extension contexts, and is not encrypted by the extension or synced through Chrome. No content script reads your pages. Canvas requests use browser-managed cookies; the extension never reads or copies cookies. It retains minimal assignment identifiers, bounded titles for preview, completion evidence, and up to 100 diagnostic rows for the latest scan. Raw submission content is not retained. Only Canvas and Notion receive network requests.
+The token stays in `chrome.storage.local` and is not encrypted by the extension or synced through Chrome. The extension has no content script, so no web page can read that storage or your pages; on Chrome 140 and later the storage is additionally restricted to trusted extension contexts. Canvas requests use browser-managed cookies; the extension never reads or copies cookies. It retains minimal assignment identifiers, bounded titles for preview, completion evidence, and up to 100 diagnostic rows for the latest scan. Raw submission content is not retained. Only Canvas and Notion receive network requests.
 
 ## Verify a release
 
