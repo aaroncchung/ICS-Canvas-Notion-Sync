@@ -265,6 +265,27 @@ describe("worker orchestration", () => {
     await vi.advanceTimersByTimeAsync(20_000);
     expect(stored.report?.updated).toBe(1);
   });
+  it("names withdrawn host access instead of reporting a dead network, and recovers", async () => {
+    const tab = { url: config.origin } as chrome.tabs.Tab;
+    hostAccess = false;
+    updated(1, { status: "complete" }, tab);
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(stored.error).toContain("host access was removed");
+    expect(stored.config?.enabled).toBe(true);
+    expect(requests).toEqual([]);
+    hostAccess = true;
+    await vi.advanceTimersByTimeAsync(60_000);
+    updated(1, { status: "complete" }, tab);
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(stored.error).toBeUndefined();
+    expect(stored.report?.updated).toBe(1);
+  });
+  it("says which step is missing when Sync now is refused", async () => {
+    await ask("pause");
+    expect((await ask("sync")).error).toContain("Enable sync");
+    stored.previewReady = false;
+    expect((await ask("sync")).error).toContain("Run Preview");
+  });
   it("answers the popup during a scan and stops promptly when paused", async () => {
     const started = await ask("sync");
     expect(object(started.state).running).toBe(true);

@@ -94,10 +94,19 @@ async function observe(
     if (found.size === wanted.size) break;
     progress(`Finding ${enrollment} courses`);
     const courses: string[] = [];
-    await pages(
-      (cursor) => api.courses(enrollment, cursor),
-      (items) => courses.push(...items),
-    );
+    try {
+      await pages(
+        (cursor) => api.courses(enrollment, cursor),
+        (items) => courses.push(...items),
+      );
+    } catch (error) {
+      // Without the active courses there is nothing to go on. Past courses are an extra, so a
+      // listing that keeps failing costs only them, not what the active courses already showed.
+      if (enrollment === "active" || !confinedToCourse(error)) throw error;
+      if (error instanceof ApiError && error.status === 401) await verifyAccount(config, api);
+      note(report, "Completed courses", "unchecked", `Could not be listed (${error.message})`);
+      break;
+    }
     for (const [index, courseId] of courses.entries()) {
       if (found.size === wanted.size) break;
       if (visited.has(courseId)) continue;

@@ -161,12 +161,17 @@ export class Api implements SyncApi {
             ? Date.parse(retry) - this.now()
             : 0;
       const wait = Number.isFinite(delay) ? Math.max(0, delay) : 0;
-      // A throttled 403 passes with time; any other 403 is a refusal that will not.
-      const throttled =
-        service === "Canvas" &&
-        response.status === 403 &&
-        /rate limit exceeded/i.test(await response.text().catch(() => ""));
-      this.signal?.throwIfAborted();
+      // A throttled 403 passes with time; any other 403 is a refusal that will not. Only the body
+      // tells them apart, so a body that cannot be read is a network failure, not a refusal.
+      let throttled = false;
+      if (service === "Canvas" && response.status === 403) {
+        try {
+          throttled = /rate limit exceeded/i.test(await response.text());
+        } catch {
+          this.signal?.throwIfAborted();
+          throw new ApiError(service, 0);
+        }
+      }
       throw throttled
         ? new ApiError(service, 403, wait, "rate limit exceeded", true)
         : new ApiError(service, response.status, wait);

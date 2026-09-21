@@ -451,6 +451,28 @@ describe("scan", () => {
       });
     }
   });
+  it("uses what the active courses showed when the past courses cannot be listed", async () => {
+    const { api, run } = fixture();
+    // Assignment 999 is in no active course, so the scan goes on to the completed ones.
+    api.targets = vi.fn(async () => ({
+      items: [
+        target(),
+        target({ pageId: "page-999", assignmentId: "999", uid: "event-assignment-999" }),
+      ],
+    }));
+    api.courses = vi.fn<SyncApi["courses"]>(async (enrollment) => {
+      if (enrollment === "completed") throw new ApiError("Canvas", 503);
+      return { items: ["42"] };
+    });
+    const report = await run();
+    expect(report).toMatchObject({ updated: 1, unchecked: 1 });
+    expect(report.details.map((detail) => detail.title)).toContain("Completed courses");
+    // The active listing is different: without it nothing was read at all.
+    api.courses = vi.fn(async () => {
+      throw new ApiError("Canvas", 503);
+    });
+    await expect(run()).rejects.toMatchObject({ status: 503 });
+  });
   it("ends the scan when Canvas throttles or the network fails, which is not about one course", async () => {
     for (const failure of [
       new ApiError("Canvas", 403, 0, "rate limit exceeded", true),
@@ -625,6 +647,15 @@ describe("HTTP boundary", () => {
     const { api, fetcher } = setup([cut, json({ id: 7 })]);
     expect(await api.user()).toBe("7");
     expect(fetcher).toHaveBeenCalledTimes(2);
+    // Only its body says whether a Canvas 403 is throttling, so an unread one is not a refusal.
+    const unread = () => {
+      const response = new Response("", { status: 403 });
+      vi.spyOn(response, "text").mockRejectedValue(new DOMException("timed out", "TimeoutError"));
+      return response;
+    };
+    const forbidden = setup([unread(), unread(), unread()]);
+    await expect(forbidden.api.user()).rejects.toMatchObject({ status: 0, throttled: false });
+    expect(forbidden.fetcher).toHaveBeenCalledTimes(3);
   });
   it("accepts the destination whatever the case of the configured data-source ID", async () => {
     const fetcher = vi.fn<typeof fetch>(async () => json(page()));
