@@ -3,6 +3,7 @@ import {
   cleanUrlCandidate,
   verifiedCanvasOrigin,
 } from "./canvas-url.ts";
+import { canvasAssignmentIdFromUid } from "./assignment-uid.ts";
 
 export interface ClassificationInput {
   uid?: string;
@@ -22,7 +23,6 @@ export interface ClassificationResult {
 
 const ABSOLUTE_URL = /https?:\/\/[^\s<>"']+/gi;
 const PATH_ROUTE = /\/courses\/(\d+)\/assignments\/(\d+)(?=\/|[?#\s<>"')\],.;!?]|$)/gi;
-const UID_ASSIGNMENT = /(?:^|[-_:])assignment[-_:]?(\d+)(?:@|$|[-_:])/i;
 
 type EventField = "url" | "location" | "description";
 
@@ -92,7 +92,7 @@ export function classifyEvent(input: ClassificationInput): ClassificationResult 
       }
     }
   }
-  const uidMatch = input.uid?.match(UID_ASSIGNMENT);
+  const uidMatch = canvasAssignmentIdFromUid(input.uid);
   if (uidMatch) evidence.push("canvas-assignment-uid");
   if (input.categories?.some((category) => /assignment/i.test(category))) {
     evidence.push("assignment-category");
@@ -110,6 +110,6 @@ export function classifyEvent(input: ClassificationInput): ClassificationResult 
   if (routeMatch?.canvasUrl) result.canvasUrl = routeMatch.canvasUrl;
   if (routeMatch?.courseId) result.canvasCourseId = routeMatch.courseId;
   if (routeMatch?.assignmentId) result.canvasAssignmentId = routeMatch.assignmentId;
-  if (!result.canvasAssignmentId && uidMatch?.[1]) result.canvasAssignmentId = uidMatch[1];
+  if (!result.canvasAssignmentId && uidMatch) result.canvasAssignmentId = uidMatch;
   return result;
 }
