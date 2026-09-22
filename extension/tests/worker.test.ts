@@ -13,16 +13,20 @@ const extensionOrigin = "chrome-extension://test-extension/";
 type MessageListener = Parameters<typeof chrome.runtime.onMessage.addListener>[0];
 type UpdatedListener = Parameters<typeof chrome.tabs.onUpdated.addListener>[0];
 type AlarmListener = Parameters<typeof chrome.alarms.onAlarm.addListener>[0];
+type PermissionsListener = Parameters<typeof chrome.permissions.onRemoved.addListener>[0];
 let listener: MessageListener;
 let updated: UpdatedListener;
 let alarm: AlarmListener;
+let accessRemoved: PermissionsListener;
+let accessAdded: PermissionsListener;
 let stored: State;
 let userId: number;
 let notionStatus: string;
 let canvas: "up" | "signed-out" | "offline";
 let notion: "up" | "busy" | "read-only" | "revoked" | "unshared";
-let schemaHasDone: boolean;
-let activeTabUrl: string;
+/** An option the Notion schema no longer offers, or nothing. */
+let schemaWithout: string;
+let activeTabUrl: string | undefined;
 let hostAccess: boolean;
 let notionAccess: boolean;
 let revoke: ReturnType<typeof vi.fn>;
@@ -65,7 +69,7 @@ beforeEach(async () => {
   notionStatus = "In progress";
   canvas = "up";
   notion = "up";
-  schemaHasDone = true;
+  schemaWithout = "";
   activeTabUrl = config.origin;
   hostAccess = true;
   notionAccess = true;
@@ -122,6 +126,16 @@ beforeEach(async () => {
       contains: async ({ origins }: { origins: string[] }) =>
         origins[0]?.includes("api.notion.com") ? notionAccess : hostAccess,
       remove: revoke,
+      onRemoved: {
+        addListener: (fn: PermissionsListener) => {
+          accessRemoved = fn;
+        },
+      },
+      onAdded: {
+        addListener: (fn: PermissionsListener) => {
+          accessAdded = fn;
+        },
+      },
     },
   });
   vi.stubGlobal(
@@ -157,21 +171,25 @@ beforeEach(async () => {
           },
         ]);
       if (url.pathname.endsWith("/query")) return json({ results: [page()], has_more: false });
-      if (url.pathname.startsWith("/v1/data_sources/"))
+      if (url.pathname.startsWith("/v1/data_sources/")) {
+        const options = (...names: string[]) => ({
+          options: names.filter((name) => name !== schemaWithout).map((name) => ({ name })),
+        });
         return json({
           properties: {
             Assignment: { type: "title" },
             "Canvas UID": { type: "rich_text" },
             "Canvas URL": { type: "url" },
-            "Imported From": { type: "select" },
+            "Imported From": { type: "select", select: options("Canvas ICS", "Manual") },
             "Removed from Canvas": { type: "checkbox" },
-            "Canvas State": { type: "select" },
+            "Canvas State": { type: "select", select: options("Active", "Removed") },
             "Personal Status": {
               type: "status",
-              status: { options: schemaHasDone ? [{ name: "Done" }] : [{ name: "Finished" }] },
+              status: options("Not started", "In progress", "Done"),
             },
           },
         });
+      }
       if (url.pathname.startsWith("/v1/pages/")) {
         if (init?.method === "PATCH") notionStatus = "Done";
         return json(page());
@@ -277,6 +295,23 @@ describe("worker orchestration", () => {
     }
     expect(requests.some((r) => r.method === "PATCH")).toBe(false);
   });
+  it("turns automatic sync off when a required select option is renamed or removed", async () => {
+    const tab = { url: config.origin } as chrome.tabs.Tab;
+    for (const [option, text] of [
+      ["Canvas ICS", "Imported From needs the Canvas ICS option"],
+      ["Removed", "Canvas State needs the Removed option"],
+    ] as const) {
+      stored = { ...emptyState(), config: { ...config }, previewReady: true };
+      schemaWithout = option;
+      updated(1, { status: "complete" }, tab);
+      await vi.advanceTimersByTimeAsync(20_000);
+      expect(stored.config?.enabled).toBe(false);
+      expect(stored.previewReady).toBe(false);
+      expect(stored.error).toContain(text);
+      expect(stored.report?.failed).toBe(1);
+    }
+    expect(requests.some((r) => r.url.endsWith("/query"))).toBe(false);
+  });
   it("stays away for as long as a throttling service asks, up to an hour", async () => {
     const tab = { url: config.origin } as chrome.tabs.Tab;
     notion = "busy";
@@ -317,6 +352,36 @@ describe("worker orchestration", () => {
     await vi.advanceTimersByTimeAsync(20_000);
     expect(stored.error).toBeUndefined();
     expect(stored.report?.updated).toBe(1);
+  });
+  it("notices withdrawn Canvas host access even though Chrome then hides the Canvas tab", async () => {
+    // Without host access for Canvas, Chrome no longer tells this extension the tab's address.
+    hostAccess = false;
+    activeTabUrl = undefined;
+    updated(1, { status: "complete" }, {} as chrome.tabs.Tab);
+    alarm({ name: "tick", scheduledTime: Date.now(), persistAcrossSessions: true });
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(stored.error).toBeUndefined();
+    accessRemoved({ origins: [`${config.origin}/*`] });
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(stored.error).toContain("Canvas host access was removed");
+    expect(stored.config?.enabled).toBe(true);
+    expect(chrome.action.setBadgeText).toHaveBeenLastCalledWith({ text: "!" });
+    expect(requests).toEqual([]);
+    // Granting access to some other site changes nothing; restoring Canvas clears the message.
+    accessAdded({ origins: ["https://other.test/*"] });
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(stored.error).toContain("Canvas host access was removed");
+    hostAccess = true;
+    accessAdded({ origins: [`${config.origin}/*`] });
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(stored.error).toBeUndefined();
+    expect(chrome.action.setBadgeText).toHaveBeenLastCalledWith({ text: "ON" });
+    // A message the user still has to act on is not taken back by a grant for another site.
+    stored.error = "Canvas account changed. Verify your settings again before syncing.";
+    accessAdded({ origins: ["https://other.test/*"] });
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(stored.error).toContain("account changed");
+    expect(requests).toEqual([]);
   });
   it("says which step is missing when Sync now is refused", async () => {
     await ask("pause");
@@ -459,11 +524,15 @@ describe("settings", () => {
     // A schema that no longer fits is proof of the same kind.
     notion = "up";
     stored = { ...emptyState(), config: { ...config }, previewReady: true };
-    schemaHasDone = false;
-    expect((await configure({})).error).toContain("Done option");
+    schemaWithout = "Done";
+    expect((await configure({})).error).toContain("Personal Status needs the Done option");
     disabled("Done option");
+    stored = { ...emptyState(), config: { ...config }, previewReady: true };
+    schemaWithout = "Canvas ICS";
+    expect((await configure({})).error).toContain("Canvas ICS option");
+    disabled("Canvas ICS option");
     // An expired Canvas login, by contrast, passes by itself and changes nothing.
-    schemaHasDone = true;
+    schemaWithout = "";
     stored = { ...emptyState(), config: { ...config }, previewReady: true };
     canvas = "signed-out";
     expect((await configure({})).error).toContain("HTTP 401");

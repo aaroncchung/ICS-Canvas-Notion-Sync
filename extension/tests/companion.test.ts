@@ -671,6 +671,52 @@ describe("HTTP boundary", () => {
     expect(await gone.api.target("page-123")).toBeUndefined();
     await expect(gone.api.markDone("page-123")).rejects.toBeInstanceOf(ApiError);
   });
+  it("requires the option names the importer writes, not only the property types", async () => {
+    const schema = (without = "") => {
+      const options = (...names: string[]) => ({
+        options: names.filter((name) => name !== without).map((name) => ({ name })),
+      });
+      return json({
+        properties: {
+          Assignment: { type: "title" },
+          "Canvas UID": { type: "rich_text" },
+          "Canvas URL": { type: "url" },
+          "Imported From": { type: "select", select: options("Canvas ICS") },
+          "Removed from Canvas": { type: "checkbox" },
+          "Canvas State": { type: "select", select: options("Active", "Removed") },
+          "Personal Status": { type: "status", status: options("Done") },
+        },
+      });
+    };
+    await expect(setup([schema()]).api.validateSchema()).resolves.toBeUndefined();
+    for (const [without, text] of [
+      ["Canvas ICS", "Imported From needs the Canvas ICS option"],
+      ["Active", "Canvas State needs the Active option"],
+      ["Removed", "Canvas State needs the Removed option"],
+      ["Done", "Personal Status needs the Done option"],
+    ] as const) {
+      const { api, fetcher } = setup([schema(without)]);
+      const failure = api.validateSchema();
+      await expect(failure).rejects.toBeInstanceOf(VerificationError);
+      await expect(failure).rejects.toThrow(text);
+      expect(fetcher).toHaveBeenCalledTimes(1);
+    }
+    // A select with no options at all names everything it lacks.
+    const bare = json({
+      properties: {
+        Assignment: { type: "title" },
+        "Canvas UID": { type: "rich_text" },
+        "Canvas URL": { type: "url" },
+        "Imported From": { type: "select", select: { options: [{ name: "Canvas ICS" }] } },
+        "Removed from Canvas": { type: "checkbox" },
+        "Canvas State": { type: "select" },
+        "Personal Status": { type: "status", status: { options: [{ name: "Done" }] } },
+      },
+    });
+    await expect(setup([bare]).api.validateSchema()).rejects.toThrow(
+      "Canvas State needs the Active and Removed options",
+    );
+  });
   it("retries transient failures, honors Retry-After, and gives up after two retries", async () => {
     const busy = () => new Response("", { status: 503 });
     const recovered = setup([

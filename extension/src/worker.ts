@@ -40,10 +40,23 @@ const FAILURE_COOLDOWN = 60_000;
 const LONGEST_COOLDOWN = 60 * 60_000;
 /** Declared in the manifest, but Chrome still lets the user withhold it under site access. */
 const NOTION_SITE = "https://api.notion.com/*";
-const withdrawn = (site: "Canvas" | "Notion") =>
+type Site = "Canvas" | "Notion";
+/** The two sites a scan must reach, as the origin patterns their access is granted under. */
+const sites = (origin: string) =>
+  [
+    ["Canvas", `${origin}/*`],
+    ["Notion", NOTION_SITE],
+  ] as const;
+const withdrawn = (site: Site) =>
   new UserError(
     `${site} host access was removed. Allow that site for the extension in chrome://extensions.`,
   );
+/** The first of the two sites the extension may not reach at the moment, if any. */
+async function withdrawnSite(origin: string): Promise<Site | undefined> {
+  for (const [site, pattern] of sites(origin))
+    if (!(await chrome.permissions.contains({ origins: [pattern] }))) return site;
+  return;
+}
 /** The scan in progress. It lives and dies with this worker; nothing about it is persisted. */
 let active: Scanning | undefined;
 /** Every scan that is queued or running, so Pause also reaches one that has not started yet. */
@@ -117,11 +130,8 @@ async function execute(state: Configured, scanning: Scanning): Promise<void> {
     // Site access can be withdrawn in chrome://extensions at any time, for Notion as much as for
     // Canvas. Every request to that site would then fail like a dead network, so it is named here
     // instead. It comes back by itself once access is restored, so automatic sync stays on.
-    for (const [site, pattern] of [
-      ["Canvas", `${state.config.origin}/*`],
-      ["Notion", NOTION_SITE],
-    ] as const)
-      if (!(await chrome.permissions.contains({ origins: [pattern] }))) throw withdrawn(site);
+    const missing = await withdrawnSite(state.config.origin);
+    if (missing) throw withdrawn(missing);
     await scan(state.config, report, {
       api,
       acknowledged: state.acknowledged,
@@ -338,6 +348,29 @@ chrome.windows.onFocusChanged.addListener(() => wake(true));
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === "tick") wake(true);
 });
+/**
+ * Without Canvas host access Chrome no longer shows this extension the address of a Canvas tab, so
+ * none of the wakeups above would find Canvas visible and launch the scan that names the loss.
+ * The change in access itself records the message instead, and takes it back once access returns.
+ * Queued behind any running scan so that scan's final save cannot overwrite it.
+ */
+function accessChanged(): void {
+  void serial(async () => {
+    const state = await load();
+    if (!state.config) return;
+    const missing = await withdrawnSite(state.config.origin);
+    const shown = (["Canvas", "Notion"] as const).some(
+      (site) => state.error === withdrawn(site).message,
+    );
+    if (missing) state.error = withdrawn(missing).message;
+    else if (shown) delete state.error;
+    else return;
+    await save(state);
+    await badge(state);
+  }).catch(() => undefined);
+}
+chrome.permissions.onRemoved.addListener(accessChanged);
+chrome.permissions.onAdded.addListener(accessChanged);
 async function initialize(): Promise<void> {
   await ready;
   if (!(await chrome.alarms.get("tick")))

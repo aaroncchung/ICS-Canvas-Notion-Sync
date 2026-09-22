@@ -275,12 +275,24 @@ export class Api implements SyncApi {
       if (object(properties[name]).type !== type)
         throw new VerificationError(`Notion schema needs ${name} (${type})`);
     }
-    const options: unknown = object(object(properties["Personal Status"]).status).options;
-    if (
-      !Array.isArray(options) ||
-      !options.some((option: unknown) => object(option).name === "Done")
-    ) {
-      throw new VerificationError("Notion Personal Status needs the Done option");
+    // The same options the importer requires. Without "Canvas ICS" the query below finds no page
+    // and nothing says why; without "Removed" a page the importer marked removed reads as active.
+    const options = {
+      "Personal Status": ["Done"],
+      "Imported From": ["Canvas ICS"],
+      "Canvas State": ["Active", "Removed"],
+    };
+    for (const [name, required] of Object.entries(options)) {
+      const property = object(properties[name]);
+      const present: unknown = object(property[scalarText(property.type)]).options;
+      const names = Array.isArray(present)
+        ? present.map((option: unknown) => object(option).name)
+        : [];
+      const missing = required.filter((option) => !names.includes(option));
+      if (missing.length)
+        throw new VerificationError(
+          `Notion ${name} needs the ${missing.join(" and ")} option${missing.length > 1 ? "s" : ""}`,
+        );
     }
   }
   async targets(cursor?: string): Promise<Page<Target>> {
