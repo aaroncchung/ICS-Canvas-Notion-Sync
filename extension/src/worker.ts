@@ -206,12 +206,9 @@ function wake(checkVisibility: boolean, origin?: string): void {
     await launch("sync", false);
   })().catch(() => undefined);
 }
-/** Checks the form and then the connection itself. Nothing is saved here. */
-async function verified(
-  origin: string,
-  raw: Record<string, unknown>,
-  previous: State,
-): Promise<Config> {
+type Connection = Pick<Config, "origin" | "token" | "dataSourceId">;
+/** The form as a connection to try. A blank token means the saved one. Nothing is contacted. */
+function candidate(origin: string, raw: Record<string, unknown>, previous: State): Connection {
   const token =
     typeof raw.token === "string" && raw.token.trim() ? raw.token.trim() : previous.config?.token;
   // Stored in the lowercase form Notion answers with, so later comparisons are exact.
@@ -222,14 +219,25 @@ async function verified(
     throw new UserError("Enter a valid Notion integration token.");
   if (!/^(?:[0-9a-f]{32}|[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})$/.test(dataSourceId))
     throw new UserError("Enter a Notion data-source ID (UUID).");
-  if (!(await chrome.permissions.contains({ origins: [`${origin}/*`] })))
+  return { origin, token, dataSourceId };
+}
+/** Checks the connection itself. Nothing is saved here. */
+async function verified(connection: Connection): Promise<Config> {
+  if (!(await chrome.permissions.contains({ origins: [`${connection.origin}/*`] })))
     throw new UserError("Canvas host access has not been granted.");
   // Otherwise the schema check below fails like a dead network, which says nothing useful.
   if (!(await chrome.permissions.contains({ origins: [NOTION_SITE] }))) throw withdrawn("Notion");
-  const api = new Api({ origin, token, dataSourceId });
+  const api = new Api(connection);
   const userId = await api.user();
   await api.validateSchema();
-  return { origin, token, dataSourceId, userId, enabled: false };
+  return { ...connection, userId, enabled: false };
+}
+function sameConnection(a: Connection, b: Connection): boolean {
+  return (
+    a.origin === b.origin &&
+    a.token === b.token &&
+    notionId(a.dataSourceId) === notionId(b.dataSourceId)
+  );
 }
 async function configure(raw: Record<string, unknown>): Promise<void> {
   const previous = await load();
@@ -237,13 +245,30 @@ async function configure(raw: Record<string, unknown>): Promise<void> {
   const origin = canvasOrigin(scalarText(raw.origin ?? ""));
   if (!origin) throw new UserError("Enter the Canvas HTTPS origin, without a path.");
   let config: Config;
+  let tried: Connection | undefined;
   try {
-    config = await verified(origin, raw, previous);
+    tried = candidate(origin, raw, previous);
+    config = await verified(tried);
   } catch (error) {
     // Host access granted for this attempt is not kept for a connection that did not verify,
     // whether it was the form or the connection that failed.
     if (origin !== previous.config?.origin)
       await chrome.permissions.remove({ origins: [`${origin}/*`] }).catch(() => undefined);
+    // Proof that the saved connection itself no longer verifies counts as much here as it would
+    // in a scan: automatic sync goes off until Settings verify again. A new token or data source
+    // that fails says nothing about the saved one, which stays as it is.
+    if (
+      error instanceof VerificationError &&
+      tried &&
+      previous.config &&
+      sameConnection(tried, previous.config)
+    ) {
+      previous.config.enabled = false;
+      previous.previewReady = false;
+      previous.error = error.message;
+      await save(previous);
+      await badge(previous);
+    }
     throw error;
   }
   const same =

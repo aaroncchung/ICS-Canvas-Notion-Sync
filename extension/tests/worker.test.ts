@@ -21,6 +21,7 @@ let userId: number;
 let notionStatus: string;
 let canvas: "up" | "signed-out" | "offline";
 let notion: "up" | "busy" | "read-only" | "revoked" | "unshared";
+let schemaHasDone: boolean;
 let activeTabUrl: string;
 let hostAccess: boolean;
 let notionAccess: boolean;
@@ -64,6 +65,7 @@ beforeEach(async () => {
   notionStatus = "In progress";
   canvas = "up";
   notion = "up";
+  schemaHasDone = true;
   activeTabUrl = config.origin;
   hostAccess = true;
   notionAccess = true;
@@ -164,7 +166,10 @@ beforeEach(async () => {
             "Imported From": { type: "select" },
             "Removed from Canvas": { type: "checkbox" },
             "Canvas State": { type: "select" },
-            "Personal Status": { type: "status", status: { options: [{ name: "Done" }] } },
+            "Personal Status": {
+              type: "status",
+              status: { options: schemaHasDone ? [{ name: "Done" }] : [{ name: "Finished" }] },
+            },
           },
         });
       if (url.pathname.startsWith("/v1/pages/")) {
@@ -422,12 +427,37 @@ describe("settings", () => {
     expect(stored.config?.origin).toBe("https://other.test");
     expect(revoke).toHaveBeenCalledWith({ origins: [`${config.origin}/*`] });
   });
-  it("says what is wrong with the Notion side when verification fails there", async () => {
+  it("turns sync off when the saved connection fails verification, but not for a new token", async () => {
     notion = "revoked";
+    // A candidate token that Notion rejects proves nothing about the saved one.
+    expect((await configure({ token: "candidate-token" })).error).toContain(
+      "rejected the integration token",
+    );
+    expect(stored.config).toMatchObject({ token: config.token, enabled: true });
+    expect(stored.previewReady).toBe(true);
+    expect(stored.error).toBeUndefined();
+    // A blank token retries the saved connection itself, and that one is now proven unusable.
     expect((await configure({})).error).toContain("rejected the integration token");
+    expect(stored.config).toMatchObject({ token: config.token, enabled: false });
+    expect(stored.previewReady).toBe(false);
+    expect(stored.error).toContain("token");
     notion = "unshared";
+    stored = { ...emptyState(), config: { ...config }, previewReady: true };
     expect((await configure({})).error).toContain("Share it with the integration");
-    expect(stored.config).toMatchObject({ enabled: true });
+    expect(stored.config?.enabled).toBe(false);
+    // A schema that no longer fits is proof of the same kind.
+    notion = "up";
+    stored = { ...emptyState(), config: { ...config }, previewReady: true };
+    schemaHasDone = false;
+    expect((await configure({})).error).toContain("Done option");
+    expect(stored.config?.enabled).toBe(false);
+    // An expired Canvas login, by contrast, passes by itself and changes nothing.
+    schemaHasDone = true;
+    stored = { ...emptyState(), config: { ...config }, previewReady: true };
+    canvas = "signed-out";
+    expect((await configure({})).error).toContain("HTTP 401");
+    expect(stored.config?.enabled).toBe(true);
+    expect(stored.previewReady).toBe(true);
   });
   it("does not keep host access for a new Canvas that failed verification", async () => {
     canvas = "signed-out";
