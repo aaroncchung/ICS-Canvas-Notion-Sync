@@ -302,6 +302,9 @@ async function setEnabled(enabled: boolean): Promise<void> {
   if (!state.config) throw new UserError("No verified configuration.");
   if (enabled) {
     if (!state.previewReady) throw new UserError("Run a successful Preview first.");
+    // Otherwise the account check below fails like a dead network, as it would in a scan.
+    const missing = await withdrawnSite(state.config.origin);
+    if (missing) throw withdrawn(missing);
     await verifyAccount(state.config, new Api(state.config));
   }
   state.config.enabled = enabled;
@@ -362,8 +365,12 @@ function accessChanged(): void {
     const shown = (["Canvas", "Notion"] as const).some(
       (site) => state.error === withdrawn(site).message,
     );
-    if (missing) state.error = withdrawn(missing).message;
-    else if (shown) delete state.error;
+    // Only while automatic sync is on does the loss stop anything, and any message shown then is
+    // one that passes by itself (an outage, an expired login), so the loss may replace it. A
+    // diagnosis that turned sync off is kept; someone who paused sync and then withdrew access
+    // has nothing to be told until Preview or Enable sync, which name the loss when asked.
+    if (missing && (shown || state.config.enabled)) state.error = withdrawn(missing).message;
+    else if (!missing && shown) delete state.error;
     else return;
     await save(state);
     await badge(state);
@@ -376,6 +383,8 @@ async function initialize(): Promise<void> {
   if (!(await chrome.alarms.get("tick")))
     await chrome.alarms.create("tick", { periodInMinutes: 1 });
   await badge(await load());
+  // Access withdrawn while the worker was not running, or before a reload, fired no event here.
+  accessChanged();
 }
 chrome.runtime.onStartup.addListener(() => {
   void initialize().catch(() => undefined);

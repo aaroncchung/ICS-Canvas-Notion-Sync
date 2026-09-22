@@ -376,11 +376,37 @@ describe("worker orchestration", () => {
     await vi.advanceTimersByTimeAsync(1_000);
     expect(stored.error).toBeUndefined();
     expect(chrome.action.setBadgeText).toHaveBeenLastCalledWith({ text: "ON" });
-    // A message the user still has to act on is not taken back by a grant for another site.
+    // A diagnosis that turned sync off outlives the access being withdrawn and restored.
+    stored.config!.enabled = false;
     stored.error = "Canvas account changed. Verify your settings again before syncing.";
-    accessAdded({ origins: ["https://other.test/*"] });
+    hostAccess = false;
+    accessRemoved({ origins: [`${config.origin}/*`] });
     await vi.advanceTimersByTimeAsync(1_000);
     expect(stored.error).toContain("account changed");
+    hostAccess = true;
+    accessAdded({ origins: [`${config.origin}/*`] });
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(stored.error).toContain("account changed");
+    expect(requests).toEqual([]);
+  });
+  it("tells a paused user about withdrawn access only when they ask to sync", async () => {
+    stored.config!.enabled = false;
+    hostAccess = false;
+    accessRemoved({ origins: [`${config.origin}/*`] });
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(stored.error).toBeUndefined();
+    expect(chrome.action.setBadgeText).not.toHaveBeenCalledWith({ text: "!" });
+    expect((await ask("enable")).error).toContain("Canvas host access was removed");
+    expect(stored.config?.enabled).toBe(false);
+    expect(requests).toEqual([]);
+  });
+  it("notices access withdrawn while the worker was not running", async () => {
+    hostAccess = false;
+    vi.resetModules();
+    await import("../src/worker.ts");
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(stored.error).toContain("Canvas host access was removed");
+    expect(stored.config?.enabled).toBe(true);
     expect(requests).toEqual([]);
   });
   it("says which step is missing when Sync now is refused", async () => {
