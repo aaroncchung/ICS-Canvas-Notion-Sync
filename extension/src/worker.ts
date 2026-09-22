@@ -306,6 +306,8 @@ async function setEnabled(enabled: boolean): Promise<void> {
     const missing = await withdrawnSite(state.config.origin);
     if (missing) throw withdrawn(missing);
     await verifyAccount(state.config, new Api(state.config));
+    // Both checks passed, so a message left by an earlier failed scan no longer applies.
+    delete state.error;
   }
   state.config.enabled = enabled;
   await save(state);

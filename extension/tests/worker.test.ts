@@ -409,6 +409,27 @@ describe("worker orchestration", () => {
     expect(stored.config?.enabled).toBe(true);
     expect(requests).toEqual([]);
   });
+  it("clears a failed scan's message once Enable sync has checked the connection", async () => {
+    canvas = "signed-out";
+    updated(1, { status: "complete" }, { url: config.origin } as chrome.tabs.Tab);
+    await vi.advanceTimersByTimeAsync(70_000);
+    expect(stored.error).toContain("HTTP 401");
+    await ask("pause");
+    expect(stored.error).toContain("HTTP 401");
+    // The account check waits on the request spacing timer, so the clock runs alongside it.
+    const enable = async () => {
+      const pending = ask("enable");
+      await vi.advanceTimersByTimeAsync(20_000);
+      return pending;
+    };
+    expect((await enable()).error).toContain("HTTP 401");
+    expect(stored.config?.enabled).toBe(false);
+    canvas = "up";
+    expect((await enable()).ok).toBe(true);
+    expect(stored.config?.enabled).toBe(true);
+    expect(stored.error).toBeUndefined();
+    expect(chrome.action.setBadgeText).toHaveBeenLastCalledWith({ text: "ON" });
+  });
   it("says which step is missing when Sync now is refused", async () => {
     await ask("pause");
     expect((await ask("sync")).error).toContain("Enable sync");
