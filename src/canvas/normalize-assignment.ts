@@ -10,6 +10,7 @@ import {
 } from "../description-document.ts";
 import type { AssignmentType, ExternalAssignment } from "../types.ts";
 import type { ClassificationResult } from "./classify-event.ts";
+import { titleWithoutCourseLabel } from "./summary-title.ts";
 
 export interface RawCalendarEvent {
   uid?: string;
@@ -322,7 +323,7 @@ export function normalizeAssignment(
   const rawTitle = event.summary?.trim();
   if (!uid || !rawTitle) throw new Error("Assignment event is missing UID or SUMMARY");
   const course = parseCourse(rawTitle, event.description);
-  const title = rawTitle.replace(/\s+\[[^\]]+]\s*$/, "").trim() || rawTitle;
+  const title = titleWithoutCourseLabel(rawTitle);
   const description = sanitizeDescription(event.description);
   const due = dueAt(event);
   return {

@@ -40,7 +40,7 @@ jobs:
         run: npm run lint
       - name: Check formatting
         run: npm run format:check
-      - name: Type-check application and tests; build production
+      - name: Type-check application and extension; build production and unpacked extension
         run: npm run check:types-and-build
       - name: Run unit and integration tests
         run: npm test
