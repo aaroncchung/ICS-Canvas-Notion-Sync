@@ -427,30 +427,41 @@ describe("settings", () => {
     expect(stored.config?.origin).toBe("https://other.test");
     expect(revoke).toHaveBeenCalledWith({ origins: [`${config.origin}/*`] });
   });
-  it("turns sync off when the saved connection fails verification, but not for a new token", async () => {
+  it("turns sync off when the saved connection fails verification, but not for a new one", async () => {
+    const untouched = () => {
+      expect(stored.config).toMatchObject({ ...config, enabled: true });
+      expect(stored.previewReady).toBe(true);
+      expect(stored.error).toBeUndefined();
+    };
+    const disabled = (text: string) => {
+      expect(stored.config).toMatchObject({ ...config, enabled: false });
+      expect(stored.previewReady).toBe(false);
+      expect(stored.error).toContain(text);
+    };
     notion = "revoked";
     // A candidate token that Notion rejects proves nothing about the saved one.
     expect((await configure({ token: "candidate-token" })).error).toContain(
       "rejected the integration token",
     );
-    expect(stored.config).toMatchObject({ token: config.token, enabled: true });
-    expect(stored.previewReady).toBe(true);
-    expect(stored.error).toBeUndefined();
+    untouched();
     // A blank token retries the saved connection itself, and that one is now proven unusable.
     expect((await configure({})).error).toContain("rejected the integration token");
-    expect(stored.config).toMatchObject({ token: config.token, enabled: false });
-    expect(stored.previewReady).toBe(false);
-    expect(stored.error).toContain("token");
+    disabled("rejected the integration token");
+    // Nor does another data source that is not shared say anything about the saved one.
     notion = "unshared";
     stored = { ...emptyState(), config: { ...config }, previewReady: true };
+    expect(
+      (await configure({ dataSourceId: "99999999-1234-1234-1234-123456789012" })).error,
+    ).toContain("Share it with the integration");
+    untouched();
     expect((await configure({})).error).toContain("Share it with the integration");
-    expect(stored.config?.enabled).toBe(false);
+    disabled("Share it with the integration");
     // A schema that no longer fits is proof of the same kind.
     notion = "up";
     stored = { ...emptyState(), config: { ...config }, previewReady: true };
     schemaHasDone = false;
     expect((await configure({})).error).toContain("Done option");
-    expect(stored.config?.enabled).toBe(false);
+    disabled("Done option");
     // An expired Canvas login, by contrast, passes by itself and changes nothing.
     schemaHasDone = true;
     stored = { ...emptyState(), config: { ...config }, previewReady: true };

@@ -266,8 +266,10 @@ async function configure(raw: Record<string, unknown>): Promise<void> {
       previous.config.enabled = false;
       previous.previewReady = false;
       previous.error = error.message;
-      await save(previous);
-      await badge(previous);
+      // The diagnosis matters more than a storage hiccup, and the next scan disables sync anyway.
+      await save(previous)
+        .then(() => badge(previous))
+        .catch(() => undefined);
     }
     throw error;
   }

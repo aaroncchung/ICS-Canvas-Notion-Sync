@@ -261,14 +261,9 @@ export async function scan(config: Config, report: Report, context: ScanContext)
           // content at all. Every later write would fail the same way until that is changed.
           if (error instanceof ApiError && error.status === 403) throw new WriteAccessDenied();
           // Notion refusing this page is reported. Anything transient ends the scan instead; the
-          // page is not acknowledged, so the next scan rereads it and writes again.
-          if (
-            !(error instanceof ApiError) ||
-            error.retryable ||
-            error.status === 401 ||
-            error.status < 400
-          )
-            throw error;
+          // page is not acknowledged, so the next scan rereads it and writes again. A revoked
+          // token is not an ApiError by the time it gets here (see NotionAccessLost).
+          if (!(error instanceof ApiError) || error.retryable || error.status < 400) throw error;
           record(report, target, "failed", error.message);
           continue;
         }
