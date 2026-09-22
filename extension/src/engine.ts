@@ -88,6 +88,8 @@ async function observe(
   const observations = new Map<string, Observation>();
   const visited = new Set<string>();
   let readAny = false;
+  /** Whether some course listing or course was tried and could not be read, for any reason. */
+  let failedAny = false;
   let fault: UserError | undefined;
   for (const enrollment of ["active", "completed"] as const) {
     // Past courses are read only while a tracked assignment is still unaccounted for.
@@ -106,6 +108,7 @@ async function observe(
       const status = error instanceof ApiError ? error.status : 0;
       if (status === 401) await verifyAccount(config, api);
       // Still a fault if it turns out that no course was read at all.
+      failedAny = true;
       if (![401, 403, 404].includes(status)) fault = error;
       note(report, "Completed courses", "unchecked", `Could not be listed (${error.message})`);
       break;
@@ -149,6 +152,7 @@ async function observe(
         // ending the scan, unless the session is still good.
         if (status === 401) await verifyAccount(config, api);
         const refused = [401, 403, 404].includes(status);
+        failedAny = true;
         if (!refused) fault = error;
         // A partly read course cannot prove coverage, so none of it is kept.
         note(
@@ -166,8 +170,17 @@ async function observe(
       }
     }
   }
-  // One broken course does not hold back the rest. When none could be read, the fault is wider.
-  if (fault && !readAny) throw fault;
+  // One broken course does not hold back the rest. When none could be read, the fault is wider:
+  // an outage is reported as such, and a Canvas that refused every course is not a Canvas this
+  // extension can check, so Preview must not pass on it either.
+  if (failedAny && !readAny) {
+    throw (
+      fault ??
+      new UserError(
+        "Canvas did not let any course be read, so nothing could be checked. Confirm you are signed in to the right Canvas account.",
+      )
+    );
+  }
   return observations;
 }
 /**

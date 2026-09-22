@@ -22,8 +22,10 @@ interface Scanning {
   progress: string;
 }
 const serial = serialExecutor();
-// Hardening only: Chrome before 140 rejects this for the local area, and with no content script
-// nothing untrusted can read it anyway. It must never stop the extension from loading its state.
+// Hardening only. setAccessLevel exists since Chrome 102 for the session area but is accepted
+// for the local area only from Chrome 140 (MDN browser-compat-data for StorageArea.setAccessLevel);
+// before that it rejects. With no content script nothing untrusted can read the area anyway, so
+// the call must never stop the extension from loading its state.
 const ready = (async () => {
   try {
     await chrome.storage.local.setAccessLevel({ accessLevel: "TRUSTED_CONTEXTS" });

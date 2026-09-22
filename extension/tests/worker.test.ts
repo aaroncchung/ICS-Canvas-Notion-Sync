@@ -20,7 +20,7 @@ let stored: State;
 let userId: number;
 let notionStatus: string;
 let canvas: "up" | "signed-out" | "offline";
-let notion: "up" | "busy" | "read-only";
+let notion: "up" | "busy" | "read-only" | "revoked" | "unshared";
 let activeTabUrl: string;
 let hostAccess: boolean;
 let notionAccess: boolean;
@@ -134,6 +134,9 @@ beforeEach(async () => {
         return new Response("{}", { status: 429, headers: { "Retry-After": "600" } });
       if (!isCanvas && notion === "read-only" && init?.method === "PATCH")
         return new Response("{}", { status: 403 });
+      if (!isCanvas && notion === "revoked") return new Response("{}", { status: 401 });
+      if (!isCanvas && notion === "unshared" && url.pathname.startsWith("/v1/data_sources/"))
+        return new Response("{}", { status: 404 });
       if (url.pathname.endsWith("/profile")) return json({ id: userId });
       if (url.pathname === "/api/v1/courses") return json([{ id: 42 }]);
       if (url.pathname.endsWith("/assignments"))
@@ -251,6 +254,23 @@ describe("worker orchestration", () => {
     expect(stored.config?.enabled).toBe(false);
     expect(stored.previewReady).toBe(false);
     expect(requests.filter((r) => r.method === "PATCH")).toHaveLength(1);
+  });
+  it("turns automatic sync off when the token is revoked or the data source is no longer shared", async () => {
+    const tab = { url: config.origin } as chrome.tabs.Tab;
+    for (const [failure, text] of [
+      ["revoked", "token"],
+      ["unshared", "Share it with the integration"],
+    ] as const) {
+      stored = { ...emptyState(), config: { ...config }, previewReady: true };
+      notion = failure;
+      updated(1, { status: "complete" }, tab);
+      await vi.advanceTimersByTimeAsync(20_000);
+      expect(stored.config?.enabled).toBe(false);
+      expect(stored.previewReady).toBe(false);
+      expect(stored.error).toContain(text);
+      expect(stored.report?.failed).toBe(1);
+    }
+    expect(requests.some((r) => r.method === "PATCH")).toBe(false);
   });
   it("stays away for as long as a throttling service asks, up to an hour", async () => {
     const tab = { url: config.origin } as chrome.tabs.Tab;
@@ -401,6 +421,13 @@ describe("settings", () => {
     await configure({ origin: "https://other.test" });
     expect(stored.config?.origin).toBe("https://other.test");
     expect(revoke).toHaveBeenCalledWith({ origins: [`${config.origin}/*`] });
+  });
+  it("says what is wrong with the Notion side when verification fails there", async () => {
+    notion = "revoked";
+    expect((await configure({})).error).toContain("rejected the integration token");
+    notion = "unshared";
+    expect((await configure({})).error).toContain("Share it with the integration");
+    expect(stored.config).toMatchObject({ enabled: true });
   });
   it("does not keep host access for a new Canvas that failed verification", async () => {
     canvas = "signed-out";

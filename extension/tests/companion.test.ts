@@ -1,6 +1,6 @@
 /* eslint @typescript-eslint/require-await: "off", @typescript-eslint/unbound-method: "off" -- Async API doubles and Vitest spy assertions. */
 import { describe, expect, it, vi } from "vitest";
-import { Api, ApiError, type SyncApi } from "../src/api.ts";
+import { Api, ApiError, NotionAccessLost, type SyncApi } from "../src/api.ts";
 import { scan, serialExecutor, WriteAccessDenied } from "../src/engine.ts";
 import {
   completion,
@@ -11,6 +11,7 @@ import {
   targetFromPage,
   targetKey,
   UserError,
+  VerificationError,
   type Report,
   type Target,
 } from "../src/model.ts";
@@ -426,8 +427,9 @@ describe("scan", () => {
   });
   it("reports an inaccessible course as unchecked but stops on an outage", async () => {
     const { api, run } = fixture();
-    api.assignments = vi.fn(async () => {
-      throw new ApiError("Canvas", 403);
+    api.assignments = vi.fn(async (courseId) => {
+      if (courseId === "42") throw new ApiError("Canvas", 403);
+      return { items: [] };
     });
     const report = await run();
     expect(report.unchecked).toBe(1);
@@ -437,6 +439,37 @@ describe("scan", () => {
       throw new ApiError("Canvas", 503);
     });
     await expect(run()).rejects.toBeInstanceOf(ApiError);
+  });
+  it("fails when Canvas refuses every course, so Preview cannot pass without reading one", async () => {
+    for (const status of [403, 404]) {
+      const { api, run } = fixture();
+      api.assignments = vi.fn(async () => {
+        throw new ApiError("Canvas", status);
+      });
+      for (const mode of ["preview", "sync"] as const)
+        await expect(run(mode)).rejects.toThrow("did not let any course be read");
+      expect(api.markDone).not.toHaveBeenCalled();
+    }
+    // No active course, and the past ones may not be listed: nothing was read either.
+    const unlisted = fixture();
+    unlisted.api.courses = vi.fn<SyncApi["courses"]>(async (enrollment) => {
+      if (enrollment === "completed") throw new ApiError("Canvas", 403);
+      return { items: [] };
+    });
+    await expect(unlisted.run("preview")).rejects.toThrow("did not let any course be read");
+    // No course at all is not a refusal: the assignments are reported as unchecked instead.
+    const unenrolled = fixture();
+    unenrolled.api.courses = vi.fn(async () => ({ items: [] }));
+    expect(await unenrolled.run("preview")).toMatchObject({ unchecked: 1, eligible: 0 });
+    // One readable course is enough for the others to be reported rather than fatal.
+    const partial = fixture();
+    partial.api.courses = vi.fn(async () => ({ items: ["41", "42"] }));
+    const working = partial.api.assignments;
+    partial.api.assignments = vi.fn<SyncApi["assignments"]>(async (courseId, cursor) => {
+      if (courseId === "41") throw new ApiError("Canvas", 404);
+      return working(courseId, cursor);
+    });
+    expect(await partial.run("preview")).toMatchObject({ eligible: 1 });
   });
   it("keeps one broken course from holding back the others", async () => {
     for (const failure of [
@@ -618,6 +651,25 @@ describe("HTTP boundary", () => {
     const { api } = setup([json(raw), new Response("{}", { status: 404 })]);
     expect(await api.target("page-123")).toBeUndefined();
     expect(await api.target("page-123")).toBeUndefined();
+  });
+  it("tells a revoked token or an unshared data source from a page that is merely gone", async () => {
+    const refused = (status: number) => new Response("{}", { status });
+    // A 401 from any Notion request means the token no longer works.
+    const revoked = setup([refused(401), refused(401), refused(401)]);
+    await expect(revoked.api.validateSchema()).rejects.toBeInstanceOf(NotionAccessLost);
+    await expect(revoked.api.target("page-123")).rejects.toBeInstanceOf(NotionAccessLost);
+    await expect(revoked.api.markDone("page-123")).rejects.toMatchObject({ status: 401 });
+    expect(revoked.fetcher).toHaveBeenCalledTimes(3);
+    // Notion answers 404 for a data source that is deleted or no longer shared, 403 for one it
+    // may not read. On the data source that is access lost; on one page it is only that page.
+    for (const status of [403, 404]) {
+      const lost = setup([refused(status), refused(status)]);
+      await expect(lost.api.validateSchema()).rejects.toBeInstanceOf(VerificationError);
+      await expect(lost.api.targets()).rejects.toMatchObject({ status, message: /Share it/ });
+    }
+    const gone = setup([refused(404), refused(400)]);
+    expect(await gone.api.target("page-123")).toBeUndefined();
+    await expect(gone.api.markDone("page-123")).rejects.toBeInstanceOf(ApiError);
   });
   it("retries transient failures, honors Retry-After, and gives up after two retries", async () => {
     const busy = () => new Response("", { status: 503 });

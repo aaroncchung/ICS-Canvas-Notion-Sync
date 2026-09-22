@@ -35,6 +35,21 @@ export class ApiError extends UserError {
     return this.status === 0 || this.throttled || this.status >= 500;
   }
 }
+/**
+ * Notion no longer accepts the token, or no longer lets the integration reach the data source.
+ * Neither passes by itself, so like a changed account or schema it turns automatic sync off.
+ */
+export class NotionAccessLost extends VerificationError {
+  readonly status: number;
+  constructor(status: number) {
+    super(
+      status === 401
+        ? "Notion rejected the integration token. Enter a valid token in Settings and verify again."
+        : "Notion did not let the integration read the data source. Share it with the integration, then verify your settings again.",
+    );
+    this.status = status;
+  }
+}
 export interface Page<T> {
   items: T[];
   next?: string;
@@ -105,6 +120,9 @@ export class Api implements SyncApi {
       try {
         return await this.attempt(service, path, body, method);
       } catch (error) {
+        // Whatever the request, a Notion 401 means the token itself was revoked or replaced.
+        if (error instanceof ApiError && service === "Notion" && error.status === 401)
+          throw new NotionAccessLost(401);
         if (
           !(error instanceof ApiError) ||
           !error.retryable ||
@@ -114,6 +132,19 @@ export class Api implements SyncApi {
           throw error;
         await this.pause(Math.max(error.retryAfter, 1000 * 2 ** attempt));
       }
+    }
+  }
+  /**
+   * A request about the data source itself. Notion answers 404 for one that is no longer shared
+   * with the integration as well as for one that was deleted, and 403 for one it may not read.
+   */
+  private async dataSource(path: string, body?: unknown): Promise<unknown> {
+    try {
+      return (await this.request("Notion", path, body)).data;
+    } catch (error) {
+      if (error instanceof ApiError && [403, 404].includes(error.status))
+        throw new NotionAccessLost(error.status);
+      throw error;
     }
   }
   private async attempt(
@@ -229,7 +260,7 @@ export class Api implements SyncApi {
     return userId;
   }
   async validateSchema(): Promise<void> {
-    const { data } = await this.request("Notion", `/v1/data_sources/${this.config.dataSourceId}`);
+    const data = await this.dataSource(`/v1/data_sources/${this.config.dataSourceId}`);
     const properties = object(object(data).properties);
     const expected = {
       "Canvas UID": "rich_text",
@@ -253,15 +284,11 @@ export class Api implements SyncApi {
     }
   }
   async targets(cursor?: string): Promise<Page<Target>> {
-    const { data } = await this.request(
-      "Notion",
-      `/v1/data_sources/${this.config.dataSourceId}/query`,
-      {
-        filter: { property: "Imported From", select: { equals: "Canvas ICS" } },
-        page_size: 100,
-        ...(cursor ? { start_cursor: cursor } : {}),
-      },
-    );
+    const data = await this.dataSource(`/v1/data_sources/${this.config.dataSourceId}/query`, {
+      filter: { property: "Imported From", select: { equals: "Canvas ICS" } },
+      page_size: 100,
+      ...(cursor ? { start_cursor: cursor } : {}),
+    });
     const result = object(data);
     if (!Array.isArray(result.results)) throw new UserError("Notion returned an invalid page list");
     const next = result.has_more === true ? result.next_cursor : undefined;
@@ -293,7 +320,10 @@ export class Api implements SyncApi {
   }
   assignments(courseId: string, cursor?: string): Promise<Page<unknown>> {
     // This listing cannot leave out the description (Canvas ignores exclude_response_fields here),
-    // and the submissions listing that can does not carry the name the title check needs.
+    // and the submissions listing that can does not carry the name the title check needs. Nor can
+    // it be narrowed with assignment_ids[]: Canvas answers 400 "Invalid assignment_ids" when any
+    // requested ID is not in this course (assignments_api_controller#get_assignments), and the
+    // pages hold no course ID, so every course would have to be asked for every tracked ID.
     return this.canvasList(
       `/api/v1/courses/${courseId}/assignments?include%5B%5D=submission&per_page=100`,
       cursor,
