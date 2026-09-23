@@ -24,8 +24,8 @@ interface Scanning {
 const serial = serialExecutor();
 // Hardening only. setAccessLevel exists since Chrome 102 for the session area but is accepted
 // for the local area only from Chrome 140 (MDN browser-compat-data for StorageArea.setAccessLevel);
-// before that it rejects. With no content script nothing untrusted can read the area anyway, so
-// the call must never stop the extension from loading its state.
+// before that it rejects, and content scripts may read the area. The only one is canvas.ts, which
+// never does, so the call must never stop the extension from loading its state.
 const ready = (async () => {
   try {
     await chrome.storage.local.setAccessLevel({ accessLevel: "TRUSTED_CONTEXTS" });
@@ -34,10 +34,14 @@ const ready = (async () => {
   }
 })();
 const STATE_KEY = "companion-v1";
-const COOLDOWN = 5 * 60_000;
+const COOLDOWN = 15 * 60_000;
+/** The wait after one failed scan, doubled for each further failure in a row. */
 const FAILURE_COOLDOWN = 60_000;
-/** The most a Retry-After header may hold automatic scans back; Sync now is never held back. */
+/** The most failures or a Retry-After header may hold automatic scans back; Sync now never waits. */
 const LONGEST_COOLDOWN = 60 * 60_000;
+const TICK = "tick";
+/** The content script built from canvas.ts, registered for the Canvas origin while sync is on. */
+const WATCHER = "canvas-watcher";
 /** Declared in the manifest, but Chrome still lets the user withhold it under site access. */
 const NOTION_SITE = "https://api.notion.com/*";
 type Site = "Canvas" | "Notion";
@@ -95,6 +99,36 @@ async function badge(state: State): Promise<void> {
     text: state.error ? "!" : active ? "…" : state.config?.enabled ? "ON" : "",
   });
 }
+/**
+ * One alarm wakes the worker when the next automatic scan is due, and only while automatic sync is
+ * on. It is spent once it fires; every scan arms it again for the scan after.
+ */
+async function arm(state: State): Promise<void> {
+  if (state.config?.enabled)
+    await chrome.alarms.create(TICK, { when: Math.max(state.nextScanAt, Date.now()) });
+  else await chrome.alarms.clear(TICK);
+}
+/**
+ * While automatic sync is on, a Canvas page tells the worker when it loads, comes into view, or
+ * regains focus. Chrome keeps the registration across worker and browser restarts.
+ */
+async function watch(state: State): Promise<void> {
+  const [registered] = await chrome.scripting.getRegisteredContentScripts({ ids: [WATCHER] });
+  if (!state.config?.enabled) {
+    if (registered) await chrome.scripting.unregisterContentScripts({ ids: [WATCHER] });
+    return;
+  }
+  const matches = [`${state.config.origin}/*`];
+  if (registered?.matches?.join() === matches.join()) return;
+  const script = { id: WATCHER, matches, js: ["canvas.js"], runAt: "document_idle" as const };
+  if (registered) await chrome.scripting.updateContentScripts([script]);
+  else await chrome.scripting.registerContentScripts([script]);
+}
+/** Brings both wakeups in line with a state that was just saved. */
+async function schedule(state: State): Promise<void> {
+  await arm(state);
+  await watch(state);
+}
 async function prepare(mode: Report["mode"], force: boolean): Promise<Configured | undefined> {
   const state = await load();
   if (!state.config) {
@@ -142,6 +176,7 @@ async function execute(state: Configured, scanning: Scanning): Promise<void> {
     });
     if (report.mode === "preview") state.previewReady = true;
     state.nextScanAt = Date.now() + COOLDOWN;
+    delete state.failures;
   } catch (error) {
     if (controller.signal.aborted) {
       // Ranked with failures, so a full list of routine rows cannot crowd it out.
@@ -149,9 +184,12 @@ async function execute(state: Configured, scanning: Scanning): Promise<void> {
     } else {
       state.error = message(error);
       report.failed++;
-      // A service that says how long to stay away is not asked again every minute meanwhile.
+      // A Canvas tab left on its login page is not asked again every minute for as long as it
+      // stays there, and a service that says how long to stay away is not asked meanwhile.
+      state.failures = (state.failures ?? 0) + 1;
+      const backoff = Math.min(FAILURE_COOLDOWN * 2 ** (state.failures - 1), LONGEST_COOLDOWN);
       const asked = error instanceof ApiError ? Math.min(error.retryAfter, LONGEST_COOLDOWN) : 0;
-      state.nextScanAt = Date.now() + Math.max(FAILURE_COOLDOWN, asked);
+      state.nextScanAt = Date.now() + Math.max(backoff, asked);
       // Outages and expired sessions pass by themselves. Only a changed account or schema, or
       // an integration that may not write, needs the user to look before the next write.
       if (error instanceof VerificationError) {
@@ -162,6 +200,7 @@ async function execute(state: Configured, scanning: Scanning): Promise<void> {
   }
   report.finishedAt = new Date().toISOString();
   await save(state);
+  await schedule(state);
 }
 /** Settles once the scan has started or been declined; the scan itself continues in the queue. */
 function launch(mode: Report["mode"], force: boolean): Promise<void> {
@@ -205,13 +244,14 @@ async function visibleCanvas(origin: string): Promise<boolean> {
   const tabs = await chrome.tabs.query({ active: true, windowId: window.id });
   return tabs.some((tab) => tab.url && new URL(tab.url).origin === origin);
 }
-function wake(checkVisibility: boolean, origin?: string): void {
+/** A scan starts only while Canvas is in view, and a page's word for it counts only for Canvas. */
+function wake(origin?: string): void {
   if (launched.size) return;
   void (async () => {
     const state = await load();
     if (!state.config?.enabled || Date.now() < state.nextScanAt) return;
     if (origin && origin !== state.config.origin) return;
-    if (checkVisibility && !(await visibleCanvas(state.config.origin))) return;
+    if (!(await visibleCanvas(state.config.origin))) return;
     // Triggers that raced past these checks are declined by the cooldown once queued.
     await launch("sync", false);
   })().catch(() => undefined);
@@ -279,6 +319,7 @@ async function configure(raw: Record<string, unknown>): Promise<void> {
       // The diagnosis matters more than a storage hiccup, and the next scan disables sync anyway.
       await save(previous)
         .then(() => badge(previous))
+        .then(() => schedule(previous))
         .catch(() => undefined);
     }
     throw error;
@@ -293,6 +334,8 @@ async function configure(raw: Record<string, unknown>): Promise<void> {
   delete state.error;
   await save(state);
   await badge(state);
+  // Sync is off again until Enable sync, so neither the alarm nor any Canvas page wakes the worker.
+  await schedule(state);
   if (previous.config?.origin && previous.config.origin !== origin) {
     await chrome.permissions.remove({ origins: [`${previous.config.origin}/*`] });
   }
@@ -312,6 +355,7 @@ async function setEnabled(enabled: boolean): Promise<void> {
   state.config.enabled = enabled;
   await save(state);
   await badge(state);
+  await schedule(state);
 }
 async function handle(request: Record<string, unknown>): Promise<void> {
   const action = request.action;
@@ -329,7 +373,13 @@ async function handle(request: Record<string, unknown>): Promise<void> {
 }
 chrome.runtime.onMessage.addListener((raw: unknown, sender, respond: (value: unknown) => void) => {
   const allowed = [chrome.runtime.getURL("popup.html"), chrome.runtime.getURL("options.html")];
-  if (sender.id !== chrome.runtime.id || !sender.url || !allowed.includes(sender.url)) return false;
+  if (sender.id !== chrome.runtime.id || !sender.url) return false;
+  if (!allowed.includes(sender.url)) {
+    // The Canvas page script saying the page is in view. It carries nothing, and only prompts the
+    // cooldown-gated check the alarm makes; wake() ignores a page off the configured origin.
+    if (object(raw).action === "wake") wake(new URL(sender.url).origin);
+    return false;
+  }
   // Reading state never waits behind a scan, so the popup stays live while one runs.
   handle(object(raw))
     .then(load)
@@ -339,24 +389,15 @@ chrome.runtime.onMessage.addListener((raw: unknown, sender, respond: (value: unk
     );
   return true;
 });
-chrome.tabs.onUpdated.addListener((_tabId, change, tab) => {
-  if (change.status === "complete" && tab.url) {
-    try {
-      wake(false, new URL(tab.url).origin);
-    } catch {
-      /* Non-web tab. */
-    }
-  }
-});
-chrome.tabs.onActivated.addListener(() => wake(true));
-chrome.windows.onFocusChanged.addListener(() => wake(true));
+// A due scan the alarm finds out of sight waits for the Canvas page script to report it in view.
 chrome.alarms.onAlarm.addListener((alarm) => {
-  if (alarm.name === "tick") wake(true);
+  if (alarm.name === TICK) wake();
 });
 /**
- * Without Canvas host access Chrome no longer shows this extension the address of a Canvas tab, so
- * none of the wakeups above would find Canvas visible and launch the scan that names the loss.
- * The change in access itself records the message instead, and takes it back once access returns.
+ * Without Canvas host access Chrome neither runs the Canvas page script nor shows this extension
+ * the address of a Canvas tab, so no wakeup would find Canvas visible and launch the scan that
+ * names the loss. The change in access itself records the message instead, and takes it back once
+ * access returns.
  * Queued behind any running scan so that scan's final save cannot overwrite it.
  */
 function accessChanged(): void {
@@ -381,12 +422,22 @@ function accessChanged(): void {
 chrome.permissions.onRemoved.addListener(accessChanged);
 chrome.permissions.onAdded.addListener(accessChanged);
 async function initialize(): Promise<void> {
-  await ready;
-  if (!(await chrome.alarms.get("tick")))
-    await chrome.alarms.create("tick", { periodInMinutes: 1 });
   await badge(await load());
   // Access withdrawn while the worker was not running, or before a reload, fired no event here.
   accessChanged();
+  // Queued like every other write of the schedule, so a scan that finishes meanwhile is not
+  // rescheduled from the state read before it.
+  await serial(async () => {
+    const state = await load();
+    // Every start of the worker comes here, the alarm's own included, so an alarm armed for a scan
+    // that is already due would wake the worker again and again while Canvas stays out of sight.
+    // That scan waits for a Canvas page instead. The repeating alarm of earlier versions goes.
+    const alarm = await chrome.alarms.get(TICK);
+    if (alarm?.periodInMinutes || !state.config?.enabled || state.nextScanAt > Date.now())
+      await arm(state);
+    // Also puts back a registration that no longer matches the saved state, whatever removed it.
+    await watch(state);
+  });
 }
 chrome.runtime.onStartup.addListener(() => {
   void initialize().catch(() => undefined);
