@@ -16,6 +16,10 @@ updates:
     ignore:
       - dependency-name: typescript
         update-types: ["version-update:semver-major"]
+      # Node types track the runtime pinned by engines and the workflows' node-version;
+      # bump the major by hand when those move.
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]
   - package-ecosystem: github-actions
     directory: /
     schedule:
