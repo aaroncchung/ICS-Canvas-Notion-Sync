@@ -212,8 +212,8 @@ const COURSE_CODE_CANDIDATE = /\b([A-Z]{2,})\s*[- ]?\d{1,4}[A-Z]?\b/g;
 
 /**
  * Uppercase words that look like a department prefix but describe a term, a structural unit, or a
- * piece of work. "FALL 2026", "FA26", "WEEK 3", and "HW 2" are rejected; extraction then continues
- * with the next candidate so "FA26 CS 101" still yields "CS 101".
+ * piece of work. "FALL 2026", "FA26", "SPR26", "WEEK 3", and "HW 2" are rejected; extraction then
+ * continues with the next candidate so "FA26 CS 101" still yields "CS 101".
  */
 const NON_COURSE_PREFIXES = new Set([
   // Academic terms and their common Canvas SIS abbreviations.
@@ -226,10 +226,20 @@ const NON_COURSE_PREFIXES = new Set([
   "SP",
   "SU",
   "WI",
+  "FAL",
+  "SPR",
+  "SUM",
+  "WIN",
+  "AUT",
   "TERM",
   "SEMESTER",
+  "SEM",
   "QUARTER",
+  "QTR",
   "SESSION",
+  // Academic and school year.
+  "AY",
+  "SY",
   // Structural units inside a course.
   "SECTION",
   "SEC",
@@ -279,13 +289,19 @@ const NON_COURSE_PREFIXES = new Set([
   "ATTEMPT",
 ]);
 
+/**
+ * A term tag written as one token: letters directly followed by a two- or four-digit year, such as
+ * "SPR26" or "SPRG2026". Codes can take the same shape ("ENGL1010"), so it is skipped only when
+ * another code follows it.
+ */
+const TERM_TAG_SHAPE = /^[A-Z]{2,}\d{2}(?:\d{2})?$/;
+
 /** Extracts the first real course code from a Canvas course label, if it contains one. */
 export function extractCourseCode(label: string): string | undefined {
-  for (const match of label.matchAll(COURSE_CODE_CANDIDATE)) {
-    const prefix = match[1];
-    if (prefix && !NON_COURSE_PREFIXES.has(prefix)) return match[0];
-  }
-  return;
+  const codes = [...label.matchAll(COURSE_CODE_CANDIDATE)]
+    .filter((match) => match[1] && !NON_COURSE_PREFIXES.has(match[1]))
+    .map((match) => match[0]);
+  return codes.find((code, index) => index === codes.length - 1 || !TERM_TAG_SHAPE.test(code));
 }
 
 function parseCourse(summary: string, description?: string): { name?: string; code?: string } {

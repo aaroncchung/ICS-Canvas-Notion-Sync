@@ -35,6 +35,8 @@ export interface AssignmentIndex {
   readonly byNormalizedCanvasUrl: ReadonlyMap<string, readonly IndexedAssignment[]>;
   readonly byCanvasAssignmentId: ReadonlyMap<string, readonly IndexedAssignment[]>;
   readonly byTitleAndDueDate: ReadonlyMap<string, readonly IndexedAssignment[]>;
+  /** UIDs present in the feed; a page whose UID is still there cannot be a new UID's old self. */
+  readonly feedUids: ReadonlySet<string>;
   readonly timeZone: string;
 }
 
@@ -57,6 +59,7 @@ export function buildAssignmentIndex(
   assignments: readonly AssignmentRecord[],
   courses: CourseIndex,
   timeZone: string,
+  feedUids: ReadonlySet<string>,
 ): AssignmentIndex {
   const byUid = new Map<string, AssignmentRecord[]>();
   const byNormalizedCanvasUrl = new Map<string, IndexedAssignment[]>();
@@ -98,7 +101,14 @@ export function buildAssignmentIndex(
       addToIndex(byTitleAndDueDate, titleAndDateKey(indexed.normalizedTitle, dateKey), indexed);
     }
   }
-  return { byUid, byNormalizedCanvasUrl, byCanvasAssignmentId, byTitleAndDueDate, timeZone };
+  return {
+    byUid,
+    byNormalizedCanvasUrl,
+    byCanvasAssignmentId,
+    byTitleAndDueDate,
+    feedUids,
+    timeZone,
+  };
 }
 
 function compatibleCourse(
@@ -159,6 +169,10 @@ export function possibleDuplicateFromIndex(
     if (sourceAssignmentId && candidate.canvasAssignmentId === sourceAssignmentId) {
       return [assignment];
     }
+    // Title and date are weak evidence: they cannot outweigh the candidate's own UID still being
+    // in the feed, or two known Canvas assignment IDs that differ.
+    if (index.feedUids.has(assignment.uid)) return [];
+    if (sourceAssignmentId && candidate.canvasAssignmentId !== undefined) return [];
     return candidate.normalizedTitle === sourceTitle &&
       datesEqual(assignment.canvasDueDate, source.dueAt, index.timeZone) &&
       compatibleCourse(source, candidate, sourceNames, resolvedCoursePageId)

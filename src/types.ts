@@ -147,12 +147,20 @@ export interface AssignmentUpdate {
   missingEvidenceCleared: boolean;
 }
 
-export interface AssignmentMissingEvidenceUpdate {
-  pageId: string;
-  canvasMissingSince: string;
-  canvasMissingCount: number;
-  transition: "observed" | "advanced";
-}
+export type AssignmentMissingEvidenceUpdate =
+  | {
+      pageId: string;
+      canvasMissingSince: string;
+      canvasMissingCount: number;
+      transition: "observed" | "advanced";
+    }
+  | {
+      /** The UID was in the feed but quarantined, so no assignment update clears the evidence. */
+      pageId: string;
+      canvasMissingSince: null;
+      canvasMissingCount: null;
+      transition: "cleared";
+    };
 
 export interface AssignmentRemoval extends AssignmentRecord {
   reason: "explicit-cancellation" | "persistent-absence";

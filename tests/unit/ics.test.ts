@@ -262,6 +262,33 @@ describe("course-code extraction", () => {
     expect(extractCourseCode("CS 101 SECTION 3")).toBe("CS 101");
   });
 
+  it("skips SIS term tags to reach the real code", () => {
+    const cases: Array<[string, string]> = [
+      ["SPR26 CS 101", "CS 101"],
+      ["SUM2026 BIO 1", "BIO 1"],
+      ["WIN26 MATH 2B", "MATH 2B"],
+      ["AUT26 CS 106A", "CS 106A"],
+      ["FAL 2026 CS 101", "CS 101"],
+      ["SEM 1 CHEM 3", "CHEM 3"],
+      ["QTR2 CS 101", "CS 101"],
+      ["AY26 PHYS 7C", "PHYS 7C"],
+      ["SY 2026 EE 10", "EE 10"],
+      // Tags not in the list are recognized by shape when a code follows them.
+      ["FS26 CS 101", "CS 101"],
+      ["SPRG2026-CS-61A", "CS-61A"],
+    ];
+    for (const [label, expected] of cases) {
+      expect(extractCourseCode(label), label).toBe(expected);
+    }
+  });
+
+  it("keeps a code shaped like a term tag when no other code follows it", () => {
+    expect(extractCourseCode("ENGL1010")).toBe("ENGL1010");
+    expect(extractCourseCode("ENGL1010 Composition")).toBe("ENGL1010");
+    expect(extractCourseCode("EE10 SECTION 2")).toBe("EE10");
+    expect(extractCourseCode("SPR26 Biology")).toBeUndefined();
+  });
+
   it("keeps the course label as the name whether or not it contains a code", () => {
     const parsed = parseIcs(
       calendar(
