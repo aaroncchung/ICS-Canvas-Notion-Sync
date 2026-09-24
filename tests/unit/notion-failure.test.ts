@@ -1,8 +1,58 @@
 import { createRequestMetrics } from "../../src/observability/run-report.ts";
+import { Client } from "@notionhq/client";
 import { describe, expect, it } from "vitest";
-import { withRetry } from "../../src/notion/client.ts";
+import { isAmbiguousWriteError, withRetry } from "../../src/notion/client.ts";
 import { classifyNotionFailure } from "../../src/notion/failure.ts";
 import { safeDiagnostic } from "../../src/observability/redaction.ts";
+
+interface ScriptedResponse {
+  status: number;
+  code?: string;
+  headers?: Record<string, string>;
+}
+
+/** A real SDK client whose HTTP responses are scripted, so errors come from the SDK's own builder. */
+function scriptedClient(...responses: ScriptedResponse[]): { client: Client; calls: () => number } {
+  let calls = 0;
+  const fetch = () => {
+    const next = responses[Math.min(calls, responses.length - 1)]!;
+    calls += 1;
+    const body =
+      next.status === 200
+        ? { object: "page", id: "page-id" }
+        : { object: "error", status: next.status, code: next.code, message: "Try later" };
+    return Promise.resolve(
+      new Response(JSON.stringify(body), {
+        status: next.status,
+        headers: { "content-type": "application/json", ...next.headers },
+      }),
+    );
+  };
+  const client = new Client({
+    auth: "test-token",
+    retry: false,
+    fetch: fetch as unknown as NonNullable<
+      NonNullable<ConstructorParameters<typeof Client>[0]>["fetch"]
+    >,
+    logger: () => undefined,
+  });
+  return { client, calls: () => calls };
+}
+
+const read = (client: Client) => () => client.pages.retrieve({ page_id: "page-id" });
+const create = (client: Client) => () =>
+  client.pages.create({ parent: { data_source_id: "source" }, properties: {} });
+
+function recordedSleep(): { waits: number[]; sleep: (ms: number) => Promise<void> } {
+  const waits: number[] = [];
+  return {
+    waits,
+    sleep: (ms) => {
+      waits.push(ms);
+      return Promise.resolve();
+    },
+  };
+}
 
 describe("Notion failure classification and retry policy", () => {
   it("retries a statusless read transport failure and succeeds", async () => {
@@ -113,5 +163,123 @@ describe("Notion failure classification and retry policy", () => {
     expect(serialized).not.toContain("canvas.example.edu");
     expect(serialized).not.toContain("authorization");
     expect(serialized).not.toContain("request");
+  });
+
+  it("waits the Retry-After delay of a 429 and counts the wait", async () => {
+    const { client, calls } = scriptedClient(
+      { status: 429, code: "rate_limited", headers: { "retry-after": "20" } },
+      { status: 200 },
+    );
+    const metrics = createRequestMetrics();
+    const { waits, sleep } = recordedSleep();
+    await withRetry(read(client), { operation: "read", metrics, sleep });
+    expect(calls()).toBe(2);
+    expect(waits).toEqual([20_000]);
+    expect(metrics).toMatchObject({
+      notionRequests: 2,
+      readRetries: 1,
+      throttleRetries: 1,
+      throttleWaitMs: 20_000,
+    });
+  });
+
+  it("caps a long Retry-After at one minute", async () => {
+    const { client } = scriptedClient(
+      { status: 429, code: "rate_limited", headers: { "retry-after": "3600" } },
+      { status: 200 },
+    );
+    const { waits, sleep } = recordedSleep();
+    await withRetry(read(client), { operation: "read", sleep });
+    expect(waits).toEqual([60_000]);
+  });
+
+  it("reads a Retry-After HTTP date against the injected clock", async () => {
+    const now = Date.parse("2026-09-24T12:00:00Z");
+    const { client } = scriptedClient(
+      {
+        status: 429,
+        code: "rate_limited",
+        headers: { "retry-after": "Thu, 24 Sep 2026 12:00:05 GMT" },
+      },
+      { status: 200 },
+    );
+    const { waits, sleep } = recordedSleep();
+    await withRetry(read(client), { operation: "read", sleep, now: () => now });
+    expect(waits).toEqual([5_000]);
+  });
+
+  it("falls back to exponential backoff when Retry-After is missing or malformed", async () => {
+    const { client } = scriptedClient(
+      { status: 429, code: "rate_limited", headers: { "retry-after": "soon" } },
+      { status: 429, code: "rate_limited" },
+      { status: 200 },
+    );
+    const metrics = createRequestMetrics();
+    const { waits, sleep } = recordedSleep();
+    await withRetry(read(client), { operation: "read", metrics, sleep, baseDelayMs: 100 });
+    expect(waits).toHaveLength(2);
+    expect(waits[0]).toBeGreaterThanOrEqual(100);
+    expect(waits[0]).toBeLessThan(200);
+    expect(waits[1]).toBeGreaterThanOrEqual(200);
+    expect(waits[1]).toBeLessThan(300);
+    expect(metrics.throttleRetries).toBe(2);
+    expect(metrics.throttleWaitMs).toBe(waits[0]! + waits[1]!);
+  });
+
+  it("retries a 529 service_overload on a read", async () => {
+    const { client, calls } = scriptedClient(
+      { status: 529, code: "service_overload", headers: { "retry-after": "2" } },
+      { status: 200 },
+    );
+    const metrics = createRequestMetrics();
+    const { waits, sleep } = recordedSleep();
+    await withRetry(read(client), { operation: "read", metrics, sleep });
+    expect(calls()).toBe(2);
+    expect(waits).toEqual([2_000]);
+    expect(metrics).toMatchObject({ readRetries: 1, throttleRetries: 1, throttleWaitMs: 2_000 });
+  });
+
+  it("retries a 529 service_overload on a page create, which the server rejected", async () => {
+    const { client, calls } = scriptedClient(
+      { status: 529, code: "service_overload" },
+      { status: 200 },
+    );
+    const metrics = createRequestMetrics();
+    const { sleep } = recordedSleep();
+    await withRetry(create(client), { operation: "page-create", metrics, sleep, baseDelayMs: 0 });
+    expect(calls()).toBe(2);
+    expect(metrics).toMatchObject({
+      notionRequests: 2,
+      requestsByOperation: { "page-create": 2 },
+      throttleRetries: 1,
+    });
+  });
+
+  it("reports an exhausted 529 page create as a definite, unambiguous failure", async () => {
+    const { client, calls } = scriptedClient({ status: 529, code: "service_overload" });
+    const { sleep } = recordedSleep();
+    const failure = await withRetry(create(client), {
+      operation: "page-create",
+      attempts: 3,
+      sleep,
+      baseDelayMs: 0,
+    }).catch((error: unknown) => error);
+    expect(calls()).toBe(3);
+    expect(classifyNotionFailure(failure)).toMatchObject({
+      kind: "definite-response",
+      status: 529,
+      retryable: true,
+      ambiguousWrite: false,
+    });
+    expect(isAmbiguousWriteError(failure)).toBe(false);
+  });
+
+  it("still does not retry an ambiguous 503 on a page create", async () => {
+    const { client, calls } = scriptedClient({ status: 503, code: "service_unavailable" });
+    const { sleep } = recordedSleep();
+    await expect(
+      withRetry(create(client), { operation: "page-create", sleep, baseDelayMs: 0 }),
+    ).rejects.toMatchObject({ status: 503 });
+    expect(calls()).toBe(1);
   });
 });

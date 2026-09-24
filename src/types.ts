@@ -294,6 +294,10 @@ export interface RequestMetrics {
   requestsByOperation: Record<string, number>;
   readRetries: number;
   propertyUpdateRetries: number;
+  /** Retries of any operation after a 429 or 529; reads and property updates also count above. */
+  throttleRetries: number;
+  /** Milliseconds waited before those retries, from Retry-After or backoff. */
+  throttleWaitMs: number;
 }
 
 export interface RunMetrics extends RequestMetrics {

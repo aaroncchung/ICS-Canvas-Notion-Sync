@@ -1,4 +1,6 @@
-const RETRYABLE_STATUSES = new Set([429, 500, 502, 503, 504]);
+const RETRYABLE_STATUSES = new Set([429, 500, 502, 503, 504, 529]);
+/** The server rejected the request under load and asked for a later retry (rate_limited, service_overload). */
+const THROTTLE_STATUSES = new Set([429, 529]);
 const AMBIGUOUS_RESPONSE_STATUSES = new Set([500, 502, 503, 504]);
 const TRANSPORT_CODES = new Set([
   "ABORT_ERR",
@@ -34,6 +36,7 @@ export type NotionFailureClassification =
       kind: "definite-response";
       status: number;
       retryable: boolean;
+      throttled: boolean;
       ambiguousWrite: boolean;
     }
   | {
@@ -120,6 +123,7 @@ export function classifyNotionFailure(error: unknown): NotionFailureClassificati
         kind: "definite-response",
         status,
         retryable: RETRYABLE_STATUSES.has(status),
+        throttled: THROTTLE_STATUSES.has(status),
         ambiguousWrite: AMBIGUOUS_RESPONSE_STATUSES.has(status),
       };
     }
@@ -135,4 +139,34 @@ export function classifyNotionFailure(error: unknown): NotionFailureClassificati
     };
   }
   return { kind: "definite-client-error", retryable: false, ambiguousWrite: false };
+}
+
+function headerValue(headers: unknown, name: string): string | undefined {
+  const get = property(headers, "get");
+  if (typeof get === "function") {
+    try {
+      const value: unknown = get.call(headers, name);
+      return typeof value === "string" ? value : undefined;
+    } catch {
+      return;
+    }
+  }
+  if (!headers || typeof headers !== "object") return;
+  for (const key of Object.keys(headers)) {
+    if (key.toLowerCase() !== name) continue;
+    const value = property(headers, key);
+    if (typeof value === "string") return value;
+    if (Array.isArray(value) && typeof value[0] === "string") return value[0];
+  }
+  return;
+}
+
+/** The delay a response's Retry-After header asks for, as delta-seconds or an HTTP date. */
+export function retryAfterMs(error: unknown, now: number): number | undefined {
+  const response = boundedErrorChain(error).find((value) => responseStatus(value) !== undefined);
+  const header = headerValue(property(response, "headers"), "retry-after")?.trim();
+  if (!header) return;
+  if (/^\d+$/.test(header)) return Number(header) * 1000;
+  const date = Date.parse(header);
+  return Number.isNaN(date) ? undefined : Math.max(0, date - now);
 }
