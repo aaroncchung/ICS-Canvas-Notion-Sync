@@ -3,6 +3,7 @@ import { scan, serialExecutor, verifyAccount } from "./engine.ts";
 import {
   canvasOrigin,
   emptyState,
+  historyKey,
   newReport,
   note,
   notionId,
@@ -65,6 +66,8 @@ async function withdrawnSite(origin: string): Promise<Site | undefined> {
 let active: Scanning | undefined;
 /** Every scan that is queued or running, so Pause also reaches one that has not started yet. */
 const launched = new Set<AbortController>();
+/** The Canvas of every Settings request queued or being verified, each to be kept or given back. */
+const configuring: string[] = [];
 
 async function load(): Promise<State> {
   await ready;
@@ -318,6 +321,29 @@ function sameConnection(a: Connection, b: Connection): boolean {
     notionId(a.dataSourceId) === notionId(b.dataSourceId)
   );
 }
+/**
+ * The settings page gets host access for a Canvas before asking for it to be verified, and none is
+ * kept for a request that failed unless it is the saved Canvas.
+ */
+async function release(origin: string, current: State): Promise<void> {
+  if (origin !== current.config?.origin)
+    await chrome.permissions.remove({ origins: [`${origin}/*`] }).catch(() => undefined);
+}
+/**
+ * Another Canvas account, Canvas or data source starts over, except for the reopen history. That
+ * is kept for the connection it came from, so that verifying under the wrong account and then
+ * back under your own does not mark your reopened pages Done again.
+ */
+function switched(previous: State, config: Config): State {
+  const histories = { ...previous.histories };
+  if (previous.config && Object.keys(previous.acknowledged).length)
+    histories[historyKey(previous.config)] = previous.acknowledged;
+  const key = historyKey(config);
+  const state = { ...emptyState(), acknowledged: histories[key] ?? {} };
+  delete histories[key];
+  if (Object.keys(histories).length) state.histories = histories;
+  return state;
+}
 async function configure(raw: Record<string, unknown>): Promise<void> {
   const previous = await load();
   // The settings page asks for host access only for an origin that passes this same check.
@@ -329,10 +355,8 @@ async function configure(raw: Record<string, unknown>): Promise<void> {
     tried = candidate(origin, raw, previous);
     config = await verified(tried);
   } catch (error) {
-    // Host access granted for this attempt is not kept for a connection that did not verify,
-    // whether it was the form or the connection that failed.
-    if (origin !== previous.config?.origin)
-      await chrome.permissions.remove({ origins: [`${origin}/*`] }).catch(() => undefined);
+    // Whether it was the form or the connection that failed.
+    await release(origin, previous);
     // Proof that the saved connection itself no longer verifies counts as much here as it would
     // in a scan: automatic sync goes off until Settings verify again. A new token or data source
     // that fails says nothing about the saved one, which stays as it is.
@@ -353,11 +377,8 @@ async function configure(raw: Record<string, unknown>): Promise<void> {
     }
     throw error;
   }
-  const same =
-    previous.config?.origin === origin &&
-    previous.config.userId === config.userId &&
-    notionId(previous.config.dataSourceId) === notionId(config.dataSourceId);
-  const state = same ? previous : emptyState();
+  const same = previous.config !== undefined && historyKey(previous.config) === historyKey(config);
+  const state = same ? previous : switched(previous, config);
   state.config = config;
   state.previewReady = false;
   delete state.error;
@@ -394,9 +415,26 @@ async function handle(request: Record<string, unknown>): Promise<void> {
     for (const controller of launched) controller.abort();
     return serial(() => setEnabled(false));
   }
-  if (launched.size) throw new UserError("A scan is running. Wait for it to finish, or pause it.");
+  const origin =
+    (action === "configure" && canvasOrigin(scalarText(object(request.config).origin ?? ""))) || "";
+  if (launched.size) {
+    // Refused before configure() could give back the access the settings page just got. Given
+    // back before answering, as a queued removal would be lost with the worker. A request for the
+    // same Canvas queued before the scan, or sent once it ends, keeps that access or gives it back
+    // itself, so it is looked for both before and after reading which Canvas is saved.
+    if (origin && !configuring.includes(origin)) {
+      const current = await load();
+      if (!configuring.includes(origin)) await release(origin, current);
+    }
+    throw new UserError("A scan is running. Wait for it to finish, or pause it.");
+  }
   if (action === "preview" || action === "sync") return launch(action, true);
-  if (action === "configure") return serial(() => configure(object(request.config)));
+  if (action === "configure") {
+    configuring.push(origin);
+    return serial(() => configure(object(request.config))).finally(() => {
+      configuring.splice(configuring.indexOf(origin), 1);
+    });
+  }
   if (action === "enable") return serial(() => setEnabled(true));
   throw new UserError("Unknown action");
 }

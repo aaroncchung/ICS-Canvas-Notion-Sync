@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { Api, ApiError, NotionAccessLost, type SyncApi } from "../src/api.ts";
 import { scan, serialExecutor, WriteAccessDenied } from "../src/engine.ts";
 import {
+  canvasOrigin,
   completion,
   alreadyHandled,
   newReport,
@@ -204,6 +205,23 @@ describe("identity and completion", () => {
     expect(completion(submission({ user_id: BIG_ID }), "42", BIG_ID)?.eligible).toBe(true);
     // Parsed as a number this ID is rounded to a neighbor, so it must not match anything.
     expect(completion(submission({ user_id: Number(BIG_ID) }), "42", BIG_ID)).toBeUndefined();
+  });
+  it("accepts a bare HTTPS origin only when its host is a hostname", () => {
+    expect(canvasOrigin(" https://Canvas.School.edu/ ")).toBe("https://canvas.school.edu");
+    expect(canvasOrigin("https://canvas.test:8443")).toBe("https://canvas.test:8443");
+    expect(canvasOrigin("https://canvás.edu")).toMatch(/^https:\/\/xn--/);
+    for (const value of [
+      "https://*",
+      "https://*.edu",
+      "https://canvas.*.edu",
+      "https://can$vas.edu",
+      "https://canvas_school.edu",
+      "https://canvas.edu./",
+      "https://canvas.edu/courses",
+      "http://canvas.edu",
+      "https://user@canvas.edu",
+    ])
+      expect(canvasOrigin(value), value).toBeUndefined();
   });
 });
 
