@@ -10,7 +10,7 @@ import { DEFAULT_MISSING_EVIDENCE_MINIMUM_HOURS } from "../config.ts";
 import { CourseCatalog, type CourseResolution } from "./course-catalog.ts";
 import { buildCourseIndex, matchCourseFromIndex } from "./course-matcher.ts";
 import { buildAssignmentIndex, possibleDuplicateFromIndex } from "./duplicate-detector.ts";
-import { detectRemovals } from "./removal-detector.ts";
+import { clearSightedEvidence, detectRemovals, feedUids } from "./removal-detector.ts";
 import { decideAssignment, lifecycleUpdate } from "./assignment-decision.ts";
 import { feedWarnings } from "./feed-diagnostics.ts";
 export { feedWarnings, feedDiagnosticSummary } from "./feed-diagnostics.ts";
@@ -53,7 +53,12 @@ export function buildPlan(
   } = options;
   const timestamp = now.toISOString();
   const courseIndex = buildCourseIndex(courses, aliases);
-  const assignments = buildAssignmentIndex(existingAssignments, courseIndex, notionTimezone);
+  const assignments = buildAssignmentIndex(
+    existingAssignments,
+    courseIndex,
+    notionTimezone,
+    feedUids(feed),
+  );
   const catalog = new CourseCatalog(courseIndex, timestamp);
   const plan: SyncPlan = {
     coursesToCreate: [],
@@ -209,6 +214,14 @@ export function buildPlan(
   plan.warnings.push(...coursePlan.warnings);
 
   // Phase 3 sees the complete protection set; apply runs these writes only after active work succeeds.
+  const handledPages = new Set(
+    [...plan.assignmentsToUpdate, ...plan.assignmentsToRemove].map((value) => value.pageId),
+  );
+  plan.assignmentsMissingEvidenceToUpdate = clearSightedEvidence(
+    feed,
+    existingAssignments,
+    handledPages,
+  );
   if (!disableRemovals) {
     const removal = detectRemovals(feed, existingAssignments, {
       protectedPageIds: protectedPages,
@@ -217,7 +230,7 @@ export function buildPlan(
       timestamp,
       minimumMissingIntervalMs,
     });
-    plan.assignmentsMissingEvidenceToUpdate = removal.missingEvidenceUpdates;
+    plan.assignmentsMissingEvidenceToUpdate.push(...removal.missingEvidenceUpdates);
     plan.assignmentsToRemove.push(...removal.removals);
     plan.missingCandidatesObserved = removal.newlyObserved;
     plan.warnings.push(...removal.warnings);

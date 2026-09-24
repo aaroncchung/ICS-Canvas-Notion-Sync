@@ -1,9 +1,9 @@
-import { runMetrics } from "../../src/observability/run-report.ts";
+import { runMetrics, workCounts } from "../../src/observability/run-report.ts";
 import { describe, expect, it, vi } from "vitest";
 import { parseIcs } from "../../src/canvas/parse-ics.ts";
 import { DEFAULT_MISSING_EVIDENCE_MINIMUM_HOURS } from "../../src/config.ts";
 import { normalizeCourse } from "../../src/course-normalization.ts";
-import { createAssignment } from "../../src/notion/assignments.ts";
+import { createAssignment, readAssignments } from "../../src/notion/assignments.ts";
 import {
   descriptionIntegrityAuditDecision,
   managedDescriptionHash,
@@ -277,6 +277,30 @@ describe("plan-first reconciliation", () => {
     expect(result.assignmentsToCreate).toHaveLength(1);
     expect(runMetrics(result).descriptionIntegrityAuditsDue).toBe(1);
     expect(runMetrics(result).descriptionIntegrityAuditsDeferred).toBe(0);
+  });
+
+  it("keeps courses that share a term tag apart", () => {
+    // Without Canvas course IDs only the extracted code separates the two courses.
+    const value = parseIcs(
+      calendar(
+        [
+          event("UID:event-assignment-1\nDTSTART:20260720T200000Z\nSUMMARY:Lab 1 [SPR26 CS 101]"),
+          event(
+            "UID:event-assignment-2\nDTSTART:20260720T200000Z\nSUMMARY:Problem Set 1 [SPR26 MATH 2B]",
+          ),
+        ].join("\n"),
+      ),
+      assignmentTypeMatcher,
+    );
+    const result = planFeed(value, [], []);
+    expect(result.coursesToCreate.map((value) => [value.title, value.courseCode])).toEqual([
+      ["SPR26 CS 101", "CS 101"],
+      ["SPR26 MATH 2B", "MATH 2B"],
+    ]);
+    expect(result.assignmentsToCreate.map((value) => value.courseKey)).toEqual(
+      result.coursesToCreate.map((value) => value.key),
+    );
+    expect(result.warnings).toEqual([]);
   });
 
   it.each(["rich-first", "name-first"] as const)(
@@ -854,6 +878,69 @@ describe("plan-first reconciliation", () => {
     ).toBe(false);
   });
 
+  describe("same title and due date as an existing page", () => {
+    const quiz = (id: string) =>
+      source({
+        uid: `uid-${id}`,
+        title: "Reading Quiz",
+        canvasAssignmentId: id,
+        canvasUrl: `https://canvas.example.edu/courses/123/assignments/${id}`,
+      });
+    const existingQuiz = record({
+      uid: "uid-1",
+      title: "Reading Quiz",
+      canvasUrl: "https://canvas.example.edu/courses/123/assignments/1",
+    });
+    const withoutIds = (value: ExternalAssignment) => {
+      const copy = { ...value };
+      delete copy.canvasAssignmentId;
+      delete copy.canvasUrl;
+      return copy;
+    };
+
+    it("creates a second assignment while the first is still in the feed", () => {
+      for (let run = 1; run <= 2; run += 1) {
+        const result = plan([quiz("1"), quiz("2")], [existingQuiz]);
+        expect(
+          result.assignmentsToCreate.map((value) => value.source.uid),
+          `run ${run}`,
+        ).toEqual(["uid-2"]);
+        expect(result.warnings.map((warning) => warning.code)).not.toContain(
+          "possible-assignment-duplicate",
+        );
+      }
+    });
+
+    it("creates it without Canvas IDs because the existing UID is still in the feed", () => {
+      const existing = { ...existingQuiz };
+      delete existing.canvasUrl;
+      const result = plan([withoutIds(quiz("1")), withoutIds(quiz("2"))], [existing]);
+      expect(result.assignmentsToCreate.map((value) => value.source.uid)).toEqual(["uid-2"]);
+    });
+
+    it("creates a recreated assignment whose Canvas ID differs and lets the old page go", () => {
+      const result = plan([quiz("2")], [existingQuiz]);
+      expect(result.assignmentsToCreate.map((value) => value.source.uid)).toEqual(["uid-2"]);
+      expect(result.warnings.map((warning) => warning.code)).not.toContain(
+        "possible-assignment-duplicate",
+      );
+      expect(result.assignmentsMissingEvidenceToUpdate).toEqual([
+        expect.objectContaining({ pageId: existingQuiz.pageId, transition: "observed" }),
+      ]);
+    });
+
+    it("still holds a new UID back when only one side has a Canvas ID", () => {
+      const result = plan([withoutIds(quiz("2"))], [existingQuiz]);
+      expect(result.assignmentsToCreate).toEqual([]);
+      expect(result.warnings).toContainEqual(
+        expect.objectContaining({
+          code: "possible-assignment-duplicate",
+          details: [existingQuiz.pageId],
+        }),
+      );
+    });
+  });
+
   it("matches title and date when course evidence is compatible", () => {
     const incoming = source({ uid: "new-uid" });
     delete incoming.canvasAssignmentId;
@@ -1384,6 +1471,112 @@ describe("plan-first reconciliation", () => {
     expect(update?.properties).not.toHaveProperty("personalStatus");
     expect(update?.properties).not.toHaveProperty("priority");
     expect(update?.properties).not.toHaveProperty("assignmentType");
+  });
+
+  describe("a quarantined sighting between two absences", () => {
+    const valid = event(
+      "UID:uid-1\nDTSTART:20260720T200000Z\nSUMMARY:Homework 1 [EE 10]\nURL:https://canvas.example.edu/courses/123/assignments/456",
+    );
+    const other = event(
+      "UID:uid-other\nDTSTART:20260801T200000Z\nSUMMARY:Other [EE 10]\nURL:https://canvas.example.edu/courses/123/assignments/999",
+    );
+
+    it.each([
+      [
+        "malformed",
+        event(
+          "UID:uid-1\nDTSTART:20260720T200000Z\nURL:https://canvas.example.edu/courses/123/assignments/456",
+        ),
+      ],
+      ["duplicated", `${valid}\n${valid}`],
+    ])("resets missing evidence when the sighting is %s", async (_kind, sighting) => {
+      const gateway = new FakeGateway();
+      gateway.simulateDefaultTemplate = true;
+      gateway.seedPage("assignments", "assignment-page", {
+        Assignment: { title: [{ plain_text: "Homework 1" }] },
+        "Canvas UID": { rich_text: [{ plain_text: "uid-1" }] },
+        "Canvas URL": { url: "https://canvas.example.edu/courses/123/assignments/456" },
+        "Canvas Due Date": { date: { start: "2026-07-20T20:00:00.000Z" } },
+        Course: { relation: [{ id: "course-page" }] },
+        "Canvas State": { select: { name: "Active" } },
+      });
+      const start = Date.parse("2026-07-13T12:00:00Z");
+      const run = async (events: string, hoursLater: number) => {
+        const now = new Date(start + hoursLater * 60 * 60 * 1000);
+        const existing = await readAssignments(gateway, "assignments");
+        const value = parseIcs(calendar(events), assignmentTypeMatcher);
+        const result = planFeed(value, existing, [course], {}, "scheduled", now);
+        await applyPlan(gateway, config(), result, {
+          now: () => now,
+          templateWait: { attempts: 2, sleep: async () => {} },
+        });
+        return result;
+      };
+      const page = async () =>
+        (await readAssignments(gateway, "assignments")).find(
+          (value) => value.pageId === "assignment-page",
+        );
+
+      await run(other, 0);
+      expect(await page()).toMatchObject({ canvasMissingCount: 1 });
+
+      const second = await run(`${sighting}\n${other}`, 12);
+      expect(workCounts(second, undefined, true).missingCleared).toBe(1);
+      const afterSighting = await page();
+      expect(afterSighting?.canvasMissingSince).toBeUndefined();
+      expect(afterSighting?.canvasMissingCount).toBeUndefined();
+
+      const third = await run(other, 24);
+      expect(third.assignmentsToRemove).toEqual([]);
+      expect(third.assignmentsMissingEvidenceToUpdate).toEqual([
+        expect.objectContaining({
+          pageId: "assignment-page",
+          canvasMissingCount: 1,
+          transition: "observed",
+        }),
+      ]);
+      expect(await page()).toMatchObject({ removed: false, canvasState: "Active" });
+    });
+
+    it("clears evidence with removals disabled but leaves Removed pages alone", () => {
+      const evidence = { canvasMissingSince: "2026-07-12T00:00:00Z", canvasMissingCount: 1 };
+      const quarantined = ["uid-1", "uid-removed"];
+      const value = feed([], 2, {
+        diagnostics: {
+          sourceUids: quarantined,
+          quarantinedUids: quarantined,
+          events: quarantined.map((uid) => ({
+            kind: "malformed" as const,
+            reason: "malformed-assignment-event" as const,
+            uid,
+            indicators: [],
+          })),
+        },
+      });
+      const result = buildPlan(
+        value,
+        [
+          record(evidence),
+          record({
+            ...evidence,
+            pageId: "removed-page",
+            uid: "uid-removed",
+            removed: true,
+            canvasState: "Removed",
+          }),
+        ],
+        [course],
+        { disableRemovals: true, notionTimezone, now: new Date("2026-07-13T12:00:00Z") },
+      );
+      expect(result.assignmentsMissingEvidenceToUpdate).toEqual([
+        {
+          pageId: "assignment-page",
+          canvasMissingSince: null,
+          canvasMissingCount: null,
+          transition: "cleared",
+        },
+      ]);
+    });
   });
 
   it("requires both repeated scheduled evidence and the minimum interval", () => {

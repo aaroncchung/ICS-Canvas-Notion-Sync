@@ -23,6 +23,15 @@ export function hasAssignmentSignals(feed: AssignmentFeed): boolean {
   );
 }
 
+/** Every UID the feed shows, whether it was imported, cancelled, or quarantined. */
+export function feedUids(feed: AssignmentFeed): Set<string> {
+  return new Set([
+    ...feed.diagnostics.sourceUids,
+    ...feed.diagnostics.normalizedAssignmentUids,
+    ...feed.diagnostics.quarantinedUids,
+  ]);
+}
+
 function hasUnidentifiableAssignmentLikeEvent(feed: AssignmentFeed): boolean {
   return feed.diagnostics.events.some(
     (event) => (event.kind === "malformed" || event.kind === "suspicious") && !event.uid,
@@ -40,6 +49,33 @@ export function absenceRemovalSafe(feed: AssignmentFeed): boolean {
     feed.diagnostics.totalEvents < 1000 &&
     hasAssignmentSignals(feed)
   );
+}
+
+/**
+ * A sighting ends a run of absences even when the event could not be imported. Without this, a
+ * quarantined event would leave the evidence in place and the next absence would count as the
+ * second in a row. Pages that an update or removal already handles are skipped.
+ */
+export function clearSightedEvidence(
+  feed: AssignmentFeed,
+  existing: readonly AssignmentRecord[],
+  handledPageIds: ReadonlySet<string>,
+): AssignmentMissingEvidenceUpdate[] {
+  const present = feedUids(feed);
+  return existing
+    .filter(
+      (assignment) =>
+        !assignment.removed &&
+        present.has(assignment.uid) &&
+        !handledPageIds.has(assignment.pageId) &&
+        (Boolean(assignment.canvasMissingSince) || assignment.canvasMissingCount !== undefined),
+    )
+    .map((assignment) => ({
+      pageId: assignment.pageId,
+      canvasMissingSince: null,
+      canvasMissingCount: null,
+      transition: "cleared",
+    }));
 }
 
 export interface RemovalEvidenceResult {
@@ -98,11 +134,7 @@ export function detectRemovals(
   }
   if (result.warnings.length) return result;
 
-  const present = new Set([
-    ...feed.diagnostics.sourceUids,
-    ...feed.diagnostics.normalizedAssignmentUids,
-    ...feed.diagnostics.quarantinedUids,
-  ]);
+  const present = feedUids(feed);
   const nowMs = now.getTime();
   const earliest = nowMs - 30 * DAY;
   const latest = nowMs + 366 * DAY;

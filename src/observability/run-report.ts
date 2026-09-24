@@ -117,6 +117,7 @@ export function workCounts(
       case "assignment-missing-evidence-update":
         if (command.change.type === "evidence") {
           if (command.change.value.transition === "advanced") counts.missingAdvanced += 1;
+          else if (command.change.value.transition === "cleared") counts.missingCleared += 1;
         } else {
           const value = command.change.value;
           if (value.markRemoved) counts.removed += 1;
