@@ -1,4 +1,4 @@
-import { ApiError, type Page, type SyncApi } from "./api.ts";
+import { ApiError, ASSIGNMENTS_PER_REQUEST, type Page, type SyncApi } from "./api.ts";
 import {
   completion,
   alreadyHandled,
@@ -83,17 +83,125 @@ async function observe(
   report: Report,
   { api, progress }: ScanContext,
 ): Promise<Map<string, Observation>> {
-  const wanted = new Set(targets.map((target) => target.assignmentId));
+  // A page with an assignment URL names its course, so only that course is asked, and only for
+  // those assignments. The rest are looked for in every course's full listing.
+  const named = new Map<string, string[]>();
+  const unplaced = new Set<string>();
+  for (const { assignmentId, courseId } of targets) {
+    if (!courseId) unplaced.add(assignmentId);
+    else if (named.has(courseId)) named.get(courseId)!.push(assignmentId);
+    else named.set(courseId, [assignmentId]);
+  }
   const found = new Set<string>();
+  const missing = () => [...unplaced].some((assignmentId) => !found.has(assignmentId));
   const observations = new Map<string, Observation>();
-  const visited = new Set<string>();
+  /** Courses whose full listing was tried, or that could not be read, so the walk skips them. */
+  const listed = new Set<string>();
   let readAny = false;
+  let verified = false;
+  /**
+   * Canvas answers 401 as well as 403 for a course this user may not read, but 401 is also what an
+   * expired session looks like. Asking who is signed in tells them apart: it throws, ending the
+   * scan, unless the session is still good. Once it is confirmed, later 401s are taken as refusals,
+   * which only leaves pages unchecked; a write still checks the account again first.
+   */
+  const confirmAccount = async () => {
+    if (!verified) await verifyAccount(config, api);
+    verified = true;
+  };
   /** Whether some course listing or course was tried and could not be read, for any reason. */
   let failedAny = false;
   let fault: UserError | undefined;
+  /** Reads one course's assignments, or with `ids` only those, keeping what is said of `wanted`. */
+  const read = (
+    courseId: string,
+    wanted: ReadonlySet<string>,
+    seen: Map<string, Observation | undefined>,
+    ids?: string[],
+  ) =>
+    pages(
+      (cursor) => api.assignments(courseId, cursor, ids),
+      (items) => {
+        for (const raw of items) {
+          const assignment = object(raw),
+            assignmentId = id(assignment.id);
+          if (
+            assignmentId &&
+            wanted.has(assignmentId) &&
+            id(assignment.course_id) === courseId &&
+            id(object(assignment.submission).assignment_id) === assignmentId
+          )
+            seen.set(
+              assignmentId,
+              completion(
+                assignment.submission,
+                courseId,
+                config.userId,
+                typeof assignment.name === "string" ? assignment.name : "",
+              ),
+            );
+        }
+      },
+    );
+  /**
+   * Keeps what one course showed, or notes why it could not be read and keeps none of it.
+   * Returns whether it was read.
+   */
+  const check = async (
+    courseId: string,
+    reading: (seen: Map<string, Observation | undefined>) => Promise<void>,
+  ): Promise<boolean> => {
+    const seen = new Map<string, Observation | undefined>();
+    try {
+      await reading(seen);
+    } catch (error) {
+      if (!confinedToCourse(error)) throw error;
+      const status = error instanceof ApiError ? error.status : 0;
+      if (status === 401) await confirmAccount();
+      const refused = [401, 403, 404].includes(status);
+      failedAny = true;
+      if (!refused) fault = error;
+      // A partly read course cannot prove coverage, so none of it is kept.
+      note(
+        report,
+        `Course ${courseId}`,
+        "unchecked",
+        `${refused ? "Not accessible" : "Could not be read"} (${error.message})`,
+      );
+      return false;
+    }
+    readAny = true;
+    for (const [assignmentId, observation] of seen) {
+      found.add(assignmentId);
+      if (observation) observations.set(assignmentId, observation);
+    }
+    return true;
+  };
+  for (const [index, [courseId, ids]] of [...named].entries()) {
+    progress(`Checking course ${index + 1} of ${named.size}`);
+    const wanted = new Set(ids);
+    const wasRead = await check(courseId, async (seen) => {
+      try {
+        for (let start = 0; start < ids.length; start += ASSIGNMENTS_PER_REQUEST)
+          await read(courseId, wanted, seen, ids.slice(start, start + ASSIGNMENTS_PER_REQUEST));
+      } catch (error) {
+        // Canvas refuses the whole request when one ID is not in this course, as when an
+        // assignment has moved. The full listing still holds the others, and any unplaced ones.
+        if (!(error instanceof ApiError) || error.status !== 400) throw error;
+        seen.clear();
+        listed.add(courseId);
+        await read(courseId, new Set([...ids, ...unplaced]), seen);
+      }
+    });
+    if (!wasRead) listed.add(courseId);
+  }
+  // Courses are listed only for pages that name none, and past courses only while one of those is
+  // still unaccounted for. When no course a page names could be read, as at the end of a term when
+  // every page still names last term's courses, the walk goes on until some course is read, so a
+  // Canvas that can still be read reports those pages as unchecked instead of failing the scan.
+  const walking = () => missing() || !readAny;
   for (const enrollment of ["active", "completed"] as const) {
-    // Past courses are read only while a tracked assignment is still unaccounted for.
-    if (found.size === wanted.size) break;
+    if (!walking()) break;
     progress(`Finding ${enrollment} courses`);
     const courses: string[] = [];
     try {
@@ -106,7 +214,7 @@ async function observe(
       // listing that keeps failing costs only them, not what the active courses already showed.
       if (enrollment === "active" || !confinedToCourse(error)) throw error;
       const status = error instanceof ApiError ? error.status : 0;
-      if (status === 401) await verifyAccount(config, api);
+      if (status === 401) await confirmAccount();
       // Still a fault if it turns out that no course was read at all.
       failedAny = true;
       if (![401, 403, 404].includes(status)) fault = error;
@@ -114,60 +222,11 @@ async function observe(
       break;
     }
     for (const [index, courseId] of courses.entries()) {
-      if (found.size === wanted.size) break;
-      if (visited.has(courseId)) continue;
-      visited.add(courseId);
+      if (!walking()) break;
+      if (listed.has(courseId)) continue;
+      listed.add(courseId);
       progress(`Checking ${enrollment} course ${index + 1} of ${courses.length}`);
-      const seen = new Map<string, Observation | undefined>();
-      try {
-        await pages(
-          (cursor) => api.assignments(courseId, cursor),
-          (items) => {
-            for (const raw of items) {
-              const assignment = object(raw),
-                assignmentId = id(assignment.id);
-              if (
-                assignmentId &&
-                wanted.has(assignmentId) &&
-                id(assignment.course_id) === courseId &&
-                id(object(assignment.submission).assignment_id) === assignmentId
-              )
-                seen.set(
-                  assignmentId,
-                  completion(
-                    assignment.submission,
-                    courseId,
-                    config.userId,
-                    typeof assignment.name === "string" ? assignment.name : "",
-                  ),
-                );
-            }
-          },
-        );
-      } catch (error) {
-        if (!confinedToCourse(error)) throw error;
-        const status = error instanceof ApiError ? error.status : 0;
-        // Canvas answers 401 as well as 403 for a course this user may not read, but 401 is also
-        // what an expired session looks like. Asking who is signed in tells them apart: it throws,
-        // ending the scan, unless the session is still good.
-        if (status === 401) await verifyAccount(config, api);
-        const refused = [401, 403, 404].includes(status);
-        failedAny = true;
-        if (!refused) fault = error;
-        // A partly read course cannot prove coverage, so none of it is kept.
-        note(
-          report,
-          `Course ${courseId}`,
-          "unchecked",
-          `${refused ? "Not accessible" : "Could not be read"} (${error.message})`,
-        );
-        continue;
-      }
-      readAny = true;
-      for (const [assignmentId, observation] of seen) {
-        found.add(assignmentId);
-        if (observation) observations.set(assignmentId, observation);
-      }
+      await check(courseId, (seen) => read(courseId, unplaced, seen));
     }
   }
   // One broken course does not hold back the rest. When none could be read, the fault is wider:
@@ -209,8 +268,6 @@ export async function scan(config: Config, report: Report, context: ScanContext)
     const key = targetKey(target);
     if (!observation) {
       record(report, target, "unchecked", "No accessible submission record");
-    } else if (target.courseId && observation.courseId !== target.courseId) {
-      record(report, target, "skipped", "Conflicting course identity");
     } else if (!sameTitle(target.title, observation.name)) {
       // Assignment IDs are only unique within one Canvas. The importer keeps the title equal to
       // the Canvas name, so a differing title means this page came from some other assignment:

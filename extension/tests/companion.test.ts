@@ -251,7 +251,7 @@ describe("scan", () => {
       progress: () => undefined,
     });
     expect(report.updated).toBe(1);
-    expect(api.assignments).toHaveBeenCalledWith(BIG_ID, undefined);
+    expect(api.assignments).toHaveBeenCalledWith(BIG_ID, undefined, undefined);
   });
   it("marks once, respects reopening, handles a new attempt, and leaves past courses alone", async () => {
     const { api, run, reopen, saveAcknowledged } = fixture();
@@ -306,7 +306,7 @@ describe("scan", () => {
           },
     );
     expect((await run()).updated).toBe(1);
-    expect(api.assignments).toHaveBeenCalledWith("42", "page2");
+    expect(api.assignments).toHaveBeenCalledWith("42", "page2", undefined);
   });
   it("preview does not write or consume completion history", async () => {
     const { api, run, acknowledged, saveAcknowledged } = fixture();
@@ -333,8 +333,19 @@ describe("scan", () => {
         target({ assignmentId: "3", conflict: true }),
       ],
     }));
-    expect((await run()).skipped).toBe(4);
+    // Assignment 123 is in course 42, so the course the page names does not have it.
+    expect(await run()).toMatchObject({ skipped: 3, unchecked: 1 });
+    expect(api.assignments).toHaveBeenCalledWith("99", undefined, ["123"]);
+    expect(api.courses).not.toHaveBeenCalled();
     expect(api.markDone).not.toHaveBeenCalled();
+  });
+  it("fails when Canvas refuses every course the pages name and every course it walks", async () => {
+    const { api, run } = fixture();
+    api.targets = vi.fn(async () => ({ items: [target({ courseId: "42" })] }));
+    api.assignments = vi.fn(async () => {
+      throw new ApiError("Canvas", 403);
+    });
+    await expect(run("preview")).rejects.toThrow("did not let any course be read");
   });
   it("retries a write that did not land on the next scan instead of parking the page", async () => {
     const { api, run, acknowledged } = fixture();
@@ -830,5 +841,189 @@ describe("HTTP boundary", () => {
     controller.abort();
     await expect(api.user()).rejects.not.toBeInstanceOf(ApiError);
     expect(fetcher).not.toHaveBeenCalled();
+  });
+});
+
+describe("Canvas requests per scan", () => {
+  const json = (data: unknown, status = 200) =>
+    new Response(JSON.stringify(data), {
+      status,
+      headers: { "Content-Type": "application/json" },
+    });
+  const options = (...names: string[]) => ({ options: names.map((name) => ({ name })) });
+  const schema = {
+    properties: {
+      Assignment: { type: "title" },
+      "Canvas UID": { type: "rich_text" },
+      "Canvas URL": { type: "url" },
+      "Imported From": { type: "select", select: options("Canvas ICS") },
+      "Removed from Canvas": { type: "checkbox" },
+      "Canvas State": { type: "select", select: options("Active", "Removed") },
+      "Personal Status": { type: "status", status: options("Done") },
+    },
+  };
+  /** A Notion page for assignment `assignmentId`, with an assignment URL when it names a course. */
+  function tracked(assignmentId: string, courseId?: string) {
+    const raw = page(
+      `event-assignment-${assignmentId}`,
+      courseId ? `${config.origin}/courses/${courseId}/assignments/${assignmentId}` : null,
+    );
+    raw.id = `page-${assignmentId}`;
+    raw.properties.Assignment.title = [{ plain_text: `Work ${assignmentId}` }];
+    return raw;
+  }
+  /**
+   * Canvas and Notion behind one fake fetcher, which records every Canvas course request. Like the
+   * live Canvas, assignment_ids[] answers 400 unless every ID is in that course, is asked for once,
+   * and fits on one page. A course in `refused` answers every request with that status.
+   */
+  function world(
+    courses: Record<"active" | "completed", Record<string, string[]>>,
+    pages: ReturnType<typeof tracked>[],
+    refused: Record<string, number> = {},
+  ) {
+    const requests: string[] = [];
+    let profiles = 0;
+    const held = { ...courses.completed, ...courses.active };
+    const fetcher = vi.fn<typeof fetch>(async (input) => {
+      const url = new URL(input instanceof Request ? input.url : input);
+      if (url.hostname === "api.notion.com") {
+        if (url.pathname.endsWith("/query")) return json({ results: pages, has_more: false });
+        if (url.pathname.startsWith("/v1/data_sources/")) return json(schema);
+        return json(pages.find((raw) => url.pathname === `/v1/pages/${raw.id}`));
+      }
+      if (url.pathname.endsWith("/profile")) {
+        profiles++;
+        return json({ id: "7" });
+      }
+      requests.push(decodeURIComponent(url.pathname + url.search));
+      if (url.pathname === "/api/v1/courses") {
+        const state = url.searchParams.get("enrollment_state") as "active" | "completed";
+        return json(Object.keys(courses[state]).map((id) => ({ id })));
+      }
+      const courseId = url.pathname.split("/")[4]!;
+      if (refused[courseId]) return json({ message: "unauthorized" }, refused[courseId]);
+      const ids = held[courseId] ?? [];
+      const asked = url.searchParams.getAll("assignment_ids[]");
+      if (
+        asked.length > Number(url.searchParams.get("per_page")) ||
+        new Set(asked).size !== asked.length ||
+        asked.some((id) => !ids.includes(id))
+      )
+        return json({ message: "Invalid assignment_ids" }, 400);
+      return json(
+        (asked.length ? asked : ids).map((id) => ({
+          id,
+          name: `Work ${id}`,
+          course_id: courseId,
+          submission: submission({ assignment_id: id }),
+        })),
+      );
+    });
+    const run = async (mode: Report["mode"] = "sync") => {
+      const report = newReport(mode, 0);
+      await scan(config, report, {
+        api: new Api(config, { fetcher, pause: async () => undefined }),
+        acknowledged: {},
+        saveAcknowledged: async () => undefined,
+        progress: () => undefined,
+      });
+      return report;
+    };
+    return { requests, run, profiles: () => profiles };
+  }
+  const narrowed = (courseId: string, ...ids: string[]) =>
+    `/api/v1/courses/${courseId}/assignments?${ids.map((id) => `assignment_ids[]=${id}&`).join("")}include[]=submission&per_page=100`;
+  const listing = (courseId: string) =>
+    `/api/v1/courses/${courseId}/assignments?include[]=submission&per_page=100`;
+  const coursesIn = (state: string) =>
+    `/api/v1/courses?enrollment_type=student&enrollment_state=${state}&per_page=100`;
+
+  it("asks each course a page names for just its tracked assignments, and lists no courses", async () => {
+    const { requests, run } = world(
+      { active: { "41": ["101"], "42": ["123", "124", "130"], "43": ["125"] }, completed: {} },
+      [tracked("123", "42"), tracked("124", "42"), tracked("125", "43")],
+    );
+    expect(await run()).toMatchObject({ updated: 3 });
+    expect(requests).toEqual([narrowed("42", "123", "124"), narrowed("43", "125")]);
+  });
+  it("walks every course only for the pages that name none", async () => {
+    const { requests, run } = world(
+      { active: { "41": ["101"], "42": ["123"], "43": [] }, completed: { "40": ["90"] } },
+      [tracked("123", "42"), tracked("101"), tracked("90")],
+    );
+    expect(await run()).toMatchObject({ updated: 3 });
+    expect(requests).toEqual([
+      narrowed("42", "123"),
+      coursesIn("active"),
+      listing("41"),
+      listing("42"),
+      listing("43"),
+      coursesIn("completed"),
+      listing("40"),
+    ]);
+  });
+  it("reads the whole course when Canvas refuses the narrowed request, and reports a moved assignment unchecked", async () => {
+    // Assignment 125 moved to course 43 since the page recorded course 42.
+    const { requests, run } = world(
+      { active: { "42": ["123", "124"], "43": ["125"] }, completed: {} },
+      [tracked("123", "42"), tracked("125", "42"), tracked("124")],
+    );
+    const report = await run();
+    expect(report).toMatchObject({ updated: 2, unchecked: 1, skipped: 0 });
+    expect(report.details).toContainEqual({
+      title: "Work 125",
+      outcome: "unchecked",
+      reason: "No accessible submission record",
+    });
+    // The full listing also found the page without a course, so no course listing was needed.
+    expect(requests).toEqual([narrowed("42", "123", "125"), listing("42")]);
+  });
+  it("splits more tracked assignments than fit on one page across requests", async () => {
+    const ids = Array.from({ length: 150 }, (_, index) => String(1000 + index));
+    const { requests, run } = world(
+      { active: { "42": ids }, completed: {} },
+      ids.map((id) => tracked(id, "42")),
+    );
+    expect(await run("preview")).toMatchObject({ eligible: 150 });
+    expect(requests).toEqual([
+      narrowed("42", ...ids.slice(0, 100)),
+      narrowed("42", ...ids.slice(100)),
+    ]);
+  });
+  it("rereads the whole course when a later chunk is refused after an earlier one was read", async () => {
+    // The last of 120 assignments moved to course 43, so only the second request is refused.
+    const ids = Array.from({ length: 120 }, (_, index) => String(1000 + index));
+    const { requests, run } = world(
+      { active: { "42": ids.slice(0, 119), "43": ids.slice(119) }, completed: {} },
+      ids.map((id) => tracked(id, "42")),
+    );
+    expect(await run("preview")).toMatchObject({ eligible: 119, unchecked: 1 });
+    expect(requests).toEqual([
+      narrowed("42", ...ids.slice(0, 100)),
+      narrowed("42", ...ids.slice(100)),
+      listing("42"),
+    ]);
+  });
+  it("reports pages unchecked when Canvas refuses every course they name but can read another", async () => {
+    // At a term boundary every page still names last term's courses, which Canvas now refuses.
+    const { requests, run, profiles } = world(
+      { active: { "40": ["91"], "41": ["101"], "42": ["102"] }, completed: {} },
+      [tracked("90", "39"), tracked("91", "40")],
+      { "39": 401, "40": 401 },
+    );
+    const report = await run("preview");
+    expect(report).toMatchObject({ unchecked: 2, eligible: 0 });
+    expect(report.details).toContainEqual(expect.objectContaining({ title: "Course 39" }));
+    expect(report.details).toContainEqual(expect.objectContaining({ title: "Course 40" }));
+    // The walk skips the refused course and stops at the first course it can read.
+    expect(requests).toEqual([
+      narrowed("39", "90"),
+      narrowed("40", "91"),
+      coursesIn("active"),
+      listing("41"),
+    ]);
+    // Once at the start of the scan, and once for the first 401, not again for the second.
+    expect(profiles()).toBe(2);
   });
 });
