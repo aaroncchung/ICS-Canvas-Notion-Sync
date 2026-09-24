@@ -59,7 +59,8 @@ export interface SyncApi {
   validateSchema(): Promise<void>;
   targets(cursor?: string): Promise<Page<Target>>;
   courses(enrollment: "active" | "completed", cursor?: string): Promise<Page<string>>;
-  assignments(courseId: string, cursor?: string): Promise<Page<unknown>>;
+  /** The course's assignments, or with `ids` only those, at most ASSIGNMENTS_PER_REQUEST of them. */
+  assignments(courseId: string, cursor?: string, ids?: readonly string[]): Promise<Page<unknown>>;
   target(pageId: string): Promise<Target | undefined>;
   markDone(pageId: string): Promise<void>;
 }
@@ -74,6 +75,11 @@ export interface ApiOptions {
 }
 const RETRIES = 2;
 const LONGEST_RETRY_WAIT = 20_000;
+/**
+ * The page size of an assignments request. Canvas answers 400 when a request names more
+ * assignment_ids[] than fit on one page, so it is also the most IDs one request may name.
+ */
+export const ASSIGNMENTS_PER_REQUEST = 100;
 export class Api implements SyncApi {
   private nextRequest = 0;
   private readonly config: Pick<Config, "origin" | "token" | "dataSourceId">;
@@ -330,14 +336,15 @@ export class Api implements SyncApi {
       }),
     };
   }
-  assignments(courseId: string, cursor?: string): Promise<Page<unknown>> {
+  assignments(courseId: string, cursor?: string, ids?: readonly string[]): Promise<Page<unknown>> {
     // This listing cannot leave out the description (Canvas ignores exclude_response_fields here),
-    // and the submissions listing that can does not carry the name the title check needs. Nor can
-    // it be narrowed with assignment_ids[]: Canvas answers 400 "Invalid assignment_ids" when any
-    // requested ID is not in this course (assignments_api_controller#get_assignments), and the
-    // pages hold no course ID, so every course would have to be asked for every tracked ID.
+    // and the submissions listing that can does not carry the name the title check needs. It can
+    // be narrowed with assignment_ids[], which returns the same records, but Canvas then answers
+    // 400 "Invalid assignment_ids" unless every ID is in this course, named once, and on one page
+    // (assignments_api_controller#get_assignments), so only IDs a page ties to this course fit.
+    const only = (ids ?? []).map((assignmentId) => `assignment_ids%5B%5D=${assignmentId}&`);
     return this.canvasList(
-      `/api/v1/courses/${courseId}/assignments?include%5B%5D=submission&per_page=100`,
+      `/api/v1/courses/${courseId}/assignments?${only.join("")}include%5B%5D=submission&per_page=${ASSIGNMENTS_PER_REQUEST}`,
       cursor,
     );
   }
