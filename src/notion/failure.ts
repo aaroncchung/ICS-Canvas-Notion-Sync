@@ -141,6 +141,8 @@ export function classifyNotionFailure(error: unknown): NotionFailureClassificati
   return { kind: "definite-client-error", retryable: false, ambiguousWrite: false };
 }
 
+// headerValue and retryAfterMs mirror getResponseHeader and Client.parseRetryAfterHeader in
+// @notionhq/client, which are not public API; revisit both when upgrading the SDK.
 function headerValue(headers: unknown, name: string): string | undefined {
   const get = property(headers, "get");
   if (typeof get === "function") {
@@ -167,6 +169,8 @@ export function retryAfterMs(error: unknown, now: number): number | undefined {
   const header = headerValue(property(response, "headers"), "retry-after")?.trim();
   if (!header) return;
   if (/^\d+$/.test(header)) return Number(header) * 1000;
+  // Date.parse also accepts numeric junk ("1.5" and "-5" read as dates in 2001), and a date at or
+  // before the local clock is skew; neither is a usable delay, so both fall back to backoff.
   const date = Date.parse(header);
-  return Number.isNaN(date) ? undefined : Math.max(0, date - now);
+  return date > now ? date - now : undefined;
 }

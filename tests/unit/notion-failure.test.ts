@@ -211,19 +211,39 @@ describe("Notion failure classification and retry policy", () => {
   it("falls back to exponential backoff when Retry-After is missing or malformed", async () => {
     const { client } = scriptedClient(
       { status: 429, code: "rate_limited", headers: { "retry-after": "soon" } },
+      { status: 429, code: "rate_limited", headers: { "retry-after": "1.5" } },
       { status: 429, code: "rate_limited" },
       { status: 200 },
     );
     const metrics = createRequestMetrics();
     const { waits, sleep } = recordedSleep();
     await withRetry(read(client), { operation: "read", metrics, sleep, baseDelayMs: 100 });
-    expect(waits).toHaveLength(2);
+    expect(waits).toHaveLength(3);
     expect(waits[0]).toBeGreaterThanOrEqual(100);
     expect(waits[0]).toBeLessThan(200);
     expect(waits[1]).toBeGreaterThanOrEqual(200);
     expect(waits[1]).toBeLessThan(300);
-    expect(metrics.throttleRetries).toBe(2);
-    expect(metrics.throttleWaitMs).toBe(waits[0]! + waits[1]!);
+    expect(waits[2]).toBeGreaterThanOrEqual(400);
+    expect(waits[2]).toBeLessThan(500);
+    expect(metrics.throttleRetries).toBe(3);
+    expect(metrics.throttleWaitMs).toBe(waits[0]! + waits[1]! + waits[2]!);
+  });
+
+  it("falls back to backoff when a Retry-After HTTP date is not after the local clock", async () => {
+    const now = Date.parse("2026-09-24T12:00:10Z");
+    const { client } = scriptedClient(
+      {
+        status: 429,
+        code: "rate_limited",
+        headers: { "retry-after": "Thu, 24 Sep 2026 12:00:05 GMT" },
+      },
+      { status: 200 },
+    );
+    const { waits, sleep } = recordedSleep();
+    await withRetry(read(client), { operation: "read", sleep, now: () => now, baseDelayMs: 100 });
+    expect(waits).toHaveLength(1);
+    expect(waits[0]).toBeGreaterThanOrEqual(100);
+    expect(waits[0]).toBeLessThan(200);
   });
 
   it("retries a 529 service_overload on a read", async () => {
