@@ -1,6 +1,6 @@
 # Scheduled health monitor
 
-This document is the authoritative policy for `.github/workflows/health-check.yml`, which runs `scripts/check-health.ts` every four hours. The checker reads only `sync.yml` runs with `event: schedule`; manual runs never improve or degrade scheduled health and cannot recover an incident. It needs no npm dependencies, so the workflow runs the TypeScript source directly on Node 24 without installing or building anything.
+This document is the authoritative policy for `.github/workflows/health-check.yml`, which is scheduled to run `scripts/check-health.ts` every four hours (see [Best-effort schedule](#best-effort-schedule) for what actually happens). The checker reads only `sync.yml` runs with `event: schedule`; manual runs never improve or degrade scheduled health and cannot recover an incident. It needs no npm dependencies, so the workflow runs the TypeScript source directly on Node 24 without installing or building anything.
 
 ## Run classification
 
@@ -12,15 +12,26 @@ The scheduled sync is unhealthy when any of these holds:
 
 - The workflow state is anything other than `active`. This alerts immediately and suppresses the other checks, because no scheduled run can start.
 - The three most recent completed scheduled runs are failures.
-- The latest scheduled success is 13 hours old or older (a 12-hour watchdog plus one hour of scheduler delay). With no scheduled success at all, the check is unhealthy from 14 hours after the workflow was last activated, where activation is the workflow's `updated_at` (falling back to `created_at`). `HEALTH_ACTIVATION_GRACE_HOURS` can set another positive number of hours.
+- The latest scheduled success is 24 hours old or older. The schedule section below explains why a day. With no scheduled success at all, the check is unhealthy from 14 hours after the workflow was last activated, where activation is the workflow's `updated_at` (falling back to `created_at`). `HEALTH_ACTIVATION_GRACE_HOURS` can set another positive number of hours.
 
 A scheduled run that is still active and was created within the previous two hours defers the no-success alert only; it never masks completed failures, and a run stuck in the queue for longer than two hours no longer defers anything.
+
+## Best-effort schedule
+
+GitHub runs scheduled workflows best effort. It delays them under load, most at the start of each hour, and sometimes drops them. The cron minutes therefore avoid `:00` and `:30`, but that cannot guarantee the timing. The run history from July to September 2026 shows what to expect:
+
+- `sync.yml` asks for six runs a day but ran about four. From mid-September they arrived at roughly 10:00–11:00, 17:10, 20:45, and 22:20 UTC; the 01:30 New York slot ran about 4.5 hours late, and two slots did not run at all.
+- The gap from one scheduled completion to the next start was up to 13.3 hours overnight, and 18.2 hours on 2026-08-26/27, when GitHub dropped four slots in a row.
+- If one run had failed, the longest gap between successes would have been 20.6 hours in September and 21.8 hours in late August.
+- `health-check.yml` asks for six runs a day (`47 */4 * * *` UTC) but ran about four, up to about 2.5 hours late; on 2026-09-22 it ran at 05:23, 13:39, 19:52, and 23:15 UTC.
+
+The 24-hour watchdog clears all of these, so a single failed or dropped run does not open the issue. The exception is a failure during a multi-slot outage like the one on 2026-08-27. Because the health check itself runs only every three to ten hours, the issue opens at the first check after the 24 hours have passed, not at the deadline itself.
 
 ## Stale listing verification
 
 GitHub's workflow-run history listing can intermittently return a stale but valid-looking page, days behind the real history, particularly when queried from inside Actions. That listing alone is therefore never the sole evidence for run history: the newer runs it omits can fake an alert by hiding a success, hide a real run of failures behind an older success, or hide the success that ends an incident. Whenever the workflow is active, every check also gathers runs from differently shaped queries:
 
-- the scheduled runs created in the last 15 hours (the 13-hour watchdog plus the two-hour active-run grace), using the `created` filter, and
+- the scheduled runs created in the last 26 hours (the 24-hour watchdog plus the two-hour active-run grace), using the `created` filter, and
 - the scheduled runs for each of the three newest default-branch commits, using the `head_sha` filter. Scheduled runs always check out the default branch, so these point queries reach recent runs without going through the history listing.
 
 All listings are merged by run id, keeping the newest attempt of a run seen twice, and health is assessed once, on the merged runs. The alerts, the issue's run table, and the recovery decision therefore all see the newest runs any source returned, and a healthy-looking listing gets no more trust than an unhealthy one. When verification returns a run newer than every run in the history listing, the check logs that the listing was stale. The extra reads cost a handful of requests per check at the four-hour cadence. A disabled workflow does not depend on the run listing and alerts without verification. A failed verification request fails the check without touching the issue, and the next scheduled check retries.

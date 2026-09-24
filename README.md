@@ -124,9 +124,9 @@ Add the two secrets, the three required data-source ID variables, and any option
 2. `dry-run`
 3. `sync`
 
-Scheduled runs execute at 01:30, 08:30, 12:30, 14:00, 15:30, and 17:30 in `America/New_York`. Manual runs can select any mode and disable removal detection. Concurrency prevents overlapping syncs.
+Scheduled runs are requested at 01:37, 08:37, 12:37, 14:13, 15:37, and 17:37 in `America/New_York`. GitHub treats schedules as best effort: in July to September 2026 it ran the sync about four times a day, often hours late, and skipped the remaining slots, so expect roughly four syncs a day at irregular times. Manual runs can select any mode and disable removal detection. Concurrency prevents overlapping syncs.
 
-The health workflow runs every four hours and keeps one `Canvas–Notion sync is unhealthy` issue. It opens or reopens that issue after three consecutive scheduled failures, when no scheduled run has succeeded within 13 hours, or when the sync workflow is disabled, and closes it once a newer scheduled run succeeds. Manual runs do not affect scheduled health. See [docs/health-monitor.md](docs/health-monitor.md) for the authoritative run classification, timing, issue lifecycle, and privacy policy.
+The health workflow is requested every four hours (in practice about four times a day) and keeps one `Canvas–Notion sync is unhealthy` issue. It opens or reopens that issue after three consecutive scheduled failures, when no scheduled run has succeeded within 24 hours, or when the sync workflow is disabled, and closes it once a newer scheduled run succeeds. Manual runs do not affect scheduled health. See [docs/health-monitor.md](docs/health-monitor.md) for the authoritative run classification, timing, issue lifecycle, and privacy policy.
 
 In GitHub Actions, fatal application failures produce sanitized `::error::` annotations and meaningful suspicious diagnostics produce a sanitized `::warning::`; ordinary ignored calendar events do not produce annotations. The job summary records mode and trigger, applied or proposed assignment and course counts, feed diagnostic counts, Notion request/retry metrics, removal-inference state, and a one-line failure summary without stacks. Summary-file I/O is best-effort: an append failure emits a sanitized warning but cannot change the synchronization result or exit status, and workflow annotations are still attempted. Normal logs retain sanitized diagnostic stacks. CI validates workflow syntax and expressions with pinned actionlint v1.7.12. GitHub-maintained actions are pinned to immutable commits. Scheduled workflows skip the build entirely: the sync job installs only runtime dependencies (cached by `package-lock.json`) and the health job installs nothing.
 
@@ -195,4 +195,4 @@ Common failures:
 - **Unexpected empty feed:** no removals occur. Check Canvas feed availability and privacy settings.
 - **Rate limiting/transient errors:** 429 responses use bounded backoff. Ambiguous 5xx responses are retried only for safe reads and deterministic updates; creates and appends use reconciliation.
 
-CI runs `npm audit`, and Dependabot monitors npm and GitHub Actions dependencies.
+CI fails on advisories in runtime dependencies (`npm audit --omit=dev`) and reports advisories in development tools without failing (`npm audit`). Dependabot monitors npm and GitHub Actions dependencies.

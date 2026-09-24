@@ -44,7 +44,11 @@ jobs:
         run: npm run check:types-and-build
       - name: Run unit and integration tests
         run: npm test
-      - name: Audit dependencies
+      # Only runtime advisories block; a dev-tool advisory would otherwise fail every PR.
+      - name: Audit runtime dependencies
+        run: npm audit --omit=dev
+      - name: Audit all dependencies (advisory)
+        continue-on-error: true
         run: npm audit
 
   # Mirrors the scheduled workflows: runtime dependencies only, TypeScript sources run by Node

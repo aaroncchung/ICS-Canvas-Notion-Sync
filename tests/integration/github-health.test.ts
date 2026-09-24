@@ -275,10 +275,10 @@ describe("GitHub health issue lifecycle", () => {
   });
 
   it("treats a check landing exactly on the watchdog or activation deadline as unhealthy", () => {
-    const exactly13HoursAgo = new Date(now.getTime() - 13 * 60 * 60 * 1000).toISOString();
-    const success = [run(10, "success", exactly13HoursAgo)];
+    const exactly24HoursAgo = new Date(now.getTime() - 24 * 60 * 60 * 1000).toISOString();
+    const success = [run(10, "success", exactly24HoursAgo)];
     expect(assessScheduledHealth(success, activeWorkflow, now).reasons).toEqual([
-      "No scheduled run has succeeded in the last 13 hours.",
+      "No scheduled run has succeeded in the last 24 hours.",
     ]);
     const justInside = new Date(now.getTime() - 1);
     expect(assessScheduledHealth(success, activeWorkflow, justInside).reasons).toEqual([]);
@@ -362,7 +362,7 @@ describe("stale run listing verification", () => {
       issues: [openIssue(oldSuccesses, "closed")],
     });
     const assessment = await monitorScheduledHealth(github.request, { now });
-    expect(assessment.reasons).toEqual(["No scheduled run has succeeded in the last 13 hours."]);
+    expect(assessment.reasons).toEqual(["No scheduled run has succeeded in the last 24 hours."]);
     expect(assessment.staleListing).toBeUndefined();
     expect(github.issues[0]?.state).toBe("open");
   });
@@ -372,7 +372,7 @@ describe("stale run listing verification", () => {
     const assessment = await monitorScheduledHealth(github.request, { now });
     expect(assessment.reasons).toEqual([
       "The three most recent completed scheduled runs failed.",
-      "No scheduled run has succeeded in the last 13 hours.",
+      "No scheduled run has succeeded in the last 24 hours.",
     ]);
     expect(github.issues[0]?.body).toContain("https://github.test/runs/3");
   });
@@ -475,7 +475,7 @@ describe("stale run listing verification", () => {
     };
     await monitorScheduledHealth(recording, { now });
     expect(paths.slice(3, 7)).toEqual([
-      "/actions/workflows/sync.yml/runs?event=schedule&per_page=100&created=%3E%3D2026-07-12T21%3A00%3A00Z",
+      "/actions/workflows/sync.yml/runs?event=schedule&per_page=100&created=%3E%3D2026-07-12T10%3A00%3A00Z",
       "/commits?per_page=3",
       "/actions/workflows/sync.yml/runs?event=schedule&per_page=100&head_sha=abc",
       "/actions/workflows/sync.yml/runs?event=schedule&per_page=100&head_sha=def",
