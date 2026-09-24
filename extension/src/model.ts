@@ -60,6 +60,8 @@ export interface State {
   acknowledged: Record<string, string>;
   previewReady: boolean;
   nextScanAt: number;
+  /** Scans that failed in a row since the last one that finished, which spaces out the next. */
+  failures?: number;
   error?: string;
 }
 export const emptyState = (): State => ({

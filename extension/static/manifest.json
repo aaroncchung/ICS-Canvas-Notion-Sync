@@ -4,7 +4,7 @@
   "version": "1.0.0",
   "minimum_chrome_version": "120",
   "description": "Mark tracked Notion assignments Done using your signed-in Canvas session.",
-  "permissions": ["storage", "alarms"],
+  "permissions": ["storage", "alarms", "scripting"],
   "host_permissions": ["https://api.notion.com/*"],
   "optional_host_permissions": ["https://*/*"],
   "background": { "service_worker": "worker.js", "type": "module" },

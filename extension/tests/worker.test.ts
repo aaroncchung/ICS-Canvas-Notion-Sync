@@ -11,12 +11,15 @@ const config = {
 };
 const extensionOrigin = "chrome-extension://test-extension/";
 type MessageListener = Parameters<typeof chrome.runtime.onMessage.addListener>[0];
-type UpdatedListener = Parameters<typeof chrome.tabs.onUpdated.addListener>[0];
 type AlarmListener = Parameters<typeof chrome.alarms.onAlarm.addListener>[0];
 type PermissionsListener = Parameters<typeof chrome.permissions.onRemoved.addListener>[0];
+type Script = chrome.scripting.RegisteredContentScript;
 let listener: MessageListener;
-let updated: UpdatedListener;
 let alarm: AlarmListener;
+/** The one pending alarm, as Chrome would keep it. */
+let armed: chrome.alarms.AlarmCreateInfo | undefined;
+/** Content scripts registered with Chrome, which outlive the worker. */
+let scripts: Script[];
 let accessRemoved: PermissionsListener;
 let accessAdded: PermissionsListener;
 let stored: State;
@@ -27,6 +30,8 @@ let notion: "up" | "busy" | "read-only" | "revoked" | "unshared";
 /** An option the Notion schema no longer offers, or nothing. */
 let schemaWithout: string;
 let activeTabUrl: string | undefined;
+/** Every open tab, for a query by URL, which Chrome answers only for sites with host access. */
+let openTabs: chrome.tabs.Tab[];
 let hostAccess: boolean;
 let notionAccess: boolean;
 let revoke: ReturnType<typeof vi.fn>;
@@ -61,6 +66,33 @@ function ask(
     );
   });
 }
+/**
+ * The Canvas page script reporting that its page loaded, came into view, or regained focus. The
+ * worker's answer, once it has come, is on the returned function.
+ */
+function visit(url = `${config.origin}/courses/42`) {
+  const respond = vi.fn();
+  const tab = { id: 1, url } as chrome.tabs.Tab;
+  expect(listener({ action: "wake" }, { id: "test-extension", url, tab }, respond)).toBe(true);
+  return respond;
+}
+/** How long the last scan held the next automatic one back, counted from when it finished. */
+const wait = () => stored.nextScanAt - Date.parse(stored.report?.finishedAt ?? "");
+/** Runs the clock up to the moment the next automatic scan is due. */
+const untilDue = () => vi.advanceTimersByTimeAsync(Math.max(0, stored.nextScanAt - Date.now()));
+/** Scans that got as far as reading Notion. */
+const scans = () => requests.filter((r) => r.url.endsWith("/query")).length;
+/** The pending alarm going off, which spends it. */
+function ring() {
+  armed = undefined;
+  alarm({ name: "tick", scheduledTime: Date.now(), persistAcrossSessions: true });
+}
+/** Loads the worker afresh, as Chrome does when it starts the worker again. */
+async function restart() {
+  vi.resetModules();
+  await import("../src/worker.ts");
+  await vi.advanceTimersByTimeAsync(1_000);
+}
 beforeEach(async () => {
   vi.useFakeTimers();
   vi.resetModules();
@@ -71,11 +103,14 @@ beforeEach(async () => {
   notion = "up";
   schemaWithout = "";
   activeTabUrl = config.origin;
+  openTabs = [];
   hostAccess = true;
   notionAccess = true;
   revoke = vi.fn(async () => true);
   requests = [];
   access = vi.fn(async () => undefined);
+  armed = undefined;
+  scripts = [];
   vi.stubGlobal("chrome", {
     storage: {
       local: {
@@ -98,23 +133,56 @@ beforeEach(async () => {
       onStartup: { addListener: vi.fn() },
       onInstalled: { addListener: vi.fn() },
     },
+    // No listeners here: tab and window events would wake the worker for every site.
     tabs: {
-      query: async () => [{ url: activeTabUrl }],
-      onUpdated: {
-        addListener: (fn: UpdatedListener) => {
-          updated = fn;
-        },
-      },
-      onActivated: { addListener: vi.fn() },
+      query: async ({ url }: chrome.tabs.QueryInfo) =>
+        url
+          ? openTabs.filter((tab) =>
+              [url].flat().some((pattern) => tab.url?.startsWith(pattern.replace(/\*$/, ""))),
+            )
+          : [{ url: activeTabUrl }],
     },
-    windows: {
-      getLastFocused: async () => ({ focused: true, id: 1 }),
-      onFocusChanged: { addListener: vi.fn() },
+    windows: { getLastFocused: async () => ({ focused: true, id: 1 }) },
+    scripting: {
+      getRegisteredContentScripts: async ({ ids }: { ids: string[] }) =>
+        structuredClone(scripts.filter((script) => ids.includes(script.id))),
+      // Chrome refuses an ID it already has, or one it does not have, as these do.
+      registerContentScripts: vi.fn(async (added: Script[]) => {
+        if (added.some(({ id }) => scripts.some((script) => script.id === id)))
+          throw new Error("Duplicate script ID");
+        scripts.push(...structuredClone(added));
+      }),
+      updateContentScripts: vi.fn(async (changed: Script[]) => {
+        if (changed.some(({ id }) => !scripts.some((script) => script.id === id)))
+          throw new Error("Nonexistent script ID");
+        scripts = scripts.map((script) => changed.find(({ id }) => id === script.id) ?? script);
+      }),
+      // A function runs here, beside whatever a test left of the page script.
+      executeScript: vi.fn(async (injection: chrome.scripting.ScriptInjection<[], void>) => {
+        if ("func" in injection) injection.func?.();
+        return [];
+      }),
+      unregisterContentScripts: vi.fn(async ({ ids }: { ids: string[] }) => {
+        if (ids.some((id) => !scripts.some((script) => script.id === id)))
+          throw new Error("Nonexistent script ID");
+        scripts = scripts.filter((script) => !ids.includes(script.id));
+      }),
     },
     alarms: {
-      get: async () => undefined,
-      create: vi.fn(async () => undefined),
-      clear: vi.fn(async () => true),
+      get: async (name: string) =>
+        armed && {
+          name,
+          scheduledTime: armed.when ?? Date.now(),
+          periodInMinutes: armed.periodInMinutes,
+        },
+      create: vi.fn(async (_name: string, info: chrome.alarms.AlarmCreateInfo) => {
+        armed = { ...info };
+      }),
+      clear: vi.fn(async () => {
+        const cleared = Boolean(armed);
+        armed = undefined;
+        return cleared;
+      }),
       onAlarm: {
         addListener: (fn: AlarmListener) => {
           alarm = fn;
@@ -217,20 +285,25 @@ describe("worker orchestration", () => {
     expect(respond).not.toHaveBeenCalled();
   });
   it("coalesces page navigation events and preserves manual reopening on later visits", async () => {
-    const tab = { url: config.origin } as chrome.tabs.Tab;
-    updated(1, { status: "complete" }, tab);
-    updated(2, { status: "complete" }, tab);
+    visit();
+    visit();
     await vi.advanceTimersByTimeAsync(20_000);
     await ask("state");
     expect(requests.filter((r) => r.method === "PATCH")).toHaveLength(1);
     expect(stored.report?.updated).toBe(1);
     notionStatus = "In progress";
-    updated(1, { status: "complete" }, tab);
+    visit();
     await vi.advanceTimersByTimeAsync(20_000);
     expect(requests.filter((r) => r.method === "PATCH")).toHaveLength(1);
+    // Five minutes no longer brings the next scan; fifteen do.
     await vi.advanceTimersByTimeAsync(5 * 60_000);
-    alarm({ name: "tick", scheduledTime: Date.now(), persistAcrossSessions: true });
+    visit();
     await vi.advanceTimersByTimeAsync(20_000);
+    expect(scans()).toBe(1);
+    await vi.advanceTimersByTimeAsync(10 * 60_000);
+    ring();
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(scans()).toBe(2);
     expect(notionStatus).toBe("In progress");
     expect(requests.filter((r) => r.method === "PATCH")).toHaveLength(1);
   });
@@ -246,32 +319,31 @@ describe("worker orchestration", () => {
   });
   it("turns automatic sync off when the signed-in Canvas account changes", async () => {
     userId = 8;
-    updated(1, { status: "complete" }, { url: config.origin } as chrome.tabs.Tab);
+    visit();
     await vi.advanceTimersByTimeAsync(20_000);
     expect(stored.config?.enabled).toBe(false);
     expect(stored.error).toContain("account changed");
     expect(requests.some((r) => r.method === "PATCH")).toBe(false);
   });
   it("stays enabled through an expired session and an outage, then syncs by itself", async () => {
-    const tab = { url: config.origin } as chrome.tabs.Tab;
     for (const failure of ["signed-out", "offline"] as const) {
       canvas = failure;
-      updated(1, { status: "complete" }, tab);
-      // Longer than the retries plus the one-minute cooldown after a failed scan.
-      await vi.advanceTimersByTimeAsync(70_000);
+      visit();
+      await vi.advanceTimersByTimeAsync(20_000);
       expect(stored.config?.enabled).toBe(true);
       expect(stored.error).toContain("Canvas");
       expect(stored.report?.failed).toBe(1);
+      await untilDue();
     }
     canvas = "up";
-    updated(1, { status: "complete" }, tab);
+    visit();
     await vi.advanceTimersByTimeAsync(20_000);
     expect(stored.error).toBeUndefined();
     expect(stored.report?.updated).toBe(1);
   });
   it("turns automatic sync off when the integration may read but not update", async () => {
     notion = "read-only";
-    updated(1, { status: "complete" }, { url: config.origin } as chrome.tabs.Tab);
+    visit();
     await vi.advanceTimersByTimeAsync(20_000);
     expect(stored.error).toContain("Update content");
     expect(stored.config?.enabled).toBe(false);
@@ -279,14 +351,13 @@ describe("worker orchestration", () => {
     expect(requests.filter((r) => r.method === "PATCH")).toHaveLength(1);
   });
   it("turns automatic sync off when the token is revoked or the data source is no longer shared", async () => {
-    const tab = { url: config.origin } as chrome.tabs.Tab;
     for (const [failure, text] of [
       ["revoked", "token"],
       ["unshared", "Share it with the integration"],
     ] as const) {
       stored = { ...emptyState(), config: { ...config }, previewReady: true };
       notion = failure;
-      updated(1, { status: "complete" }, tab);
+      visit();
       await vi.advanceTimersByTimeAsync(20_000);
       expect(stored.config?.enabled).toBe(false);
       expect(stored.previewReady).toBe(false);
@@ -296,14 +367,13 @@ describe("worker orchestration", () => {
     expect(requests.some((r) => r.method === "PATCH")).toBe(false);
   });
   it("turns automatic sync off when a required select option is renamed or removed", async () => {
-    const tab = { url: config.origin } as chrome.tabs.Tab;
     for (const [option, text] of [
       ["Canvas ICS", "Imported From needs the Canvas ICS option"],
       ["Removed", "Canvas State needs the Removed option"],
     ] as const) {
       stored = { ...emptyState(), config: { ...config }, previewReady: true };
       schemaWithout = option;
-      updated(1, { status: "complete" }, tab);
+      visit();
       await vi.advanceTimersByTimeAsync(20_000);
       expect(stored.config?.enabled).toBe(false);
       expect(stored.previewReady).toBe(false);
@@ -313,9 +383,8 @@ describe("worker orchestration", () => {
     expect(requests.some((r) => r.url.endsWith("/query"))).toBe(false);
   });
   it("stays away for as long as a throttling service asks, up to an hour", async () => {
-    const tab = { url: config.origin } as chrome.tabs.Tab;
     notion = "busy";
-    updated(1, { status: "complete" }, tab);
+    visit();
     await vi.advanceTimersByTimeAsync(20_000);
     expect(stored.error).toContain("HTTP 429");
     expect(stored.config?.enabled).toBe(true);
@@ -323,32 +392,31 @@ describe("worker orchestration", () => {
     const before = requests.length;
     // Past the usual one-minute wait after a failure, but inside the ten minutes Notion asked for.
     await vi.advanceTimersByTimeAsync(5 * 60_000);
-    updated(1, { status: "complete" }, tab);
+    visit();
     await vi.advanceTimersByTimeAsync(20_000);
     expect(requests).toHaveLength(before);
     await vi.advanceTimersByTimeAsync(5 * 60_000);
-    updated(1, { status: "complete" }, tab);
+    visit();
     await vi.advanceTimersByTimeAsync(20_000);
     expect(stored.report?.updated).toBe(1);
   });
   it("names withdrawn host access instead of reporting a dead network, and recovers", async () => {
-    const tab = { url: config.origin } as chrome.tabs.Tab;
     hostAccess = false;
-    updated(1, { status: "complete" }, tab);
+    visit();
     await vi.advanceTimersByTimeAsync(20_000);
     expect(stored.error).toContain("Canvas host access was removed");
     expect(stored.config?.enabled).toBe(true);
     expect(requests).toEqual([]);
     hostAccess = true;
     notionAccess = false;
-    await vi.advanceTimersByTimeAsync(60_000);
-    updated(1, { status: "complete" }, tab);
+    await untilDue();
+    visit();
     await vi.advanceTimersByTimeAsync(20_000);
     expect(stored.error).toContain("Notion host access was removed");
     expect(requests).toEqual([]);
     notionAccess = true;
-    await vi.advanceTimersByTimeAsync(60_000);
-    updated(1, { status: "complete" }, tab);
+    await untilDue();
+    visit();
     await vi.advanceTimersByTimeAsync(20_000);
     expect(stored.error).toBeUndefined();
     expect(stored.report?.updated).toBe(1);
@@ -357,8 +425,9 @@ describe("worker orchestration", () => {
     // Without host access for Canvas, Chrome no longer tells this extension the tab's address.
     hostAccess = false;
     activeTabUrl = undefined;
-    updated(1, { status: "complete" }, {} as chrome.tabs.Tab);
-    alarm({ name: "tick", scheduledTime: Date.now(), persistAcrossSessions: true });
+    // Nor does Chrome run the Canvas page script there, but a wake that still arrived finds no tab.
+    visit();
+    ring();
     await vi.advanceTimersByTimeAsync(20_000);
     expect(stored.error).toBeUndefined();
     accessRemoved({ origins: [`${config.origin}/*`] });
@@ -402,16 +471,14 @@ describe("worker orchestration", () => {
   });
   it("notices access withdrawn while the worker was not running", async () => {
     hostAccess = false;
-    vi.resetModules();
-    await import("../src/worker.ts");
-    await vi.advanceTimersByTimeAsync(1_000);
+    await restart();
     expect(stored.error).toContain("Canvas host access was removed");
     expect(stored.config?.enabled).toBe(true);
     expect(requests).toEqual([]);
   });
   it("clears a failed scan's message once Enable sync has checked the connection", async () => {
     canvas = "signed-out";
-    updated(1, { status: "complete" }, { url: config.origin } as chrome.tabs.Tab);
+    visit();
     await vi.advanceTimersByTimeAsync(70_000);
     expect(stored.error).toContain("HTTP 401");
     await ask("pause");
@@ -453,11 +520,10 @@ describe("worker orchestration", () => {
     access.mockRejectedValue(
       new Error("This StorageArea is not available for setting access level"),
     );
-    vi.mocked(chrome.alarms.create).mockClear();
-    vi.resetModules();
-    await import("../src/worker.ts");
+    scripts = [];
+    await restart();
     expect((await ask("state")).ok).toBe(true);
-    expect(chrome.alarms.create).toHaveBeenCalledWith("tick", { periodInMinutes: 1 });
+    expect(scripts.map((script) => script.matches)).toEqual([[`${config.origin}/*`]]);
     expect((await ask("sync")).ok).toBe(true);
     await vi.advanceTimersByTimeAsync(20_000);
     expect(stored.report?.updated).toBe(1);
@@ -473,13 +539,206 @@ describe("worker orchestration", () => {
   });
   it("scans on a timer only while Canvas is the visible tab", async () => {
     activeTabUrl = "https://example.com/";
-    alarm({ name: "tick", scheduledTime: Date.now(), persistAcrossSessions: true });
+    ring();
     await vi.advanceTimersByTimeAsync(20_000);
     expect(requests).toEqual([]);
     activeTabUrl = `${config.origin}/courses/42`;
-    alarm({ name: "tick", scheduledTime: Date.now(), persistAcrossSessions: true });
+    ring();
     await vi.advanceTimersByTimeAsync(20_000);
     expect(stored.report?.updated).toBe(1);
+  });
+});
+
+describe("scheduling", () => {
+  /** Advances past the time a scan takes, so it has finished and saved. */
+  const settle = () => vi.advanceTimersByTimeAsync(20_000);
+  it("wakes the worker only when a scan is due, instead of every minute", async () => {
+    // Nothing has scanned yet, so the first scan waits for a Canvas page rather than an alarm.
+    expect(armed).toBeUndefined();
+    expect(chrome.alarms.create).not.toHaveBeenCalled();
+    visit();
+    await settle();
+    expect(stored.report?.updated).toBe(1);
+    expect(wait()).toBe(15 * 60_000);
+    expect(armed).toEqual({ when: stored.nextScanAt });
+    // Canvas is out of sight when the alarm rings: no scan, and no alarm after it.
+    activeTabUrl = "https://example.com/";
+    await untilDue();
+    ring();
+    await settle();
+    expect(scans()).toBe(1);
+    expect(armed).toBeUndefined();
+    // Nor does a fresh start arm one for the due scan, since it would ring on every start.
+    await restart();
+    expect(armed).toBeUndefined();
+    // The Canvas page coming into view starts that scan, which arms the alarm again.
+    activeTabUrl = config.origin;
+    visit();
+    await settle();
+    expect(scans()).toBe(2);
+    expect(armed).toEqual({ when: stored.nextScanAt });
+    // An alarm Chrome lost while the next scan is still ahead comes back from the saved state.
+    armed = undefined;
+    await restart();
+    expect(armed).toEqual({ when: stored.nextScanAt });
+    expect(chrome.alarms.create).not.toHaveBeenCalledWith("tick", { periodInMinutes: 1 });
+  });
+  it("replaces the repeating alarm an earlier version left", async () => {
+    armed = { periodInMinutes: 1 };
+    await restart();
+    // The scan is already due, so the one-shot replacement rings once and is spent.
+    expect(armed).toEqual({ when: expect.any(Number) as number });
+    stored.config!.enabled = false;
+    armed = { periodInMinutes: 1 };
+    await restart();
+    expect(armed).toBeUndefined();
+    expect(scripts).toEqual([]);
+  });
+  it("listens only to a Canvas page that is in view", async () => {
+    visit("https://example.com/");
+    await settle();
+    expect(requests).toEqual([]);
+    activeTabUrl = "https://example.com/";
+    visit();
+    await settle();
+    expect(requests).toEqual([]);
+    activeTabUrl = config.origin;
+    visit();
+    await settle();
+    expect(stored.report?.updated).toBe(1);
+  });
+  it("keeps no wakeup while sync is off, and restores both with Enable sync", async () => {
+    expect(scripts).toEqual([
+      {
+        id: "canvas-watcher",
+        matches: [`${config.origin}/*`],
+        js: ["canvas.js"],
+        runAt: "document_idle",
+      },
+    ]);
+    visit();
+    await settle();
+    expect(armed).toBeDefined();
+    await ask("pause");
+    expect(armed).toBeUndefined();
+    expect(scripts).toEqual([]);
+    // A Canvas page that reports in view anyway starts nothing.
+    await untilDue();
+    visit();
+    await settle();
+    expect(scans()).toBe(1);
+    const enabling = ask("enable");
+    await settle();
+    expect((await enabling).ok).toBe(true);
+    expect(scripts.map((script) => script.matches)).toEqual([[`${config.origin}/*`]]);
+    expect(armed).toBeDefined();
+    // A scan that turns sync off takes both wakeups with it.
+    userId = 8;
+    ring();
+    await settle();
+    expect(stored.config?.enabled).toBe(false);
+    expect(armed).toBeUndefined();
+    expect(scripts).toEqual([]);
+  });
+  it("starts the page script in Canvas tabs that were open before Enable sync", async () => {
+    await ask("pause");
+    openTabs = [
+      { id: 5, url: `${config.origin}/courses/42` },
+      { id: 6, url: "https://example.com/" },
+    ] as chrome.tabs.Tab[];
+    const enabling = ask("enable");
+    await settle();
+    expect((await enabling).ok).toBe(true);
+    expect(chrome.scripting.executeScript).toHaveBeenCalledExactlyOnceWith({
+      target: { tabId: 5 },
+      files: ["canvas.js"],
+    });
+    // The due alarm rings while another site is in view, and is spent.
+    activeTabUrl = "https://example.com/";
+    ring();
+    await settle();
+    expect(scans()).toBe(0);
+    expect(armed).toBeUndefined();
+    // Switching back to the Canvas tab, the script injected into it reports it, and the scan runs.
+    activeTabUrl = `${config.origin}/courses/42`;
+    visit();
+    await settle();
+    expect(scans()).toBe(1);
+  });
+  it("stops the page script already running in open Canvas pages when sync turns off", async () => {
+    openTabs = [
+      { id: 5, url: `${config.origin}/courses/42` },
+      { id: 6, url: "https://example.com/" },
+    ] as chrome.tabs.Tab[];
+    // What the page script leaves in its page, where the worker's injected function runs.
+    const quit = vi.fn();
+    vi.stubGlobal("canvasWatcher", quit);
+    // A page on the saved Canvas keeps reporting while sync is on; a page elsewhere never should.
+    let told = visit();
+    await settle();
+    expect(told).toHaveBeenCalledExactlyOnceWith({ stop: false });
+    told = visit("https://example.com/");
+    await settle();
+    expect(told).toHaveBeenCalledExactlyOnceWith({ stop: true });
+    await ask("pause");
+    expect(chrome.scripting.executeScript).toHaveBeenCalledExactlyOnceWith({
+      target: { tabId: 5 },
+      func: expect.any(Function) as () => void,
+    });
+    expect(quit).toHaveBeenCalledOnce();
+    // A copy the worker could not reach then is told to stop at its next report.
+    told = visit();
+    await settle();
+    expect(told).toHaveBeenCalledExactlyOnceWith({ stop: true });
+    expect(scans()).toBe(1);
+    // As is one after a scan that turned sync off.
+    const enabling = ask("enable");
+    await settle();
+    expect((await enabling).ok).toBe(true);
+    userId = 8;
+    await untilDue();
+    ring();
+    await settle();
+    expect(stored.config?.enabled).toBe(false);
+    expect(quit).toHaveBeenCalledTimes(2);
+  });
+  it("moves a Canvas page script left for another origin to the saved one", async () => {
+    scripts = [{ id: "canvas-watcher", matches: ["https://old.test/*"], js: ["canvas.js"] }];
+    await restart();
+    expect(chrome.scripting.updateContentScripts).toHaveBeenCalled();
+    expect(scripts.map((script) => script.matches)).toEqual([[`${config.origin}/*`]]);
+  });
+  it("doubles the wait after each failure in a row, up to an hour, which Sync now ignores", async () => {
+    canvas = "signed-out";
+    const minutes: number[] = [];
+    for (let failures = 1; failures <= 8; failures++) {
+      await untilDue();
+      visit();
+      await settle();
+      expect(stored.failures).toBe(failures);
+      expect(armed).toEqual({ when: stored.nextScanAt });
+      minutes.push(wait() / 60_000);
+    }
+    expect(minutes).toEqual([1, 2, 4, 8, 16, 32, 60, 60]);
+    // Canvas coming into view before the wait is up starts nothing.
+    const before = requests.length;
+    await vi.advanceTimersByTimeAsync(30 * 60_000);
+    visit();
+    await settle();
+    expect(requests).toHaveLength(before);
+    canvas = "up";
+    expect((await ask("sync")).ok).toBe(true);
+    await settle();
+    expect(stored.report?.updated).toBe(1);
+    expect(stored.failures).toBeUndefined();
+    expect(wait()).toBe(15 * 60_000);
+    // After a success, the next failure waits a minute again.
+    canvas = "signed-out";
+    await untilDue();
+    visit();
+    await settle();
+    expect(stored.failures).toBe(1);
+    expect(wait()).toBe(60_000);
   });
 });
 
@@ -539,6 +798,33 @@ describe("settings", () => {
     expect(stored.config?.origin).toBe("https://other.test");
     expect(revoke).toHaveBeenCalledWith({ origins: [`${config.origin}/*`] });
   });
+  it("wakes for no Canvas page until sync is enabled for the new Canvas", async () => {
+    openTabs = [
+      { id: 5, url: `${config.origin}/courses/42` },
+      { id: 6, url: "https://other.test/courses/42" },
+    ] as chrome.tabs.Tab[];
+    const quit = vi.fn();
+    vi.stubGlobal("canvasWatcher", quit);
+    expect(scripts.map((script) => script.matches)).toEqual([[`${config.origin}/*`]]);
+    expect((await configure({ origin: "https://other.test" })).ok).toBe(true);
+    expect(scripts).toEqual([]);
+    expect(armed).toBeUndefined();
+    // The copy running in the old Canvas page stops too, before its host access goes.
+    expect(chrome.scripting.executeScript).toHaveBeenCalledExactlyOnceWith({
+      target: { tabId: 5 },
+      func: expect.any(Function) as () => void,
+    });
+    expect(quit).toHaveBeenCalledOnce();
+    stored.previewReady = true;
+    const enabling = ask("enable");
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect((await enabling).ok).toBe(true);
+    expect(scripts.map((script) => script.matches)).toEqual([["https://other.test/*"]]);
+    expect(chrome.scripting.executeScript).toHaveBeenLastCalledWith({
+      target: { tabId: 6 },
+      files: ["canvas.js"],
+    });
+  });
   it("turns sync off when the saved connection fails verification, but not for a new one", async () => {
     const untouched = () => {
       expect(stored.config).toMatchObject({ ...config, enabled: true });
@@ -549,6 +835,7 @@ describe("settings", () => {
       expect(stored.config).toMatchObject({ ...config, enabled: false });
       expect(stored.previewReady).toBe(false);
       expect(stored.error).toContain(text);
+      expect(scripts).toEqual([]);
     };
     notion = "revoked";
     // A candidate token that Notion rejects proves nothing about the saved one.
