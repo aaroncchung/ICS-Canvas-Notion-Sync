@@ -4,8 +4,14 @@ import { pathToFileURL } from "node:url";
 export const HEALTH_ISSUE_TITLE = "Canvas–Notion sync is unhealthy";
 export const HEALTH_ISSUE_LABEL = "sync-failure";
 export const DEFAULT_ACTIVATION_GRACE_HOURS = 14;
-/** A 12-hour watchdog plus one hour of scheduler delay. */
-export const SUCCESS_WATCHDOG_HOURS = 13;
+/**
+ * One day. GitHub runs the six-slot schedule best effort: from 2026-07 to 2026-09 it ran about four
+ * times a day, and the gap from one scheduled completion to the next start reached 13.3 hours
+ * overnight and 18.2 hours when it dropped four slots in a row (2026-08-26/27). Across one failed
+ * run the gap between successes reached 20.6 hours in September and 21.8 hours in late August, so
+ * a single failure does not alert; only a failure inside that 18.2-hour outage would have.
+ */
+export const SUCCESS_WATCHDOG_HOURS = 24;
 export const ACTIVE_RUN_GRACE_HOURS = 2;
 /** Reaches every run that could still satisfy the watchdog or defer its alert. */
 const VERIFICATION_WINDOW_HOURS = SUCCESS_WATCHDOG_HOURS + ACTIVE_RUN_GRACE_HOURS;

@@ -141,7 +141,7 @@ describe("scheduled health assessment", () => {
     const stale = [run({ updated_at: hoursAgo(SUCCESS_WATCHDOG_HOURS + 1 / 60) })];
     expect(assessScheduledHealth(fresh, workflow(hoursAgo(48)), now).reasons).toEqual([]);
     expect(assessScheduledHealth(stale, workflow(hoursAgo(48)), now).reasons).toEqual([
-      "No scheduled run has succeeded in the last 13 hours.",
+      "No scheduled run has succeeded in the last 24 hours.",
     ]);
   });
 
@@ -149,7 +149,7 @@ describe("scheduled health assessment", () => {
     for (const status of ["queued", "in_progress"]) {
       const runs = [
         run({ id: 2, status, conclusion: null, created_at: hoursAgo(1), updated_at: hoursAgo(1) }),
-        run({ id: 1, updated_at: hoursAgo(20) }),
+        run({ id: 1, updated_at: hoursAgo(30) }),
       ];
       expect(assessScheduledHealth(runs, workflow(hoursAgo(48)), now).reasons).toEqual([]);
     }
@@ -164,9 +164,55 @@ describe("scheduled health assessment", () => {
         created_at: hoursAgo(3),
         updated_at: hoursAgo(3),
       }),
-      run({ id: 1, updated_at: hoursAgo(20) }),
+      run({ id: 1, updated_at: hoursAgo(30) }),
     ];
     expect(assessScheduledHealth(runs, workflow(hoursAgo(48)), now).reasons).toHaveLength(1);
+  });
+});
+
+describe("observed schedule cadence (#53)", () => {
+  // Real scheduled sync timestamps (UTC); runs marked failed stand in for a failure at that slot.
+  const active = workflow("2026-08-01T00:00:00Z");
+  const lastEvening = run({
+    id: 1,
+    created_at: "2026-09-13T21:34:47Z",
+    updated_at: "2026-09-13T21:35:17Z",
+  });
+  const failedMorning = run({
+    id: 2,
+    conclusion: "failure",
+    created_at: "2026-09-14T10:54:37Z",
+    updated_at: "2026-09-14T10:55:04Z",
+  });
+
+  it("does not alert on one failed morning run before the afternoon run completes", () => {
+    // 15:14:38 is when the health check really ran that day; the afternoon run completed at 18:08:57.
+    for (const at of ["2026-09-14T15:14:38Z", "2026-09-14T18:08:56Z"]) {
+      const assessment = assessScheduledHealth([failedMorning, lastEvening], active, new Date(at));
+      expect(assessment.reasons).toEqual([]);
+    }
+  });
+
+  it("does not alert across the longest observed gap between two scheduled runs", () => {
+    // 2026-08-26 22:24 to 2026-08-27 16:39 UTC: GitHub dropped four slots in a row.
+    const success = run({ created_at: "2026-08-26T22:24:13Z", updated_at: "2026-08-26T22:24:42Z" });
+    const beforeNextRun = new Date("2026-08-27T16:39:13Z");
+    expect(assessScheduledHealth([success], active, beforeNextRun).reasons).toEqual([]);
+  });
+
+  it("alerts once a whole day passes without a scheduled success", () => {
+    const failedAfternoon = run({
+      id: 3,
+      conclusion: "failure",
+      created_at: "2026-09-14T18:08:11Z",
+      updated_at: "2026-09-14T18:08:57Z",
+    });
+    const runs = [failedAfternoon, failedMorning, lastEvening];
+    const at = (iso: string) => assessScheduledHealth(runs, active, new Date(iso)).reasons;
+    expect(at("2026-09-14T21:35:16Z")).toEqual([]);
+    expect(at("2026-09-14T21:35:17Z")).toEqual([
+      "No scheduled run has succeeded in the last 24 hours.",
+    ]);
   });
 });
 
@@ -220,7 +266,7 @@ describe("incident recovery", () => {
   });
 
   it("does not recover while unhealthy, without any success, or on a manual success", () => {
-    expect(recoveredFromIncident(assess([run({ updated_at: hoursAgo(20) })]))).toBe(false);
+    expect(recoveredFromIncident(assess([run({ updated_at: hoursAgo(30) })]))).toBe(false);
     expect(recoveredFromIncident(assessScheduledHealth([], workflow(hoursAgo(1)), now))).toBe(
       false,
     );
