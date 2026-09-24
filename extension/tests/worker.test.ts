@@ -30,6 +30,8 @@ let notion: "up" | "busy" | "read-only" | "revoked" | "unshared";
 /** An option the Notion schema no longer offers, or nothing. */
 let schemaWithout: string;
 let activeTabUrl: string | undefined;
+/** Every open tab, for a query by URL, which Chrome answers only for sites with host access. */
+let openTabs: chrome.tabs.Tab[];
 let hostAccess: boolean;
 let notionAccess: boolean;
 let revoke: ReturnType<typeof vi.fn>;
@@ -64,12 +66,15 @@ function ask(
     );
   });
 }
-/** The Canvas page script reporting that its page loaded, came into view, or regained focus. */
+/**
+ * The Canvas page script reporting that its page loaded, came into view, or regained focus. The
+ * worker's answer, once it has come, is on the returned function.
+ */
 function visit(url = `${config.origin}/courses/42`) {
   const respond = vi.fn();
   const tab = { id: 1, url } as chrome.tabs.Tab;
-  expect(listener({ action: "wake" }, { id: "test-extension", url, tab }, respond)).toBe(false);
-  expect(respond).not.toHaveBeenCalled();
+  expect(listener({ action: "wake" }, { id: "test-extension", url, tab }, respond)).toBe(true);
+  return respond;
 }
 /** How long the last scan held the next automatic one back, counted from when it finished. */
 const wait = () => stored.nextScanAt - Date.parse(stored.report?.finishedAt ?? "");
@@ -98,6 +103,7 @@ beforeEach(async () => {
   notion = "up";
   schemaWithout = "";
   activeTabUrl = config.origin;
+  openTabs = [];
   hostAccess = true;
   notionAccess = true;
   revoke = vi.fn(async () => true);
@@ -128,7 +134,14 @@ beforeEach(async () => {
       onInstalled: { addListener: vi.fn() },
     },
     // No listeners here: tab and window events would wake the worker for every site.
-    tabs: { query: async () => [{ url: activeTabUrl }] },
+    tabs: {
+      query: async ({ url }: chrome.tabs.QueryInfo) =>
+        url
+          ? openTabs.filter((tab) =>
+              [url].flat().some((pattern) => tab.url?.startsWith(pattern.replace(/\*$/, ""))),
+            )
+          : [{ url: activeTabUrl }],
+    },
     windows: { getLastFocused: async () => ({ focused: true, id: 1 }) },
     scripting: {
       getRegisteredContentScripts: async ({ ids }: { ids: string[] }) =>
@@ -143,6 +156,11 @@ beforeEach(async () => {
         if (changed.some(({ id }) => !scripts.some((script) => script.id === id)))
           throw new Error("Nonexistent script ID");
         scripts = scripts.map((script) => changed.find(({ id }) => id === script.id) ?? script);
+      }),
+      // A function runs here, beside whatever a test left of the page script.
+      executeScript: vi.fn(async (injection: chrome.scripting.ScriptInjection<[], void>) => {
+        if ("func" in injection) injection.func?.();
+        return [];
       }),
       unregisterContentScripts: vi.fn(async ({ ids }: { ids: string[] }) => {
         if (ids.some((id) => !scripts.some((script) => script.id === id)))
@@ -622,6 +640,68 @@ describe("scheduling", () => {
     expect(armed).toBeUndefined();
     expect(scripts).toEqual([]);
   });
+  it("starts the page script in Canvas tabs that were open before Enable sync", async () => {
+    await ask("pause");
+    openTabs = [
+      { id: 5, url: `${config.origin}/courses/42` },
+      { id: 6, url: "https://example.com/" },
+    ] as chrome.tabs.Tab[];
+    const enabling = ask("enable");
+    await settle();
+    expect((await enabling).ok).toBe(true);
+    expect(chrome.scripting.executeScript).toHaveBeenCalledExactlyOnceWith({
+      target: { tabId: 5 },
+      files: ["canvas.js"],
+    });
+    // The due alarm rings while another site is in view, and is spent.
+    activeTabUrl = "https://example.com/";
+    ring();
+    await settle();
+    expect(scans()).toBe(0);
+    expect(armed).toBeUndefined();
+    // Switching back to the Canvas tab, the script injected into it reports it, and the scan runs.
+    activeTabUrl = `${config.origin}/courses/42`;
+    visit();
+    await settle();
+    expect(scans()).toBe(1);
+  });
+  it("stops the page script already running in open Canvas pages when sync turns off", async () => {
+    openTabs = [
+      { id: 5, url: `${config.origin}/courses/42` },
+      { id: 6, url: "https://example.com/" },
+    ] as chrome.tabs.Tab[];
+    // What the page script leaves in its page, where the worker's injected function runs.
+    const quit = vi.fn();
+    vi.stubGlobal("canvasWatcher", quit);
+    // A page on the saved Canvas keeps reporting while sync is on; a page elsewhere never should.
+    let told = visit();
+    await settle();
+    expect(told).toHaveBeenCalledExactlyOnceWith({ stop: false });
+    told = visit("https://example.com/");
+    await settle();
+    expect(told).toHaveBeenCalledExactlyOnceWith({ stop: true });
+    await ask("pause");
+    expect(chrome.scripting.executeScript).toHaveBeenCalledExactlyOnceWith({
+      target: { tabId: 5 },
+      func: expect.any(Function) as () => void,
+    });
+    expect(quit).toHaveBeenCalledOnce();
+    // A copy the worker could not reach then is told to stop at its next report.
+    told = visit();
+    await settle();
+    expect(told).toHaveBeenCalledExactlyOnceWith({ stop: true });
+    expect(scans()).toBe(1);
+    // As is one after a scan that turned sync off.
+    const enabling = ask("enable");
+    await settle();
+    expect((await enabling).ok).toBe(true);
+    userId = 8;
+    await untilDue();
+    ring();
+    await settle();
+    expect(stored.config?.enabled).toBe(false);
+    expect(quit).toHaveBeenCalledTimes(2);
+  });
   it("moves a Canvas page script left for another origin to the saved one", async () => {
     scripts = [{ id: "canvas-watcher", matches: ["https://old.test/*"], js: ["canvas.js"] }];
     await restart();
@@ -719,15 +799,31 @@ describe("settings", () => {
     expect(revoke).toHaveBeenCalledWith({ origins: [`${config.origin}/*`] });
   });
   it("wakes for no Canvas page until sync is enabled for the new Canvas", async () => {
+    openTabs = [
+      { id: 5, url: `${config.origin}/courses/42` },
+      { id: 6, url: "https://other.test/courses/42" },
+    ] as chrome.tabs.Tab[];
+    const quit = vi.fn();
+    vi.stubGlobal("canvasWatcher", quit);
     expect(scripts.map((script) => script.matches)).toEqual([[`${config.origin}/*`]]);
     expect((await configure({ origin: "https://other.test" })).ok).toBe(true);
     expect(scripts).toEqual([]);
     expect(armed).toBeUndefined();
+    // The copy running in the old Canvas page stops too, before its host access goes.
+    expect(chrome.scripting.executeScript).toHaveBeenCalledExactlyOnceWith({
+      target: { tabId: 5 },
+      func: expect.any(Function) as () => void,
+    });
+    expect(quit).toHaveBeenCalledOnce();
     stored.previewReady = true;
     const enabling = ask("enable");
     await vi.advanceTimersByTimeAsync(20_000);
     expect((await enabling).ok).toBe(true);
     expect(scripts.map((script) => script.matches)).toEqual([["https://other.test/*"]]);
+    expect(chrome.scripting.executeScript).toHaveBeenLastCalledWith({
+      target: { tabId: 6 },
+      files: ["canvas.js"],
+    });
   });
   it("turns sync off when the saved connection fails verification, but not for a new one", async () => {
     const untouched = () => {

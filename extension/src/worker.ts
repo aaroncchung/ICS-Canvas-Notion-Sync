@@ -108,6 +108,24 @@ async function arm(state: State): Promise<void> {
     await chrome.alarms.create(TICK, { when: Math.max(state.nextScanAt, Date.now()) });
   else await chrome.alarms.clear(TICK);
 }
+/** Stops the Canvas page script running in a page. Runs in that page, beside the script. */
+function unwatch(): void {
+  (globalThis as { canvasWatcher?: () => void }).canvasWatcher?.();
+}
+/**
+ * Injects into the page of every open tab on these origins. A tab that refuses, such as a
+ * discarded one or a page that has not loaded, is left out: it runs the registered script, if any,
+ * once it loads, and otherwise the worker tells it to stop at its next wake.
+ */
+async function inPages(
+  matches: string[],
+  inject: (target: chrome.scripting.InjectionTarget) => Promise<unknown>,
+): Promise<void> {
+  if (!matches.length) return;
+  const tabs = await chrome.tabs.query({ url: matches }).catch(() => []);
+  const ids = tabs.flatMap(({ id }) => (id === undefined ? [] : [id]));
+  await Promise.all(ids.map((tabId) => inject({ tabId }).catch(() => undefined)));
+}
 /**
  * While automatic sync is on, a Canvas page tells the worker when it loads, comes into view, or
  * regains focus. Chrome keeps the registration across worker and browser restarts.
@@ -115,7 +133,12 @@ async function arm(state: State): Promise<void> {
 async function watch(state: State): Promise<void> {
   const [registered] = await chrome.scripting.getRegisteredContentScripts({ ids: [WATCHER] });
   if (!state.config?.enabled) {
-    if (registered) await chrome.scripting.unregisterContentScripts({ ids: [WATCHER] });
+    if (!registered) return;
+    await chrome.scripting.unregisterContentScripts({ ids: [WATCHER] });
+    // Chrome leaves the copies already running in open pages, which would go on waking the worker.
+    await inPages(registered.matches ?? [], (target) =>
+      chrome.scripting.executeScript({ target, func: unwatch }),
+    );
     return;
   }
   const matches = [`${state.config.origin}/*`];
@@ -123,6 +146,12 @@ async function watch(state: State): Promise<void> {
   const script = { id: WATCHER, matches, js: ["canvas.js"], runAt: "document_idle" as const };
   if (registered) await chrome.scripting.updateContentScripts([script]);
   else await chrome.scripting.registerContentScripts([script]);
+  // Chrome runs a registered script only in pages loaded from now on. A Canvas tab already open
+  // would otherwise never report coming back into view, and a due scan whose alarm rang while it
+  // was out of sight would wait for a reload.
+  await inPages(matches, (target) =>
+    chrome.scripting.executeScript({ target, files: ["canvas.js"] }),
+  );
 }
 /** Brings both wakeups in line with a state that was just saved. */
 async function schedule(state: State): Promise<void> {
@@ -377,8 +406,15 @@ chrome.runtime.onMessage.addListener((raw: unknown, sender, respond: (value: unk
   if (!allowed.includes(sender.url)) {
     // The Canvas page script saying the page is in view. It carries nothing, and only prompts the
     // cooldown-gated check the alarm makes; wake() ignores a page off the configured origin.
-    if (object(raw).action === "wake") wake(new URL(sender.url).origin);
-    return false;
+    if (object(raw).action !== "wake") return false;
+    const origin = new URL(sender.url).origin;
+    wake(origin);
+    // A copy the worker could not stop when sync turned off or moved elsewhere stops now.
+    load().then(
+      (state) => respond({ stop: !(state.config?.enabled && state.config.origin === origin) }),
+      () => respond({}),
+    );
+    return true;
   }
   // Reading state never waits behind a scan, so the popup stays live while one runs.
   handle(object(raw))
