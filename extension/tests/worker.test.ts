@@ -780,12 +780,15 @@ describe("settings", () => {
   });
   it("keeps the saved token and history for the same connection, and requires a new preview", async () => {
     stored.acknowledged = { "page-123:123": "attempt:1" };
+    const elsewhere = { "https://other.test 8 x": { "page-9:9": "attempt:2" } };
+    stored.histories = structuredClone(elsewhere);
     const result = await configure({ dataSourceId: config.dataSourceId.replaceAll("-", "") });
     expect(result.ok).toBe(true);
     expect(JSON.stringify(result)).not.toContain(config.token);
     expect(stored.config).toMatchObject({ token: config.token, userId: "7", enabled: false });
     expect(stored.previewReady).toBe(false);
     expect(stored.acknowledged).toEqual({ "page-123:123": "attempt:1" });
+    expect(stored.histories).toEqual(elsewhere);
     expect(revoke).not.toHaveBeenCalled();
   });
   it("starts fresh history for another data source or Canvas, releasing the old host", async () => {
@@ -797,6 +800,33 @@ describe("settings", () => {
     await configure({ origin: "https://other.test" });
     expect(stored.config?.origin).toBe("https://other.test");
     expect(revoke).toHaveBeenCalledWith({ origins: [`${config.origin}/*`] });
+    // The first connection's history comes back with it, however its data-source ID is typed.
+    await configure({ dataSourceId: config.dataSourceId.replaceAll("-", "").toUpperCase() });
+    expect(stored.acknowledged).toEqual({ "page-123:123": "attempt:1" });
+    expect(stored.histories).toBeUndefined();
+  });
+  it("keeps reopened pages open after verifying under another Canvas account and back", async () => {
+    visit();
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(notionStatus).toBe("Done");
+    notionStatus = "In progress";
+    const history = stored.acknowledged;
+    expect(history).not.toEqual({});
+    userId = 8;
+    expect((await configure({})).ok).toBe(true);
+    expect(stored.config?.userId).toBe("8");
+    expect(stored.acknowledged).toEqual({});
+    expect(Object.values(stored.histories ?? {})).toEqual([history]);
+    userId = 7;
+    expect((await configure({})).ok).toBe(true);
+    expect(stored.acknowledged).toEqual(history);
+    stored.previewReady = true;
+    stored.config!.enabled = true;
+    await ask("sync");
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(stored.report).toMatchObject({ mode: "sync", failed: 0 });
+    expect(notionStatus).toBe("In progress");
+    expect(requests.filter((r) => r.method === "PATCH")).toHaveLength(1);
   });
   it("wakes for no Canvas page until sync is enabled for the new Canvas", async () => {
     openTabs = [
@@ -872,6 +902,37 @@ describe("settings", () => {
     expect((await configure({})).error).toContain("HTTP 401");
     expect(stored.config?.enabled).toBe(true);
     expect(stored.previewReady).toBe(true);
+  });
+  it("gives back new host access for settings refused while a scan runs", async () => {
+    const scanning = ask("preview");
+    const refused = ask("configure", {
+      config: { origin: "https://other.test", dataSourceId: config.dataSourceId, token: "" },
+    });
+    expect((await refused).error).toContain("A scan is running");
+    // Given back before the answer, not after the scan, which the worker may not live to finish.
+    expect(revoke).toHaveBeenCalledExactlyOnceWith({ origins: ["https://other.test/*"] });
+    expect(stored.report?.finishedAt).toBeUndefined();
+    // Access for the saved Canvas is what the scans run on, so it stays.
+    expect((await ask("configure", { config: { origin: config.origin } })).ok).toBe(false);
+    await vi.advanceTimersByTimeAsync(20_000);
+    await scanning;
+    expect(stored.report).toMatchObject({ mode: "preview", failed: 0 });
+    expect(revoke).toHaveBeenCalledOnce();
+  });
+  it("keeps host access that a request queued before the scan saves", async () => {
+    // The first request is still verifying when the scan queues behind it, and the second, for the
+    // same Canvas, is refused. The access the first one saves must survive the second's refusal.
+    const first = configure({ origin: "https://other.test" }).catch(() => ({}));
+    const scanning = ask("preview");
+    const refused = ask("configure", {
+      config: { origin: "https://other.test", dataSourceId: config.dataSourceId, token: "" },
+    });
+    expect((await refused).error).toContain("A scan is running");
+    expect(await first).toMatchObject({ ok: true });
+    await vi.advanceTimersByTimeAsync(20_000);
+    await scanning;
+    expect(stored.config?.origin).toBe("https://other.test");
+    expect(revoke).toHaveBeenCalledExactlyOnceWith({ origins: [`${config.origin}/*`] });
   });
   it("does not keep host access for a new Canvas that failed verification", async () => {
     canvas = "signed-out";

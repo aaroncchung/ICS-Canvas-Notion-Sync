@@ -2,19 +2,20 @@ import { canvasOrigin, object, scalarText } from "./model.ts";
 
 const element = (id: string): HTMLElement => document.getElementById(id)!;
 const input = (id: string): HTMLInputElement => element(id) as HTMLInputElement;
+const SUBMIT = "#config button[type=submit]";
 let filled = false;
 let busy = false;
-let shownError = "";
 function render(raw: unknown): void {
   const state = object(raw),
     report = object(state.report);
   element("connection").textContent = state.configured
     ? `${state.enabled ? "Automatic sync on" : "Paused"} · Canvas account ${scalarText(state.userId)}${state.running ? ` · ${scalarText(state.progress)}…` : ""}`
     : "Open Settings to connect Canvas and Notion.";
+  // What the last scan or check left wrong has a line of its own. #message answers the last
+  // action, and a stored error there would hide why that action was refused.
   const error = scalarText(state.error ?? "");
-  if (error) element("message").textContent = shownError = error;
-  else if (shownError && element("message").textContent === shownError)
-    element("message").textContent = shownError = "";
+  const problem = error === element("message").textContent ? "" : error;
+  if (element("problem").textContent !== problem) element("problem").textContent = problem;
   if (!filled && document.getElementById("config")) {
     input("origin").value = scalarText(state.origin ?? "");
     input("dataSourceId").value = scalarText(state.dataSourceId ?? "");
@@ -30,6 +31,9 @@ function render(raw: unknown): void {
       (action === "enable" &&
         (!state.previewReady || Boolean(state.running) || Boolean(state.enabled)));
   }
+  // The worker refuses new settings while a scan runs, so none are asked for.
+  const submit = document.querySelector<HTMLButtonElement>(SUBMIT);
+  if (submit) submit.disabled = busy || Boolean(state.running);
   if (report.startedAt) {
     // An unfinished report with no scan running means the worker was stopped mid-scan.
     const stage = state.running ? " (running)" : report.finishedAt ? "" : " (interrupted)";
@@ -89,12 +93,14 @@ document.getElementById("config")?.addEventListener("submit", (event) => {
     element("message").textContent = "Enter the Canvas HTTPS origin, without a path.";
     return;
   }
+  // Until the answer renders again, so the settings cannot be sent twice.
+  busy = true;
+  document.querySelector<HTMLButtonElement>(SUBMIT)!.disabled = true;
   // Permissions must be requested directly from this user gesture.
   void chrome.permissions
     .request({ origins: [`${origin}/*`] })
     .then(async (granted) => {
       if (!granted) throw new Error("Canvas host access is required.");
-      busy = true;
       element("message").textContent = "Verifying Canvas session and Notion schema…";
       await send("configure", {
         origin,
@@ -110,6 +116,8 @@ document.getElementById("config")?.addEventListener("submit", (event) => {
     })
     .finally(() => {
       busy = false;
+      // Rendering disables it again if a scan has started meanwhile.
+      document.querySelector<HTMLButtonElement>(SUBMIT)!.disabled = false;
       void send("state").catch(() => undefined);
     });
 });

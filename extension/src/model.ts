@@ -58,6 +58,11 @@ export interface State {
   config?: Config;
   report?: Report;
   acknowledged: Record<string, string>;
+  /**
+   * The `acknowledged` records of connections verified before the current one, by historyKey.
+   * Verifying one of them again takes its records back, so reopened pages stay open.
+   */
+  histories?: Record<string, Record<string, string>>;
   previewReady: boolean;
   nextScanAt: number;
   /** Scans that failed in a row since the last one that finished, which spaces out the next. */
@@ -69,6 +74,10 @@ export const emptyState = (): State => ({
   previewReady: false,
   nextScanAt: 0,
 });
+/** Which connection a reopen history belongs to: the Canvas account and the Notion data source. */
+export function historyKey(config: Pick<Config, "origin" | "userId" | "dataSourceId">): string {
+  return `${config.origin} ${config.userId} ${notionId(config.dataSourceId)}`;
+}
 /** An error whose message is safe and useful to show in the popup. */
 export class UserError extends Error {}
 /**
@@ -95,6 +104,9 @@ export function canvasOrigin(value: string): string | undefined {
     const url = new URL(value.trim());
     const bare =
       url.protocol === "https:" &&
+      // A URL host may hold characters no hostname can, such as `*`. Host access is then asked for
+      // a match pattern like https://*/*, which would cover every site.
+      /^[a-z0-9-]+(?:\.[a-z0-9-]+)*$/.test(url.hostname) &&
       !url.username &&
       !url.password &&
       url.pathname === "/" &&
