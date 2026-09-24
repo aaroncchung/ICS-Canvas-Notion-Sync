@@ -3,10 +3,12 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { Client } from "@notionhq/client";
 import type { Logger } from "pino";
 import type { RequestMetrics } from "../types.ts";
-import { classifyNotionFailure } from "./failure.ts";
+import { classifyNotionFailure, retryAfterMs } from "./failure.ts";
 export { AmbiguousNotionWriteError } from "./failure.ts";
 
 export const NOTION_API_VERSION = "2026-03-11";
+/** Longest single wait a Retry-After header can impose before the next attempt. */
+export const MAX_RETRY_AFTER_MS = 60_000;
 
 export type NotionOperation =
   "read" | "property-update" | "page-create" | "block-append" | "delete" | "sync-log-create";
@@ -74,11 +76,13 @@ export async function withRetry<T>(
     operation?: NotionOperation;
     onRetry?: (operation: NotionOperation) => void;
     metrics?: RequestMetrics;
+    now?: () => number;
   } = {},
 ): Promise<T> {
   const attempts = options.attempts ?? 4;
   const baseDelayMs = options.baseDelayMs ?? 350;
   const pause = options.sleep ?? sleep;
+  const now = options.now ?? Date.now;
   const operationType = options.operation ?? "read";
   const retriesAmbiguousFailures = ["read", "property-update"].includes(operationType);
   for (let attempt = 0; attempt < attempts; attempt += 1) {
@@ -91,9 +95,11 @@ export async function withRetry<T>(
       return await operation();
     } catch (error) {
       const failure = classifyNotionFailure(error);
+      // A throttled request (429/529) was rejected, not processed, so every operation may retry it.
+      const throttled = failure.kind === "definite-response" && failure.throttled;
       const retryable =
         failure.kind === "definite-response"
-          ? failure.retryable && (failure.status === 429 || retriesAmbiguousFailures)
+          ? failure.retryable && (throttled || retriesAmbiguousFailures)
           : failure.kind === "transport" && failure.retryableRead && retriesAmbiguousFailures;
       if (attempt === attempts - 1 || !retryable) {
         throw classifyOperation(error, operationType);
@@ -103,8 +109,16 @@ export async function withRetry<T>(
         options.metrics.propertyUpdateRetries += 1;
       }
       options.onRetry?.(operationType);
-      const jitter = Math.floor(Math.random() * baseDelayMs);
-      await pause(baseDelayMs * 2 ** attempt + jitter);
+      const requested = throttled ? retryAfterMs(error, now()) : undefined;
+      const delay =
+        requested === undefined
+          ? baseDelayMs * 2 ** attempt + Math.floor(Math.random() * baseDelayMs)
+          : Math.min(requested, MAX_RETRY_AFTER_MS);
+      if (throttled && options.metrics) {
+        options.metrics.throttleRetries += 1;
+        options.metrics.throttleWaitMs += delay;
+      }
+      await pause(delay);
     }
   }
   throw new Error("Retry attempts exhausted");

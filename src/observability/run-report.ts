@@ -11,7 +11,14 @@ import type {
 import { compilePlan } from "../sync/commands.ts";
 
 export function createRequestMetrics(): RequestMetrics {
-  return { notionRequests: 0, requestsByOperation: {}, readRetries: 0, propertyUpdateRetries: 0 };
+  return {
+    notionRequests: 0,
+    requestsByOperation: {},
+    readRetries: 0,
+    propertyUpdateRetries: 0,
+    throttleRetries: 0,
+    throttleWaitMs: 0,
+  };
 }
 
 /** Copies counters at a run/phase boundary; never retains a live gateway object. */
@@ -31,6 +38,8 @@ export function requestDifference(
     ),
     readRetries: current.readRetries - baseline.readRetries,
     propertyUpdateRetries: current.propertyUpdateRetries - baseline.propertyUpdateRetries,
+    throttleRetries: current.throttleRetries - baseline.throttleRetries,
+    throttleWaitMs: current.throttleWaitMs - baseline.throttleWaitMs,
   };
 }
 

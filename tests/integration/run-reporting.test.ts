@@ -245,4 +245,17 @@ describe("run reporting sources of truth", () => {
     ]);
     for (const line of summary) if (!aliases.has(line.split(":")[0]!)) expect(log).toContain(line);
   });
+
+  it("reports throttle retries and their wait in the summary and the Sync Log", () => {
+    const requests = { ...createRequestMetrics(), throttleRetries: 2, throttleWaitMs: 21_500 };
+    const result = finalizeRun(runResult({ plan: makePlan() }), "sync", requests);
+    const log = reportSections(config(), result).flatMap((section) => section.lines);
+    for (const line of [
+      "Notion throttle retries (429/529): 2",
+      "Notion throttle wait (ms): 21500",
+    ]) {
+      expect(reportLines(config(), result)).toContain(line);
+      expect(log).toContain(line);
+    }
+  });
 });

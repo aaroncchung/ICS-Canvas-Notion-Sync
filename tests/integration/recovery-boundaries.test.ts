@@ -11,15 +11,17 @@ afterEach(() => vi.unstubAllGlobals());
 
 describe("recovery boundaries", () => {
   it("counts paginated reads and retry attempts at the physical SDK boundary", async () => {
-    const response = (body: unknown, status = 200) =>
+    const response = (body: unknown, status = 200, headers: Record<string, string> = {}) =>
       new Response(JSON.stringify(body), {
         status,
-        headers: { "content-type": "application/json" },
+        headers: { "content-type": "application/json", ...headers },
       });
     const fetch = vi
       .fn()
       .mockResolvedValueOnce(
-        response({ object: "error", status: 429, code: "rate_limited", message: "Wait" }, 429),
+        response({ object: "error", status: 429, code: "rate_limited", message: "Wait" }, 429, {
+          "retry-after": "0",
+        }),
       )
       .mockResolvedValueOnce(response({ results: [{ id: "first" }], next_cursor: "next" }))
       .mockResolvedValueOnce(response({ results: [{ id: "second" }], next_cursor: null }));
@@ -32,6 +34,8 @@ describe("recovery boundaries", () => {
       requestsByOperation: { read: 3 },
       readRetries: 1,
       propertyUpdateRetries: 0,
+      throttleRetries: 1,
+      throttleWaitMs: 0,
     });
   });
 

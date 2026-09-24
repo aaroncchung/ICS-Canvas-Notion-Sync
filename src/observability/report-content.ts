@@ -86,6 +86,8 @@ function reportFields(config: AppConfig, result: RunResult): ReportField[] {
     field("Notion requests", metrics.notionRequests),
     field("Notion read retries", metrics.readRetries),
     field("Notion property-update retries", metrics.propertyUpdateRetries),
+    field("Notion throttle retries (429/529)", metrics.throttleRetries),
+    field("Notion throttle wait (ms)", metrics.throttleWaitMs),
     field("Assignment body reads", metrics.assignmentBodyReads),
     field("Description updates avoided", metrics.descriptionUpdatesAvoided),
     field(
