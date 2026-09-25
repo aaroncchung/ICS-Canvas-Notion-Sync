@@ -1,6 +1,6 @@
 # Scheduled health monitor
 
-This document is the authoritative policy for `.github/workflows/health-check.yml`, which is scheduled to run `scripts/check-health.ts` every four hours (see [Best-effort schedule](#best-effort-schedule) for what actually happens). The checker reads only `sync.yml` runs with `event: schedule`; manual runs never improve or degrade scheduled health and cannot recover an incident. It needs no npm dependencies, so the workflow runs the TypeScript source directly on Node 24 without installing or building anything.
+This document is the authoritative policy for `.github/workflows/health-check.yml`, which the private runner repository (see [Scheduled runs](notion-setup.md#9-scheduled-runs)) schedules to run `scripts/check-health.ts` every four hours against its own `sync.yml` runs (see [Best-effort schedule](#best-effort-schedule) for what actually happens). The checker reads only `sync.yml` runs with `event: schedule`; manual runs never improve or degrade scheduled health and cannot recover an incident. It needs no npm dependencies, so the workflow runs the TypeScript source directly on Node 24 without installing or building anything.
 
 ## Run classification
 
