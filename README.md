@@ -1,6 +1,6 @@
 # Canvas ICS → Notion Sync
 
-A strict TypeScript/Node.js service that imports Canvas assignments from a private Canvas ICS calendar feed into Notion. It is designed for institutions that do not permit students to create Canvas API tokens. It runs on a configured daily schedule in GitHub Actions and also supports manual validation, dry-run, and live-sync runs.
+A strict TypeScript/Node.js service that imports Canvas assignments from a private Canvas ICS calendar feed into Notion. It is designed for institutions that do not permit students to create Canvas API tokens. It runs on a schedule in GitHub Actions, from a private runner repository, and also supports manual validation, dry-run, and live-sync runs.
 
 The scheduled ICS sync never uses Canvas OAuth, API tokens, scraping, or browser automation. It preserves completion state in Notion. The optional [Chrome companion extension](docs/chrome-extension.md) uses your signed-in Canvas session to mark submitted, graded, or excused assignments Done while respecting work you manually reopen.
 
@@ -118,7 +118,9 @@ Tests use synthetic ICS and in-memory Notion doubles; they require no live crede
 
 ## GitHub Actions
 
-Add the two secrets, the three required data-source ID variables, and any optional variables under **Settings → Secrets and variables → Actions**. Then open **Actions → Canvas–Notion sync → Run workflow** and run in this order:
+The workflows in this repository run only when started by hand. GitHub disables scheduled workflows in a public repository after 60 days without a commit, so a private runner repository holds the schedules, the secrets, and copies of `sync.yml` and `health-check.yml` that check out and run this repository's `main`. See [Scheduled runs](docs/notion-setup.md#9-scheduled-runs) for the setup.
+
+In the repository that runs the sync, add the two secrets, the three required data-source ID variables, and any optional variables under **Settings → Secrets and variables → Actions**. Then open **Actions → Canvas–Notion sync → Run workflow** and run in this order:
 
 1. `validate`
 2. `dry-run`

@@ -1,8 +1,8 @@
 name: Canvas–Notion sync health
 
 on:
-  schedule:
-    - cron: "47 */4 * * *"
+  # Manual only here; the private runner repository schedules a copy of this file every four hours
+  # (47 */4 * * * UTC). See "Scheduled runs" in docs/notion-setup.md.
   workflow_dispatch:
 
 permissions:

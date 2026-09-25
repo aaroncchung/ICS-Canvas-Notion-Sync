@@ -1,13 +1,9 @@
 name: Canvas–Notion sync
 
 on:
-  # Best effort: GitHub delays scheduled runs by hours and drops some, and is busiest at the top of
-  # the hour, so these minutes avoid :00 and :30. scripts/check-health.ts tolerates the gaps.
-  schedule:
-    - cron: "37 1,8,12,15,17 * * *"
-      timezone: "America/New_York"
-    - cron: "13 14 * * *"
-      timezone: "America/New_York"
+  # Manual only here. GitHub disables scheduled workflows in public repositories after 60 days
+  # without a commit, so a private runner repository runs a copy of this file on a schedule; see
+  # "Scheduled runs" in docs/notion-setup.md.
   workflow_dispatch:
     inputs:
       mode:
