@@ -84,11 +84,13 @@ function workflowCommand(kind: "error" | "warning", message: string, secrets: st
 export function workflowAnnotations(config: AppConfig, result: RunResult): string[] {
   if (config.GITHUB_ACTIONS !== "true") return [];
   const secrets = [config.CANVAS_ICS_URL, config.NOTION_TOKEN];
-  if (result.status === "Failed") {
-    return [workflowCommand("error", failureSummary(result) ?? "Synchronization failed", secrets)];
-  }
-  // Dry runs are how a new feed is inspected, so their warnings are annotated too.
-  if (!result.warnings.length) return [];
+  const annotations =
+    result.status === "Failed"
+      ? [workflowCommand("error", failureSummary(result) ?? "Synchronization failed", secrets)]
+      : [];
+  // Warnings are annotated whatever the status: dry runs are how a new feed is inspected, and a
+  // failed run may still have found suspicious events.
+  if (!result.warnings.length) return annotations;
   const diagnosticCounts = [
     `suspicious=${result.counts.suspiciousEvents}`,
     `malformed=${result.counts.malformedEvents}`,
@@ -99,13 +101,14 @@ export function workflowAnnotations(config: AppConfig, result: RunResult): strin
     .slice(0, 3)
     .map((warning) => warning.message)
     .join("; ");
-  return [
+  annotations.push(
     workflowCommand(
       "warning",
-      `Run completed with meaningful diagnostics (${diagnosticCounts})${warningSummary ? `: ${warningSummary}` : ""}`,
+      `Run found meaningful diagnostics (${diagnosticCounts})${warningSummary ? `: ${warningSummary}` : ""}`,
       secrets,
     ),
-  ];
+  );
+  return annotations;
 }
 
 export async function run(
@@ -194,8 +197,11 @@ export async function run(
       result.status = "Failed";
       result.errors.push(`Sync Log write failed: ${safeError(error, secrets)}`);
       result.errors.push("Sync Log write failed; creation was not blindly retried");
+      // The Sync Log quotes failure details, and a failed write of it (for example a verification
+      // mismatch) can quote them back, so only the failure's classification is logged.
+      const { name, failureClass, status, code, operation } = safeDiagnostic(error, secrets);
       logger.error(
-        { diagnostic: safeDiagnostic(error, secrets) },
+        { diagnostic: { name, failureClass, status, code, operation } },
         "Could not persist the run to Notion Sync Log",
       );
     }

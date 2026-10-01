@@ -27,8 +27,11 @@ function capture(): { stream: DestinationStream; lines: string[] } {
   return { lines, stream: { write: (line: string) => void lines.push(line) } };
 }
 
-/** A sync run with one new assignment whose page create fails with `error`. */
-async function failedRun(error: Error) {
+/**
+ * A sync run with one new assignment whose page create fails with `error`, and whose Sync Log
+ * create fails with `logError` when one is given.
+ */
+async function failedRun(error: Error, logError?: Error) {
   const gateway = new FakeGateway();
   gateway.courses.push({
     id: "course",
@@ -39,7 +42,11 @@ async function failedRun(error: Error) {
   });
   const createPage = gateway.createPage.bind(gateway);
   vi.spyOn(gateway, "createPage").mockImplementation((id, properties, options) =>
-    id === "assignments" ? Promise.reject(error) : createPage(id, properties, options),
+    id === "assignments"
+      ? Promise.reject(error)
+      : id === "log" && logError
+        ? Promise.reject(logError)
+        : createPage(id, properties, options),
   );
   const assignment: ExternalAssignment = {
     uid: UID,
@@ -111,6 +118,30 @@ describe("failure details stay out of GitHub Actions output", () => {
     expect(syncLog).toContain(PRIVATE_TEXT);
   });
 
+  it("logs only the classification of a Sync Log failure, which can quote the report", async () => {
+    const { result, annotations, logLines } = await failedRun(
+      new Error(`${UID}: ${PRIVATE_TEXT}`),
+      Object.assign(new Error(`body.children: "${PRIVATE_TEXT}" (${UID}) is invalid`), {
+        status: 400,
+        code: "validation_error",
+      }),
+    );
+    expect(result.status).toBe("Failed");
+    expect(result.errors.join("\n")).toContain("Sync Log write failed");
+    const output = [...annotations, ...logLines].join("\n");
+    expect(output).not.toContain(UID);
+    expect(output).not.toContain("MyPrivateNotes");
+    const logged = logLines
+      .map((line) => JSON.parse(line) as { msg: string; diagnostic?: unknown })
+      .find((line) => line.msg === "Could not persist the run to Notion Sync Log");
+    expect(logged?.diagnostic).toEqual({
+      name: "Error",
+      failureClass: "definite-response",
+      status: 400,
+      code: "validation_error",
+    });
+  });
+
   it("labels an apply failure by its cause", async () => {
     const ambiguous = await failedRun(new AmbiguousNotionWriteError(`lost ${PRIVATE_TEXT}`));
     expect(ambiguous.result.errors[0]).toBe(
@@ -124,14 +155,20 @@ describe("failure details stay out of GitHub Actions output", () => {
     );
   });
 
-  it("annotates dry-run warnings", () => {
+  it("annotates warnings in dry runs and failed runs", () => {
     const value = runResult({
       status: "Dry Run",
       warnings: [{ code: "suspicious", message: "1 assignment-like event(s) were quarantined" }],
     });
     expect(workflowAnnotations(config({ GITHUB_ACTIONS: "true" }), value)).toEqual([
-      "::warning::Run completed with meaningful diagnostics (suspicious=0, malformed=0, duplicates=0, quarantined=0): 1 assignment-like event(s) were quarantined",
+      "::warning::Run found meaningful diagnostics (suspicious=0, malformed=0, duplicates=0, quarantined=0): 1 assignment-like event(s) were quarantined",
     ]);
+    value.status = "Failed";
+    expect(workflowAnnotations(config({ GITHUB_ACTIONS: "true" }), value)).toEqual([
+      "::error::1 error(s) recorded. See workflow logs for details.",
+      "::warning::Run found meaningful diagnostics (suspicious=0, malformed=0, duplicates=0, quarantined=0): 1 assignment-like event(s) were quarantined",
+    ]);
+    value.status = "Dry Run";
     value.warnings = [];
     expect(workflowAnnotations(config({ GITHUB_ACTIONS: "true" }), value)).toEqual([]);
   });
