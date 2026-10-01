@@ -26,6 +26,8 @@ export interface ClassificationResult {
 const ABSOLUTE_URL = /https?:\/\/[^\s<>"']+/gi;
 const PATH_ROUTE = /\/courses\/(\d+)\/assignments\/(\d+)(?=\/|[?#\s<>"')\],.;!?]|$)/gi;
 const ASSIGNMENT_LIKE_ROUTE = /\/assignments(?:\/|\?|$)/i;
+const FRAGMENT_ITEM = /#(assignment|calendar_event)_(\d+)(?!\d)/gi;
+const RELATIVE_BASE = "https://relative.invalid";
 
 type CanvasItemKind = "assignment" | "calendar-event";
 
@@ -80,6 +82,43 @@ function relativeRoutes(value: string): LinkIdentity[] {
   });
 }
 
+/** A relative calendar link such as `/calendar?include_contexts=course_1#assignment_2`. */
+function relativeCalendarLinks(value: string): LinkIdentity[] {
+  return value.split(/\s+/).flatMap((token): LinkIdentity[] => {
+    const candidate = cleanUrlCandidate(token.replace(/^[([<"']+/, ""));
+    if (!candidate.startsWith("/") || candidate.startsWith("//")) return [];
+    // The placeholder origin only lets URL parse the path; it is never kept.
+    const link = canvasCalendarLinkIdentity(new URL(candidate, RELATIVE_BASE).toString());
+    if (!link) return [];
+    return [
+      {
+        kind: link.kind,
+        id: link.id,
+        evidence: "canvas-calendar-link",
+        ...(link.courseId ? { courseId: link.courseId } : {}),
+      },
+    ];
+  });
+}
+
+/**
+ * Every item fragment, in whatever shape of link it appears. These name no course or URL, so they
+ * can only expose a conflict that the stricter parsers above did not recognize.
+ */
+function fragmentItems(value: string): LinkIdentity[] {
+  return [...value.matchAll(FRAGMENT_ITEM)].flatMap((match): LinkIdentity[] =>
+    match[1] && match[2]
+      ? [
+          {
+            kind: match[1].toLowerCase() === "assignment" ? "assignment" : "calendar-event",
+            id: match[2],
+            evidence: "canvas-calendar-link",
+          },
+        ]
+      : [],
+  );
+}
+
 /**
  * Only URL and LOCATION can name the event's own Canvas item. A description is prose that may link
  * any number of other assignments, so it never decides identity (#47). Every link in those fields
@@ -89,6 +128,8 @@ function linkIdentity(values: string[]): LinkIdentity | "conflict" | undefined {
   const links = [
     ...values.flatMap(absoluteUrls).flatMap((candidate) => absoluteLink(candidate) ?? []),
     ...values.flatMap(relativeRoutes),
+    ...values.flatMap(relativeCalendarLinks),
+    ...values.flatMap(fragmentItems),
   ];
   const [first] = links;
   if (!first) return;
