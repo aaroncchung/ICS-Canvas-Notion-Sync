@@ -52,8 +52,8 @@ describe("Canvas event classification", () => {
     });
   });
 
-  it("names no course when a calendar link has no single course context", () => {
-    for (const contexts of ["", "include_contexts=course_1,course_2", "include_contexts=user_7"]) {
+  it("names no course when a calendar link has no course context", () => {
+    for (const contexts of ["", "include_contexts=user_7"]) {
       const result = classifyEvent({
         uid: "event-assignment-456",
         url: `https://canvas.example.edu/calendar?${contexts}#assignment_456`,
@@ -134,6 +134,21 @@ describe("Canvas event classification", () => {
       "a relative calendar link in another course",
       "event-assignment-456",
       "/calendar?include_contexts=course_2#assignment_456",
+    ],
+    [
+      "a bracketed relative calendar link in another course",
+      "event-assignment-456",
+      "[/calendar?include_contexts=course_2#assignment_456]",
+    ],
+    [
+      "a quoted relative calendar link in another course",
+      "event-assignment-456",
+      'Open "/calendar?include_contexts=course_2#assignment_456"',
+    ],
+    [
+      "a calendar link with two course contexts",
+      "event-assignment-456",
+      "/calendar?include_contexts=course_1,course_2#assignment_456",
     ],
     [
       "a bare fragment naming another assignment",

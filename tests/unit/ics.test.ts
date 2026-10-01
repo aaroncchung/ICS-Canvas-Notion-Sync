@@ -313,22 +313,43 @@ describe("Canvas feed shapes and malformed events", () => {
     ]);
   });
 
-  it("quarantines a mismatched UID and link with a distinct reason", () => {
-    const parsed = parseIcs(
-      calendar(
-        event(
-          "UID:event-assignment-456\nDTSTART:20260701T120000Z\nSUMMARY:Homework [EE 10]\nURL;VALUE=URI:https://canvas.example.edu/calendar?include_contexts=course_1#assignment_457",
+  it.each([
+    ["the UID", "course_1#assignment_457", ""],
+    [
+      "a bracketed LOCATION link",
+      "course_1#assignment_456",
+      "[/calendar?include_contexts=course_2#assignment_456]",
+    ],
+    [
+      "a quoted LOCATION link",
+      "course_1#assignment_456",
+      'Open "/calendar?include_contexts=course_2#assignment_456"',
+    ],
+  ])(
+    "quarantines a URL that disagrees with %s, with a distinct reason",
+    (_other, target, location) => {
+      const parsed = parseIcs(
+        calendar(
+          event(
+            [
+              "UID:event-assignment-456",
+              "DTSTART:20260701T120000Z",
+              "SUMMARY:Homework [EE 10]",
+              `URL;VALUE=URI:https://canvas.example.edu/calendar?include_contexts=${target}`,
+              ...(location ? [`LOCATION:${location}`] : []),
+            ].join("\n"),
+          ),
         ),
-      ),
-      assignmentTypeMatcher,
-    );
-    expect(parsed.assignments).toEqual([]);
-    expect(parsed.diagnostics.quarantinedUids).toEqual(["event-assignment-456"]);
-    expect(parsed.diagnostics.events[0]).toMatchObject({
-      kind: "suspicious",
-      reason: "canvas-identity-mismatch",
-    });
-  });
+        assignmentTypeMatcher,
+      );
+      expect(parsed.assignments).toEqual([]);
+      expect(parsed.diagnostics.quarantinedUids).toEqual(["event-assignment-456"]);
+      expect(parsed.diagnostics.events[0]).toMatchObject({
+        kind: "suspicious",
+        reason: "canvas-identity-mismatch",
+      });
+    },
+  );
 
   it.each([
     ["trailing whitespace", "abc-77@canvas", "abc-77@canvas "],

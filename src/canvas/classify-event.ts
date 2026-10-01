@@ -27,7 +27,7 @@ const ABSOLUTE_URL = /https?:\/\/[^\s<>"']+/gi;
 const PATH_ROUTE = /\/courses\/(\d+)\/assignments\/(\d+)(?=\/|[?#\s<>"')\],.;!?]|$)/gi;
 const ASSIGNMENT_LIKE_ROUTE = /\/assignments(?:\/|\?|$)/i;
 const FRAGMENT_ITEM = /#(assignment|calendar_event)_(\d+)(?!\d)/gi;
-const RELATIVE_BASE = "https://relative.invalid";
+const COURSE_MENTION = /\bcourse_(\d+)(?!\d)|\/courses\/(\d+)(?!\d)/gi;
 
 type CanvasItemKind = "assignment" | "calendar-event";
 
@@ -82,28 +82,9 @@ function relativeRoutes(value: string): LinkIdentity[] {
   });
 }
 
-/** A relative calendar link such as `/calendar?include_contexts=course_1#assignment_2`. */
-function relativeCalendarLinks(value: string): LinkIdentity[] {
-  return value.split(/\s+/).flatMap((token): LinkIdentity[] => {
-    const candidate = cleanUrlCandidate(token.replace(/^[([<"']+/, ""));
-    if (!candidate.startsWith("/") || candidate.startsWith("//")) return [];
-    // The placeholder origin only lets URL parse the path; it is never kept.
-    const link = canvasCalendarLinkIdentity(new URL(candidate, RELATIVE_BASE).toString());
-    if (!link) return [];
-    return [
-      {
-        kind: link.kind,
-        id: link.id,
-        evidence: "canvas-calendar-link",
-        ...(link.courseId ? { courseId: link.courseId } : {}),
-      },
-    ];
-  });
-}
-
 /**
- * Every item fragment, in whatever shape of link it appears. These name no course or URL, so they
- * can only expose a conflict that the stricter parsers above did not recognize.
+ * Every item fragment, in whatever shape of link it appears, such as a relative
+ * `/calendar?include_contexts=course_1#assignment_2` wrapped in brackets or quotes.
  */
 function fragmentItems(value: string): LinkIdentity[] {
   return [...value.matchAll(FRAGMENT_ITEM)].flatMap((match): LinkIdentity[] =>
@@ -119,21 +100,29 @@ function fragmentItems(value: string): LinkIdentity[] {
   );
 }
 
+/** Every course named in any shape: `course_N` contexts and `/courses/N` paths. */
+function courseMentions(value: string): string[] {
+  return [...value.matchAll(COURSE_MENTION)].flatMap((match) => match[1] ?? match[2] ?? []);
+}
+
 /**
  * Only URL and LOCATION can name the event's own Canvas item. A description is prose that may link
- * any number of other assignments, so it never decides identity (#47). Every link in those fields
- * is read, because one that names a different item makes the event's identity unknowable.
+ * any number of other assignments, so it never decides identity (#47). Every item and course those
+ * fields mention is compared, whatever the shape of its link, because any second item or course
+ * makes the event's identity unknowable.
  */
 function linkIdentity(values: string[]): LinkIdentity | "conflict" | undefined {
   const links = [
     ...values.flatMap(absoluteUrls).flatMap((candidate) => absoluteLink(candidate) ?? []),
     ...values.flatMap(relativeRoutes),
-    ...values.flatMap(relativeCalendarLinks),
     ...values.flatMap(fragmentItems),
   ];
   const [first] = links;
   if (!first) return;
-  const courseIds = new Set(links.flatMap((link) => link.courseId ?? []));
+  const courseIds = new Set([
+    ...links.flatMap((link) => link.courseId ?? []),
+    ...values.flatMap(courseMentions),
+  ]);
   if (
     links.some((link) => link.kind !== first.kind || link.id !== first.id) ||
     courseIds.size > 1
