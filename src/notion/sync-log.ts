@@ -24,10 +24,11 @@ function section(titleValue: string, lines: string[]): Block[] {
   return [heading(titleValue), ...paragraphs(lines.length ? lines.join("\n") : "None")];
 }
 
+/** One page per workflow run attempt, so re-running a job keeps the earlier attempt's record. */
 function runTitle(config: AppConfig, startedAt: string): string {
-  return config.GITHUB_RUN_ID
-    ? `Canvas sync GitHub run ${config.GITHUB_RUN_ID}`
-    : `Canvas sync ${startedAt}`;
+  if (!config.GITHUB_RUN_ID) return `Canvas sync ${startedAt}`;
+  const attempt = config.GITHUB_RUN_ATTEMPT;
+  return `Canvas sync GitHub run ${config.GITHUB_RUN_ID}${attempt && attempt !== "1" ? ` attempt ${attempt}` : ""}`;
 }
 
 function logProperties(
@@ -53,7 +54,7 @@ function logProperties(
     Unchanged: number(result.counts.unchanged),
     Skipped: number(result.counts.skipped),
     "Warning Count": number(result.counts.warningCount),
-    "Error Summary": text(result.errors.join("; ").slice(0, 2000)),
+    "Error Summary": text(result.errors.join("; ")),
     "Commit SHA": text(config.GITHUB_SHA ?? ""),
   };
   const runUrl = workflowUrl(config);

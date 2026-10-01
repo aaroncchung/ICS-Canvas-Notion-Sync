@@ -1,3 +1,5 @@
+import { truncateText } from "../text.ts";
+
 function object(value: unknown): Record<string, unknown> | undefined {
   return value && typeof value === "object" ? (value as Record<string, unknown>) : undefined;
 }
@@ -70,10 +72,10 @@ export function readRelation(properties: Record<string, unknown>, name: string):
 }
 
 export const text = (value: string): Record<string, unknown> => ({
-  rich_text: value ? [{ type: "text", text: { content: value.slice(0, 2000) } }] : [],
+  rich_text: value ? [{ type: "text", text: { content: truncateText(value, 2000) } }] : [],
 });
 export const title = (value: string): Record<string, unknown> => ({
-  title: [{ type: "text", text: { content: value.slice(0, 2000) } }],
+  title: [{ type: "text", text: { content: truncateText(value, 2000) } }],
 });
 export const date = (value?: string | null): Record<string, unknown> => ({
   date: value ? { start: value } : null,

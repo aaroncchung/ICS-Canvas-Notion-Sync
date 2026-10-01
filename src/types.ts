@@ -69,6 +69,8 @@ export interface FeedDiagnostics {
   normalizedAssignmentUids: string[];
   quarantinedUids: string[];
   events: FeedEventDiagnostic[];
+  /** Warnings node-ical printed while parsing; only the count is kept because they quote UIDs. */
+  parserWarnings?: number;
 }
 
 export interface AssignmentFeed {

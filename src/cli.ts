@@ -27,6 +27,7 @@ export interface RunDependencies {
   provider?: AssignmentProvider;
   summaryAppender?: SummaryAppender;
   now?: () => Date;
+  logger?: Logger;
 }
 
 export type SummaryAppender = (path: string, data: string, encoding: "utf8") => Promise<void>;
@@ -75,13 +76,19 @@ function workflowCommand(kind: "error" | "warning", message: string, secrets: st
   return `::${kind}::${sanitized}`;
 }
 
+/**
+ * Annotations are public in a public repository's Actions logs, so they carry only aggregate
+ * counts, warning messages built from counts, and the failure summary. Failure details, which
+ * can name a Canvas UID or quote description text, stay in the Notion Sync Log.
+ */
 export function workflowAnnotations(config: AppConfig, result: RunResult): string[] {
   if (config.GITHUB_ACTIONS !== "true") return [];
   const secrets = [config.CANVAS_ICS_URL, config.NOTION_TOKEN];
   if (result.status === "Failed") {
-    return [workflowCommand("error", result.errors[0] ?? "Synchronization failed", secrets)];
+    return [workflowCommand("error", failureSummary(result) ?? "Synchronization failed", secrets)];
   }
-  if (result.status !== "Warning") return [];
+  // Dry runs are how a new feed is inspected, so their warnings are annotated too.
+  if (!result.warnings.length) return [];
   const diagnosticCounts = [
     `suspicious=${result.counts.suspiciousEvents}`,
     `malformed=${result.counts.malformedEvents}`,
@@ -95,7 +102,7 @@ export function workflowAnnotations(config: AppConfig, result: RunResult): strin
   return [
     workflowCommand(
       "warning",
-      `Sync completed with meaningful diagnostics (${diagnosticCounts})${warningSummary ? `: ${warningSummary}` : ""}`,
+      `Run completed with meaningful diagnostics (${diagnosticCounts})${warningSummary ? `: ${warningSummary}` : ""}`,
       secrets,
     ),
   ];
@@ -106,7 +113,7 @@ export async function run(
   dependencies: RunDependencies = {},
 ): Promise<RunResult> {
   const secrets = [config.CANVAS_ICS_URL, config.NOTION_TOKEN];
-  const logger = createLogger();
+  const logger = dependencies.logger ?? createLogger();
 
   const gateway = dependencies.gateway ?? new OfficialNotionGateway(config.NOTION_TOKEN, logger);
   const baseline = requestDifference(gateway.requestMetrics, createRequestMetrics());
@@ -173,7 +180,10 @@ export async function run(
     if (error instanceof ApplyPlanError) result.execution = error.execution;
     result.status = "Failed";
     result.errors.push(safeError(error, secrets));
-    logger.error({ diagnostic: safeDiagnostic(error, secrets) }, "Synchronization run failed");
+    const diagnostic = safeDiagnostic(error, secrets);
+    // The cause of an apply failure can quote assignment text; the Sync Log records it instead.
+    if (error instanceof ApplyPlanError) delete diagnostic.cause;
+    logger.error({ diagnostic }, "Synchronization run failed");
   }
   const reportingStart = requestDifference(gateway.requestMetrics, createRequestMetrics());
   result = finalizeRun(result, config.mode, requestDifference(reportingStart, baseline));

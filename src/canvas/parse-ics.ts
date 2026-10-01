@@ -47,6 +47,24 @@ function toEvent(value: unknown): RawCalendarEvent | undefined {
   };
 }
 
+/**
+ * Runs node-ical's synchronous parser with `console.warn` captured. node-ical warns with raw UIDs
+ * and feed values (for example when it drops an older SEQUENCE of a duplicate UID), and those
+ * would reach the Actions log unredacted. Only the number of warnings is kept.
+ */
+function parseQuietly(source: string): { parsed: unknown; parserWarnings: number } {
+  const warn = console.warn;
+  let parserWarnings = 0;
+  console.warn = () => {
+    parserWarnings += 1;
+  };
+  try {
+    return { parsed: ical.sync.parseICS(source), parserWarnings };
+  } finally {
+    console.warn = warn;
+  }
+}
+
 export function parseIcs(
   source: string,
   assignmentTypeMatcher: AssignmentTypeMatcher,
@@ -58,8 +76,9 @@ export function parseIcs(
     throw new Error("Canvas feed is not a complete VCALENDAR document");
   }
   let parsed: unknown;
+  let parserWarnings: number;
   try {
-    parsed = ical.sync.parseICS(source);
+    ({ parsed, parserWarnings } = parseQuietly(source));
   } catch {
     throw new Error("Canvas feed could not be parsed as RFC 5545 calendar data");
   }
@@ -180,6 +199,7 @@ export function parseIcs(
       ),
       quarantinedUids: [...quarantinedUids],
       events,
+      parserWarnings,
     },
   };
 }

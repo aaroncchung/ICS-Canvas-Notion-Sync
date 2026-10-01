@@ -8,6 +8,7 @@ import type {
 } from "../types.ts";
 import { AmbiguousNotionWriteError, isAmbiguousWriteError, type NotionGateway } from "./client.ts";
 import { pollForUniquePage, type VisibilityPollingOptions } from "./recovery.ts";
+import { truncateText } from "../text.ts";
 import {
   checkbox,
   date,
@@ -34,9 +35,7 @@ export const DESCRIPTION_EXCERPT_LENGTH = 1900;
 
 /** The leading text of a description; a cut through an emoji drops the half Notion would reject. */
 export function descriptionExcerpt(source: ExternalAssignment): string {
-  return (source.descriptionPlainText ?? "")
-    .slice(0, DESCRIPTION_EXCERPT_LENGTH)
-    .replace(/\p{Surrogate}$/u, "");
+  return truncateText(source.descriptionPlainText ?? "", DESCRIPTION_EXCERPT_LENGTH);
 }
 
 export async function readAssignments(

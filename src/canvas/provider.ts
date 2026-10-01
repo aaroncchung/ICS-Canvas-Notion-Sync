@@ -31,6 +31,7 @@ export class CanvasIcsProvider implements AssignmentProvider {
         assignments: feed.assignments.length,
         cancelled: feed.cancelledAssignments.length,
         ignored: feed.diagnostics.events.filter((event) => event.kind === "ignored").length,
+        parserWarnings: feed.diagnostics.parserWarnings ?? 0,
       },
       "Canvas ICS feed parsed",
     );

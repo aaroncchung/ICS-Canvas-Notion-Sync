@@ -156,7 +156,7 @@ export function failureSummary(result: RunResult): string | undefined {
   const failed = result.execution?.failedOperation;
   if (failed) {
     const remaining = result.execution?.notAttempted.length ?? 0;
-    return `${failed.kind} ${failed.outcome}; ${remaining} later operation(s) not attempted. See workflow logs for details.`;
+    return `${failed.kind} ${failed.outcome}; ${remaining} later operation(s) not attempted. See the Notion Sync Log for details.`;
   }
   return `${result.errors.length || 1} error(s) recorded. See workflow logs for details.`;
 }
