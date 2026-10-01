@@ -47,7 +47,12 @@ export function resolveDates(
   } else if (
     current.effectiveDueDate &&
     current.canvasDueDate &&
-    datesEqual(current.effectiveDueDate, current.canvasDueDate, timeZone)
+    datesEqual(current.effectiveDueDate, current.canvasDueDate, timeZone) &&
+    // Canvas reaching the override date is not the user moving Effective back.
+    !(
+      current.overrideDueDate &&
+      datesEqual(current.effectiveDueDate, current.overrideDueDate, timeZone)
+    )
   ) {
     override = undefined;
   } else if (

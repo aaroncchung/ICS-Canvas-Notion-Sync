@@ -161,8 +161,8 @@ On creation, Personal Status is `Not started`, Priority is blank, and Assignment
 `Canvas Due Date` follows Canvas. `Effective Due Date` is a normal writable date used by Notion Calendar. Before a Canvas date change, the sync compares Effective Due Date to the previous expected value (Override Due Date when present, otherwise the prior Canvas Due Date):
 
 - A different Effective Due Date is captured in Override Due Date.
-- An override continues to win over later Canvas changes.
-- Moving Effective Due Date back to the current Canvas Due Date clears the override and resumes following Canvas.
+- An override continues to win over later Canvas changes, including after Canvas moves to the override date.
+- Moving Effective Due Date back to the current Canvas Due Date clears the override and resumes following Canvas. Once Canvas has reached the override date, clear Override Due Date instead.
 - If Canvas previously had no due date, a populated Effective Due Date is captured as the manual override and preserved when Canvas later adds or changes its date.
 - Equivalent timestamps compare by instant, and equivalent date-only/timestamp calendar dates do not create false overrides.
 
