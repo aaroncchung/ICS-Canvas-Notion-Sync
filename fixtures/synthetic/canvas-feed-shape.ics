@@ -1,0 +1,27 @@
+BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//Instructure//Canvas Synthetic//EN
+X-WR-CALNAME:Synthetic Student Calendar (Canvas)
+BEGIN:VEVENT
+UID:event-assignment-456
+DTSTAMP:20260713T120000Z
+DTSTART:20260715T235900Z
+DTEND:20260715T235900Z
+SUMMARY;LANGUAGE=en-US:Homework 1 [Fa26 EE-0010 Circuits]
+DESCRIPTION;LANGUAGE=en-US:Read chapter 1 and solve problems.
+X-ALT-DESC;FMTTYPE=text/html:<p>Read <strong>chapter 1</strong> and solve problems.</p>
+LOCATION;LANGUAGE=en-US:Online
+URL;VALUE=URI:https://canvas.example.edu/calendar?include_contexts=course_123&month=07&year=2026#assignment_456
+END:VEVENT
+BEGIN:VEVENT
+UID:event-calendar-event-789
+DTSTAMP:20260713T120000Z
+DTSTART:20260716T170000Z
+DTEND:20260716T180000Z
+SUMMARY:Office hours [Fa26 EE-0010 Circuits]
+DESCRIPTION:Bring questions about https://canvas.example.edu/courses/123/assignments/456
+X-ALT-DESC;FMTTYPE=text/html:<p>Bring questions about <a href="https://canvas.example.edu/courses/123/assignments/456">Homework 1</a></p>
+LOCATION:Room 101
+URL;VALUE=URI:https://canvas.example.edu/calendar?include_contexts=course_123&month=07&year=2026#calendar_event_789
+END:VEVENT
+END:VCALENDAR

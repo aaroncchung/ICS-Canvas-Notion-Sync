@@ -213,6 +213,283 @@ describe("RFC 5545 Canvas parsing", () => {
   });
 });
 
+describe("Canvas feed shapes and malformed events", () => {
+  const assignmentUrl = "https://canvas.example.edu/courses/123/assignments/456";
+
+  it("reads the real Canvas feed shape: parameterized values and calendar links", async () => {
+    const parsed = parseIcs(await fixture("canvas-feed-shape.ics"), assignmentTypeMatcher);
+    expect(parsed.assignments).toEqual([
+      expect.objectContaining({
+        uid: "event-assignment-456",
+        title: "Homework 1",
+        courseName: "Fa26 EE-0010 Circuits",
+        courseCode: "EE-0010",
+        canvasCourseId: "123",
+        canvasAssignmentId: "456",
+        canvasUrl: assignmentUrl,
+        descriptionPlainText: "Read chapter 1 and solve problems.",
+      }),
+    ]);
+    expect(parsed.diagnostics.events).toEqual([
+      {
+        kind: "ignored",
+        reason: "ordinary-calendar-event",
+        uid: "event-calendar-event-789",
+        indicators: ["canvas-calendar-link", "canvas-calendar-event-uid"],
+      },
+    ]);
+    expect(parsed.diagnostics.quarantinedUids).toEqual([]);
+  });
+
+  // The three reproductions in #45.
+  it("imports a non-Canvas UID whose parameterized URL is an assignment route", () => {
+    const parsed = parseIcs(
+      calendar(
+        event(
+          `UID:abc-123@canvas.example.edu\nDTSTART:20260701T120000Z\nSUMMARY:Homework 2 [EE 10]\nURL;VALUE=URI:${assignmentUrl}`,
+        ),
+      ),
+      assignmentTypeMatcher,
+    );
+    expect(parsed.assignments[0]).toMatchObject({
+      uid: "abc-123@canvas.example.edu",
+      canvasCourseId: "123",
+      canvasAssignmentId: "456",
+      canvasUrl: assignmentUrl,
+    });
+  });
+
+  it("keeps the course and URL of a Canvas UID with a parameterized URL", () => {
+    const parsed = parseIcs(
+      calendar(
+        event(
+          `UID:event-assignment-456\nDTSTART:20260701T120000Z\nSUMMARY:Homework 2 [EE 10]\nURL;VALUE=URI:${assignmentUrl}`,
+        ),
+      ),
+      assignmentTypeMatcher,
+    );
+    expect(parsed.assignments[0]).toMatchObject({
+      canvasCourseId: "123",
+      canvasUrl: assignmentUrl,
+    });
+  });
+
+  it("reads parameterized SUMMARY, DESCRIPTION, and LOCATION values", () => {
+    const parsed = parseIcs(
+      calendar(
+        event(
+          [
+            "UID:event-assignment-456",
+            "DTSTART:20260701T120000Z",
+            "SUMMARY;LANGUAGE=en-US:Homework 2 [EE 10]",
+            "DESCRIPTION;LANGUAGE=en-US:Show your work.",
+            `LOCATION;LANGUAGE=en-US:${assignmentUrl}`,
+          ].join("\n"),
+        ),
+      ),
+      assignmentTypeMatcher,
+    );
+    expect(parsed.assignments[0]).toMatchObject({
+      title: "Homework 2",
+      courseCode: "EE 10",
+      descriptionPlainText: "Show your work.",
+      canvasUrl: assignmentUrl,
+    });
+  });
+
+  it("keeps events whose parameterized UIDs node-ical would index together", () => {
+    const parsed = parseIcs(
+      calendar(
+        [
+          event("UID;X-A=1:event-assignment-1\nDTSTART:20260701T120000Z\nSUMMARY:One [EE 10]"),
+          event("UID;X-A=1:event-assignment-2\nDTSTART:20260701T120000Z\nSUMMARY:Two [EE 10]"),
+        ].join("\n"),
+      ),
+      assignmentTypeMatcher,
+    );
+    expect(parsed.assignments.map((item) => item.uid)).toEqual([
+      "event-assignment-1",
+      "event-assignment-2",
+    ]);
+  });
+
+  it.each([
+    ["the UID", "course_1#assignment_457", ""],
+    [
+      "a bracketed LOCATION link",
+      "course_1#assignment_456",
+      "[/calendar?include_contexts=course_2#assignment_456]",
+    ],
+    [
+      "a quoted LOCATION link",
+      "course_1#assignment_456",
+      'Open "/calendar?include_contexts=course_2#assignment_456"',
+    ],
+    ["its own encoded second course", "course_1%2Ccourse_2#assignment_456", ""],
+    [
+      "an encoded LOCATION link",
+      "course_1#assignment_456",
+      "/calendar?include_contexts=course_1%252Ccourse_2%23assignment_456",
+    ],
+    ["an encoded LOCATION fragment", "course_1#assignment_456", "/calendar%23assignment_457"],
+  ])(
+    "quarantines a URL that disagrees with %s, with a distinct reason",
+    (_other, target, location) => {
+      const parsed = parseIcs(
+        calendar(
+          event(
+            [
+              "UID:event-assignment-456",
+              "DTSTART:20260701T120000Z",
+              "SUMMARY:Homework [EE 10]",
+              `URL;VALUE=URI:https://canvas.example.edu/calendar?include_contexts=${target}`,
+              ...(location ? [`LOCATION:${location}`] : []),
+            ].join("\n"),
+          ),
+        ),
+        assignmentTypeMatcher,
+      );
+      expect(parsed.assignments).toEqual([]);
+      expect(parsed.diagnostics.quarantinedUids).toEqual(["event-assignment-456"]);
+      expect(parsed.diagnostics.events[0]).toMatchObject({
+        kind: "suspicious",
+        reason: "canvas-identity-mismatch",
+      });
+    },
+  );
+
+  it.each([
+    ["trailing whitespace", "abc-77@canvas", "abc-77@canvas "],
+    ["ICS escaping", "abc,77@canvas", "abc\\,77@canvas"],
+    ["a folded line", "abc-77@canvas", "abc-77@\n canvas"],
+  ])("quarantines duplicate UIDs that differ only by %s (#56)", (_difference, first, second) => {
+    const copy = (uid: string, summary: string) =>
+      event(
+        `UID:${uid}\nDTSTART:20260701T120000Z\nSUMMARY:${summary} [EE 10]\nURL:https://x.test/courses/1/assignments/77`,
+      );
+    const parsed = parseIcs(
+      calendar(`${copy(first, "Copy A")}\n${copy(second, "Copy B")}`),
+      assignmentTypeMatcher,
+    );
+    expect(parsed.assignments).toEqual([]);
+    expect(parsed.diagnostics.sourceUids).toEqual([first]);
+    expect(parsed.diagnostics.quarantinedUids).toEqual([first]);
+    expect(parsed.diagnostics.events).toEqual([
+      expect.objectContaining({ kind: "duplicate", uid: first }),
+    ]);
+  });
+
+  it.each([
+    [
+      "a duplicate DTSTART",
+      "UID:event-assignment-3\nDTSTART:20260701T120000Z\nDTSTART:20260702T120000Z",
+      "event-assignment-3",
+    ],
+    ["a UID equal to a calendar property name", "UID:prodid\nDTSTART:20260701T120000Z", "prodid"],
+  ])("quarantines one event with %s instead of failing the feed (#56)", (_problem, lines, uid) => {
+    const parsed = parseIcs(
+      calendar(
+        [
+          event(`${lines}\nSUMMARY:Broken [EE 10]`),
+          event(
+            "UID:event-assignment-4\nDTSTART:20260701T120000Z\nSUMMARY:Valid [EE 10]\nURL:https://x.test/courses/1/assignments/4",
+          ),
+        ].join("\n"),
+      ),
+      assignmentTypeMatcher,
+    );
+    expect(parsed.assignments.map((item) => item.uid)).toEqual(["event-assignment-4"]);
+    expect(parsed.diagnostics.totalEvents).toBe(2);
+    expect(parsed.diagnostics.sourceUids).toEqual([uid, "event-assignment-4"]);
+    expect(parsed.diagnostics.quarantinedUids).toEqual([uid]);
+    expect(parsed.diagnostics.events).toEqual([
+      { kind: "malformed", reason: "unparseable-event", uid, indicators: [] },
+    ]);
+  });
+
+  it.each([
+    [
+      "URL",
+      "URL:https://x.test/courses/1/assignments/5\nURL:https://x.test/courses/1/assignments/6",
+    ],
+    ["UID", "UID:event-assignment-6"],
+  ])("quarantines an event that repeats %s", (_property, extra) => {
+    const parsed = parseIcs(
+      calendar(
+        event(`UID:event-assignment-5\nDTSTART:20260701T120000Z\nSUMMARY:Twice [EE 10]\n${extra}`),
+      ),
+      assignmentTypeMatcher,
+    );
+    expect(parsed.assignments).toEqual([]);
+    expect(parsed.diagnostics.events).toEqual([
+      {
+        kind: "malformed",
+        reason: "unparseable-event",
+        uid: "event-assignment-5",
+        indicators: ["repeated-property"],
+      },
+    ]);
+  });
+
+  it("reads events whose component boundaries are folded", () => {
+    const folded = (id: number) =>
+      [
+        "BEGIN:VEV",
+        " ENT",
+        `UID:event-assignment-${id}`,
+        "DTSTART:20260701T120000Z",
+        `SUMMARY:Folded ${id} [EE 10]`,
+        "END:VE",
+        "\tVENT",
+      ].join("\r\n");
+    const parsed = parseIcs(
+      calendar(
+        [
+          folded(1),
+          event(`UID:event-assignment-2\nDTSTART:20260701T120000Z\nSUMMARY:Plain [EE 10]`),
+          folded(3),
+        ].join("\r\n"),
+      ),
+      assignmentTypeMatcher,
+    );
+    expect(parsed.assignments.map((item) => item.uid)).toEqual([
+      "event-assignment-1",
+      "event-assignment-2",
+      "event-assignment-3",
+    ]);
+    expect(parsed.diagnostics.totalEvents).toBe(3);
+    expect(parsed.diagnostics.events).toEqual([]);
+  });
+
+  it("does not take a nested alarm's UID for a repeated event UID", () => {
+    const parsed = parseIcs(
+      calendar(
+        event(
+          [
+            "UID:event-assignment-5",
+            "DTSTART:20260701T120000Z",
+            "SUMMARY:Alarmed [EE 10]",
+            "BEGIN:VALARM",
+            "UID:alarm-1",
+            "ACTION:DISPLAY",
+            "TRIGGER:-PT15M",
+            "END:VALARM",
+          ].join("\n"),
+        ),
+      ),
+      assignmentTypeMatcher,
+    );
+    expect(parsed.assignments.map((item) => item.uid)).toEqual(["event-assignment-5"]);
+  });
+
+  it("still fails the feed for calendar-level damage", () => {
+    const unterminated = calendar(
+      "BEGIN:VEVENT\nUID:event-assignment-1\nDTSTART:20260701T120000Z\nSUMMARY:Open",
+    );
+    expect(() => parseIcs(unterminated, assignmentTypeMatcher)).toThrow("could not be parsed");
+  });
+});
+
 describe("course-code extraction", () => {
   it("extracts uppercase department codes in their common spellings", () => {
     const cases: Array<[string, string]> = [

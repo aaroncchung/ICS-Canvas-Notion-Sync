@@ -7,28 +7,45 @@ import {
   type RawCalendarEvent,
 } from "./normalize-assignment.ts";
 
+const VEVENT_START = /^BEGIN:VEVENT\r?$/gim;
+const VEVENT_BLOCK = /^BEGIN:VEVENT\r?$[\s\S]*?^END:VEVENT\r?$/gim;
+/** A UID line, unfolded, whose parameters may quote a colon. */
+const UID_LINE = /^UID(?:;(?:[^":\r\n]|"[^"\r\n]*")*)?:(.*?)\r?$/gim;
+const NESTED_COMPONENT = /^BEGIN:(?!VEVENT\r?$)([A-Z0-9-]+)\r?$[\s\S]*?^END:\1\r?$/gim;
+const CALENDAR_END = "END:VCALENDAR";
+
+/**
+ * node-ical returns a property that carries parameters, such as `URL;VALUE=URI:`, as
+ * `{ params, val }`, so the value is unwrapped here.
+ */
 function asString(value: unknown): string | undefined {
-  return typeof value === "string" ? value : undefined;
+  if (typeof value === "string") return value;
+  if (value && typeof value === "object" && "val" in value) {
+    return typeof value.val === "string" ? value.val : undefined;
+  }
+  return;
 }
 
 function asDate(value: unknown): Date | undefined {
   return value instanceof Date ? value : undefined;
 }
 
-function toEvent(value: unknown): RawCalendarEvent | undefined {
-  if (!value || typeof value !== "object") return;
+/** Properties RFC 5545 allows once per event; node-ical returns a repeated one as an array. */
+const SINGLE_TEXT_PROPERTIES = ["summary", "description", "url", "location", "status"] as const;
+
+function toEvent(value: unknown, uid: string | undefined): RawCalendarEvent | "repeated-property" {
   const item = value as Record<string, unknown>;
-  if (item.type !== "VEVENT") return;
-  const categories = Array.isArray(item.categories)
-    ? item.categories.filter((category): category is string => typeof category === "string")
-    : typeof item.categories === "string"
-      ? [item.categories]
-      : undefined;
+  if (SINGLE_TEXT_PROPERTIES.some((name) => Array.isArray(item[name]))) return "repeated-property";
+  const categories =
+    item.categories === undefined
+      ? undefined
+      : (Array.isArray(item.categories) ? item.categories : [item.categories])
+          .map(asString)
+          .filter((category): category is string => category !== undefined);
   const start = asDate(item.start);
   const dateOnly =
     item.datetype === "date" ||
     (start && "dateOnly" in start && (start as Date & { dateOnly?: boolean }).dateOnly);
-  const uid = asString(item.uid);
   const summary = asString(item.summary);
   const description = asString(item.description);
   const url = asString(item.url);
@@ -65,44 +82,98 @@ function parseQuietly(source: string): { parsed: unknown; parserWarnings: number
   }
 }
 
+function unescapeText(value: string): string {
+  return value.replace(/\\([\\;,nN])/g, (_, character: string) =>
+    character === "n" || character === "N" ? "\n" : character,
+  );
+}
+
+/**
+ * The UID as written in the unfolded source event, unescaped and trimmed. Every comparison of UIDs
+ * uses this one form, so copies that differ only by whitespace or escaping are duplicates.
+ */
+function sourceUid(block: string): { uid?: string; repeated: boolean } {
+  // A nested component such as VALARM may carry a UID of its own (RFC 9074).
+  const values = [...block.replace(NESTED_COMPONENT, "").matchAll(UID_LINE)].map((match) =>
+    unescapeText(match[1] ?? "").trim(),
+  );
+  const uid = values[0];
+  return { ...(uid ? { uid } : {}), repeated: values.length > 1 };
+}
+
+interface SourceEvent {
+  uid?: string;
+  /** The parsed event, or why it could not be read. */
+  event: RawCalendarEvent | "unparseable" | "repeated-property";
+}
+
+/**
+ * Parses each VEVENT on its own, inside the calendar's other components (such as VTIMEZONE), so
+ * that one malformed event is quarantined instead of failing the whole feed. Parsing per event
+ * also keeps events that node-ical would otherwise index together by UID.
+ */
+function parseEvents(folded: string): { events: SourceEvent[]; parserWarnings: number } {
+  // Component boundaries are content lines too, so they can be folded like any other.
+  const source = folded.replace(/\r?\n[ \t]/g, "");
+  const blocks = source.match(VEVENT_BLOCK) ?? [];
+  const head = source.replace(VEVENT_BLOCK, "").trimEnd().slice(0, -CALENDAR_END.length);
+  if ((source.match(VEVENT_START) ?? []).length !== blocks.length) {
+    throw new Error("Canvas feed has an unterminated VEVENT");
+  }
+  // Calendar-level content is shared by every event, so its failure still fails the feed.
+  const skeleton = parseQuietly(`${head}${CALENDAR_END}`);
+  if (!skeleton.parsed || typeof skeleton.parsed !== "object") {
+    throw new Error("Canvas feed parser returned no calendar data");
+  }
+  let parserWarnings = skeleton.parserWarnings;
+  const events = blocks.map((block): SourceEvent => {
+    const { uid, repeated } = sourceUid(block);
+    const identity = uid ? { uid } : {};
+    if (repeated) return { ...identity, event: "repeated-property" };
+    let parsed: unknown;
+    try {
+      const result = parseQuietly(`${head}${block}\n${CALENDAR_END}`);
+      parsed = result.parsed;
+      parserWarnings += Math.max(0, result.parserWarnings - skeleton.parserWarnings);
+    } catch {
+      return { ...identity, event: "unparseable" };
+    }
+    const vevents = Object.values((parsed ?? {}) as Record<string, unknown>).filter(
+      (value) =>
+        value && typeof value === "object" && (value as { type?: unknown }).type === "VEVENT",
+    );
+    if (vevents.length !== 1) return { ...identity, event: "unparseable" };
+    return { ...identity, event: toEvent(vevents[0], uid) };
+  });
+  return { events, parserWarnings };
+}
+
 export function parseIcs(
   source: string,
   assignmentTypeMatcher: AssignmentTypeMatcher,
 ): AssignmentFeed {
   if (
     !source.trimStart().startsWith("BEGIN:VCALENDAR") ||
-    !source.trimEnd().endsWith("END:VCALENDAR")
+    !source.trimEnd().endsWith(CALENDAR_END)
   ) {
     throw new Error("Canvas feed is not a complete VCALENDAR document");
   }
-  let parsed: unknown;
+  let sourceEvents: SourceEvent[];
   let parserWarnings: number;
   try {
-    ({ parsed, parserWarnings } = parseQuietly(source));
+    ({ events: sourceEvents, parserWarnings } = parseEvents(source));
   } catch {
     throw new Error("Canvas feed could not be parsed as RFC 5545 calendar data");
   }
-  if (!parsed || typeof parsed !== "object") {
-    throw new Error("Canvas feed parser returned no calendar data");
-  }
-  // node-ical indexes VEVENTs by UID, so retain source identity before that index collapses it.
-  const rawEvents = source.split(/^BEGIN:VEVENT\r?$/gim).slice(1);
-  const sourceUids = rawEvents
-    .map((rawEvent) => {
-      const eventBody = rawEvent.split(/^END:VEVENT\r?$/im)[0] ?? rawEvent;
-      const unfolded = eventBody.replace(/\r?\n[ \t]/g, "");
-      return unfolded.match(/^UID(?:;[^:]*)?:(.+)\r?$/im)?.[1]?.trim();
-    })
-    .filter((uid): uid is string => Boolean(uid));
   const sourceUidCounts = new Map<string, number>();
-  for (const uid of sourceUids) sourceUidCounts.set(uid, (sourceUidCounts.get(uid) ?? 0) + 1);
-  const sourceEventCount = rawEvents.length;
+  for (const { uid } of sourceEvents) {
+    if (uid) sourceUidCounts.set(uid, (sourceUidCounts.get(uid) ?? 0) + 1);
+  }
 
   const assignments: AssignmentFeed["assignments"] = [];
   const cancelledAssignments: AssignmentFeed["cancelledAssignments"] = [];
   const events: FeedEventDiagnostic[] = [];
   const quarantinedUids = new Set<string>();
-  const handledUids = new Set<string>();
   const duplicateUids = new Set(
     [...sourceUidCounts.entries()].filter(([, count]) => count > 1).map(([uid]) => uid),
   );
@@ -115,31 +186,37 @@ export function parseIcs(
       indicators: ["duplicate-uid"],
     });
   }
-  let parsedEvents = 0;
 
-  for (const value of Object.values(parsed as Record<string, unknown>)) {
-    const event = toEvent(value);
-    if (!event) continue;
-    parsedEvents += 1;
-    if (event.uid) handledUids.add(event.uid);
-    if (event.uid && duplicateUids.has(event.uid)) continue;
+  for (const { uid, event } of sourceEvents) {
+    if (uid && duplicateUids.has(uid)) continue;
+    if (typeof event === "string") {
+      if (uid) quarantinedUids.add(uid);
+      events.push({
+        kind: "malformed",
+        reason: "unparseable-event",
+        ...(uid ? { uid } : {}),
+        indicators: event === "repeated-property" ? [event] : [],
+      });
+      continue;
+    }
 
     const classification = classifyEvent(event);
     if (classification.kind === "ordinary") {
       events.push({
         kind: "ignored",
         reason: "ordinary-calendar-event",
-        ...(event.uid ? { uid: event.uid } : {}),
+        ...(uid ? { uid } : {}),
         indicators: classification.evidence,
       });
       continue;
     }
-    if (classification.kind === "suspicious") {
-      if (event.uid) quarantinedUids.add(event.uid);
+    if (classification.kind === "suspicious" || classification.kind === "mismatch") {
+      if (uid) quarantinedUids.add(uid);
       events.push({
         kind: "suspicious",
-        reason: "assignment-like-event",
-        ...(event.uid ? { uid: event.uid } : {}),
+        reason:
+          classification.kind === "mismatch" ? "canvas-identity-mismatch" : "assignment-like-event",
+        ...(uid ? { uid } : {}),
         indicators: classification.evidence,
       });
       continue;
@@ -159,40 +236,21 @@ export function parseIcs(
         assignments.push(assignment);
       }
     } catch {
-      if (event.uid) quarantinedUids.add(event.uid);
+      if (uid) quarantinedUids.add(uid);
       events.push({
         kind: "malformed",
         reason: "malformed-assignment-event",
-        ...(event.uid ? { uid: event.uid } : {}),
+        ...(uid ? { uid } : {}),
         indicators: classification.evidence,
       });
     }
-  }
-
-  const duplicateExtras = [...sourceUidCounts.values()].reduce(
-    (total, count) => total + Math.max(0, count - 1),
-    0,
-  );
-  const unparsedEvents = Math.max(0, sourceEventCount - parsedEvents - duplicateExtras);
-  const unhandledUids = [...sourceUidCounts.keys()].filter(
-    (uid) => !handledUids.has(uid) && !duplicateUids.has(uid),
-  );
-  for (let index = 0; index < unparsedEvents; index += 1) {
-    const uid = unhandledUids[index];
-    if (uid) quarantinedUids.add(uid);
-    events.push({
-      kind: "malformed",
-      reason: "unparseable-event",
-      ...(uid ? { uid } : {}),
-      indicators: [],
-    });
   }
 
   return {
     assignments,
     cancelledAssignments,
     diagnostics: {
-      totalEvents: sourceEventCount,
+      totalEvents: sourceEvents.length,
       sourceUids: [...sourceUidCounts.keys()],
       normalizedAssignmentUids: [...assignments, ...cancelledAssignments].map(
         (assignment) => assignment.uid,

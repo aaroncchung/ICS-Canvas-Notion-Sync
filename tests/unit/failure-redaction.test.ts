@@ -214,19 +214,19 @@ describe("failure details stay out of GitHub Actions output", () => {
     expect(log.lines.join("\n")).not.toContain("MyPrivateNotes");
   });
 
-  it("counts node-ical warnings instead of printing their UIDs", () => {
+  it("counts node-ical warnings instead of printing the feed values they quote", () => {
     const warn = vi.spyOn(console, "warn");
-    const event = (sequence: number) =>
-      [
-        "BEGIN:VEVENT",
-        `UID:${UID}`,
-        `SEQUENCE:${sequence}`,
-        "DTSTART:20261001T120000Z",
-        "SUMMARY:Homework",
-        "END:VEVENT",
-      ].join("\r\n");
+    // node-ical quotes a malformed DURATION in its warning.
+    const event = [
+      "BEGIN:VEVENT",
+      `UID:${UID}`,
+      "DTSTART:20261001T120000Z",
+      `DURATION:${UID}`,
+      "SUMMARY:Homework",
+      "END:VEVENT",
+    ].join("\r\n");
     const feed = parseIcs(
-      ["BEGIN:VCALENDAR", "VERSION:2.0", event(2), event(1), "END:VCALENDAR"].join("\r\n"),
+      ["BEGIN:VCALENDAR", "VERSION:2.0", event, "END:VCALENDAR"].join("\r\n"),
       assignmentTypeMatcher,
     );
     expect(warn).not.toHaveBeenCalled();

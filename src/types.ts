@@ -40,7 +40,7 @@ export type FeedEventDiagnostic =
     }
   | {
       kind: "suspicious";
-      reason: "assignment-like-event";
+      reason: "assignment-like-event" | "canvas-identity-mismatch";
       uid?: string;
       indicators: string[];
     }
