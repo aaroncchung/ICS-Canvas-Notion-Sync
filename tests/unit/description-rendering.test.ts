@@ -9,7 +9,14 @@ import {
   parseInline,
 } from "../../src/description-document.ts";
 import { DESCRIPTION_EXCERPT_LENGTH, descriptionExcerpt } from "../../src/notion/assignments.ts";
-import { PARAGRAPH_TEXT_LIMIT, paragraph, splitText, toggle } from "../../src/notion/blocks.ts";
+import {
+  PARAGRAPH_TEXT_LIMIT,
+  RICH_TEXT_ITEM_LIMIT,
+  blockBatch,
+  paragraph,
+  splitText,
+  toggle,
+} from "../../src/notion/blocks.ts";
 import { descriptionBlocks } from "../../src/notion/description-blocks.ts";
 import {
   DESCRIPTION_HASH_VERSION,
@@ -392,6 +399,21 @@ describe("Canvas HTML to Notion blocks", () => {
     expect(blocks.map(blockText).join("")).toBe(
       Array.from({ length: 150 }, (_, index) => `b${index} p${index}`).join(" "),
     );
+  });
+
+  it("continues a paragraph that would outgrow one request in further blocks", () => {
+    // About 450 KB of UTF-8 in under 100 items, which used to fail every run in blockBatch.
+    const text = "字".repeat(150_000);
+    const blocks = descriptionBlocks(text);
+    expect(blocks.map((block) => block.type)).toEqual(["paragraph", "paragraph"]);
+    expect(blocks.map((block) => richText(block).length)).toEqual([69, 10]);
+    expect(blocks.map(blockText).join("")).toBe(text);
+    for (const block of blocks) expect(blockBatch([block])).toEqual([block]);
+  });
+
+  it("keeps a full block that fits in one request whole", () => {
+    const blocks = descriptionBlocks("x".repeat(PARAGRAPH_TEXT_LIMIT * RICH_TEXT_ITEM_LIMIT));
+    expect(blocks.map((block) => richText(block).length)).toEqual([RICH_TEXT_ITEM_LIMIT]);
   });
 
   it("never splits a surrogate pair", () => {

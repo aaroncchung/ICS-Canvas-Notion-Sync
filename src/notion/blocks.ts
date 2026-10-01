@@ -54,13 +54,20 @@ export function toggle(title: string, children?: Block[]): Block {
 }
 
 /** Leave room below Notion's 500 KB request limit for parent/properties/wrappers. */
+export const BATCH_BYTE_LIMIT = 400_000;
+
+/** The UTF-8 size a value adds to a request body, counting the comma that separates it. */
+export function jsonBytes(value: unknown): number {
+  return Buffer.byteLength(JSON.stringify(value), "utf8") + 1;
+}
+
 export function blockBatch(blocks: Block[], offset = 0): Block[] {
   const batch: Block[] = [];
   let bytes = 0;
   for (let index = offset; index < Math.min(offset + 100, blocks.length); index += 1) {
     const block = blocks[index]!;
-    const size = Buffer.byteLength(JSON.stringify(block), "utf8") + 1;
-    if (bytes + size > 400_000) break;
+    const size = jsonBytes(block);
+    if (bytes + size > BATCH_BYTE_LIMIT) break;
     batch.push(block);
     bytes += size;
   }

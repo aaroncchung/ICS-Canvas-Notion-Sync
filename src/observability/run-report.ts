@@ -179,8 +179,10 @@ export function runMetrics(
       if (operation.description?.replaced) metrics.descriptionReplacements += 1;
     }
   }
-  if (execution?.failedOperation?.kind === "assignment-description-update")
-    metrics.descriptionIntegrityAuditsRun += 1;
+  for (const failed of [execution?.failedOperation, ...(execution?.additionalFailures ?? [])]) {
+    if (failed?.kind === "assignment-description-update")
+      metrics.descriptionIntegrityAuditsRun += 1;
+  }
   metrics.assignmentBodyReads = metrics.descriptionIntegrityAuditsRun;
   return metrics;
 }

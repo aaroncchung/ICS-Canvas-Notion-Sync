@@ -155,7 +155,7 @@ describe("GitHub Actions observability", () => {
     expect(summary).toContain("Warnings: 1");
     expect(summary).toContain("Warning summary: course-metadata-conflict (1)");
     expect(summary).toContain(
-      "Failure summary: assignment-property-update failed; 1 later operation(s) not attempted.",
+      "Failure summary: assignment-property-update failed; 1 operation(s) not attempted.",
     );
     expect(summary).not.toMatch(
       /Planned operations|Applied operations|Partial operations|Failed or ambiguous operation|Operations not attempted/,

@@ -31,6 +31,18 @@ export class AmbiguousNotionWriteError extends Error {
   }
 }
 
+/**
+ * Notion acknowledged every write, but reading the result back does not match what was written.
+ * The outcome is known, so this is a definite failure of the one page being written, not an
+ * ambiguous write: retrying it in the same run would fail the same way.
+ */
+export class NotionVerificationError extends Error {
+  public constructor(message: string) {
+    super(message);
+    this.name = "NotionVerificationError";
+  }
+}
+
 export type NotionFailureClassification =
   | {
       kind: "definite-response";

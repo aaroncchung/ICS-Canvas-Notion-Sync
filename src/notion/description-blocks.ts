@@ -5,8 +5,10 @@ import {
   type InlineRun,
 } from "../description-document.ts";
 import {
+  BATCH_BYTE_LIMIT,
   PARAGRAPH_TEXT_LIMIT,
   RICH_TEXT_ITEM_LIMIT,
+  jsonBytes,
   paragraph,
   splitText,
   type Block,
@@ -59,12 +61,32 @@ function richTextItems(run: InlineRun): RichText[] {
   }));
 }
 
-function chunk<T>(items: T[], size: number): T[][] {
-  const groups: T[][] = [];
-  for (let offset = 0; offset < items.length; offset += size) {
-    groups.push(items.slice(offset, offset + size));
+/**
+ * Groups rich text into blocks of at most 100 items. A block also ends before it would outgrow a
+ * request batch on its own, so `blockBatch` can always send it. Every block that fits renders
+ * exactly as before, so only descriptions that could never be written render differently.
+ */
+function richTextBlocks(items: RichText[], block: (richText: RichText[]) => Block): Block[] {
+  const blocks: Block[] = [];
+  // Each item's size includes a separating comma, which the first item does not need.
+  const wrapperBytes = jsonBytes(block([])) - 1;
+  let group: RichText[] = [];
+  let bytes = wrapperBytes;
+  for (const item of items) {
+    const size = jsonBytes(item);
+    if (
+      group.length &&
+      (group.length === RICH_TEXT_ITEM_LIMIT || bytes + size > BATCH_BYTE_LIMIT)
+    ) {
+      blocks.push(block(group));
+      group = [];
+      bytes = wrapperBytes;
+    }
+    group.push(item);
+    bytes += size;
   }
-  return groups;
+  if (group.length) blocks.push(block(group));
+  return blocks;
 }
 
 function blockType(node: DescriptionNode): string {
@@ -81,8 +103,9 @@ function blockType(node: DescriptionNode): string {
 }
 
 /**
- * Renders one node as Notion blocks. A node whose rich text exceeds Notion's 100-item limit
- * continues in further blocks of the same type, so no text is ever dropped or cut mid-word.
+ * Renders one node as Notion blocks. A node whose rich text exceeds Notion's 100-item limit, or
+ * one request's byte budget, continues in further blocks of the same type, so no text is ever
+ * dropped or cut mid-word.
  */
 function nodeBlocks(node: DescriptionNode): Block[] {
   if (node.kind === "code") {
@@ -90,7 +113,7 @@ function nodeBlocks(node: DescriptionNode): Block[] {
       type: "text",
       text: { content },
     }));
-    return chunk(items, RICH_TEXT_ITEM_LIMIT).map((rich_text) => ({
+    return richTextBlocks(items, (rich_text) => ({
       object: "block",
       type: "code",
       code: { rich_text, language: "plain text" },
@@ -98,7 +121,7 @@ function nodeBlocks(node: DescriptionNode): Block[] {
   }
   const type = blockType(node);
   const items = notionRuns(node.runs).flatMap(richTextItems);
-  return chunk(items, RICH_TEXT_ITEM_LIMIT).map((rich_text) => ({
+  return richTextBlocks(items, (rich_text) => ({
     object: "block",
     type,
     [type]: { rich_text },

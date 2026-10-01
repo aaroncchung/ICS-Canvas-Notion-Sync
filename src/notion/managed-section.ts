@@ -3,6 +3,7 @@ import {
   AmbiguousNotionWriteError,
   errorStatus,
   isAmbiguousWriteError,
+  NotionVerificationError,
   type NotionGateway,
 } from "./client.ts";
 
@@ -413,7 +414,7 @@ async function verifiedResult(
 ): Promise<ManagedSectionReconciliation> {
   const verified = await verifyManagedSection(gateway, snapshot);
   if (!verified) {
-    throw new AmbiguousNotionWriteError("Managed section integrity verification failed");
+    throw new NotionVerificationError("Managed section integrity verification failed");
   }
   return { replaced };
 }
@@ -541,7 +542,7 @@ export async function reconcileManagedSection(
     }
   }
   if (!signaturesEqual(actual, snapshot.expectedSignatures)) {
-    throw new AmbiguousNotionWriteError(
+    throw new NotionVerificationError(
       `Managed section replacement could not be verified: ${signatureMismatch(actual, snapshot.expectedSignatures)}`,
     );
   }

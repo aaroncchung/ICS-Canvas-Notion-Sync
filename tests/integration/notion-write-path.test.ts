@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { pino } from "pino";
 import { blockBatch, paragraph, paragraphs, toggle, type Block } from "../../src/notion/blocks.ts";
-import { OfficialNotionGateway } from "../../src/notion/client.ts";
+import { NotionVerificationError, OfficialNotionGateway } from "../../src/notion/client.ts";
 import {
   MANAGED_DESCRIPTION_TITLE,
   PENDING_MANAGED_DESCRIPTION_TITLE,
@@ -15,7 +15,7 @@ import {
   reconcileManagedSection,
 } from "../../src/notion/managed-section.ts";
 import { MANAGED_SYNC_LOG_TITLE, writeSyncLog } from "../../src/notion/sync-log.ts";
-import { operationSections } from "../../src/observability/report-content.ts";
+import { failureSummary, operationSections } from "../../src/observability/report-content.ts";
 import { runMetrics, workCounts } from "../../src/observability/run-report.ts";
 import { ApplyPlanError, applyPlan, emptyExecutionResult } from "../../src/sync/reconcile.ts";
 import type { SyncPlan } from "../../src/types.ts";
@@ -435,14 +435,17 @@ describe("batched write safety", () => {
       (error: unknown) => error,
     );
     expect(failure).toBeInstanceOf(ApplyPlanError);
-    expect((failure as ApplyPlanError).message).toBe("assignment-description-update ambiguous");
+    // Every write was acknowledged and read back, so the mismatch is definite, not ambiguous.
+    expect((failure as ApplyPlanError).message).toBe("assignment-description-update failed");
+    expect((failure as ApplyPlanError).cause).toBeInstanceOf(NotionVerificationError);
     expect(((failure as ApplyPlanError).cause as Error).message).toContain("could not be verified");
     expect(await readManagedDescription(gateway, "page")).toBe("Old");
     const writes = gateway.writes.filter((write) => write.kind === "update");
     expect(writes).toHaveLength(1);
     expect(writes[0]!.value).toHaveProperty("Canvas Due Date");
     expect(writes[0]!.value).not.toHaveProperty("Canvas Description Hash");
-    expect(writes[0]!.value).not.toHaveProperty("Canvas Description Verified At");
+    // The hash already matched, so only a cleared Verified At brings the page back for repair.
+    expect(writes[0]!.value).toHaveProperty("Canvas Description Verified At", { date: null });
   });
 
   it.each([false, true])(
@@ -504,19 +507,126 @@ describe("batched write safety", () => {
       }
       const execution = failure!.execution;
       expect(execution.additionalFailures).toMatchObject([{ kind: "assignment-property-update" }]);
-      expect(execution.notAttempted.map((value) => value.target)).toContain("later");
+      // Both failures were definite and confined to one page, so the later page is still updated.
+      expect(execution.notAttempted.map((value) => value.target)).not.toContain("later");
+      expect(execution.assignmentsSynchronized.map((value) => value.target)).toEqual(["later"]);
       expect(execution.notAttempted).not.toContainEqual({
         kind: "assignment-property-update",
         target: "page",
       });
       expect(runMetrics(work, execution).descriptionIntegrityAuditsRun).toBe(1);
-      expect(workCounts(work, execution).updated).toBe(0);
+      expect(workCounts(work, execution).updated).toBe(1);
       const failures = operationSections(runResult({ execution })).find(
         (value) => value.title === "Failed or ambiguous operation",
       )!;
       expect(failures.lines).toHaveLength(2);
+      const [kind, remaining] =
+        phase === "description" ? ["description-update", 1] : ["description-hash-update", 0];
+      expect(failureSummary(runResult({ status: "Failed", execution }))).toBe(
+        `assignment-${kind} failed and 1 more failure(s); ${remaining} operation(s) not attempted. See the Notion Sync Log for details.`,
+      );
     },
   );
+
+  describe("one page that fails while others have work", () => {
+    function twoPagePlan(): SyncPlan {
+      const work = plan();
+      const failing = work.assignmentsToUpdate[0]!;
+      // No property changes, so the repair mark is the page's only property write.
+      failing.properties = {};
+      work.assignmentsToUpdate.push({
+        ...failing,
+        pageId: "later",
+        properties: { title: "Later" },
+      });
+      work.assignmentsToRemove.push({
+        pageId: "gone",
+        uid: "gone",
+        title: "Gone",
+        coursePageIds: [],
+        removed: false,
+        reason: "persistent-absence",
+        markRemoved: true,
+        clearMissingEvidence: false,
+      });
+      return work;
+    }
+    function seedPages(gateway: FakeGateway): void {
+      seedDescription(gateway, "Old");
+      gateway.seedPage("assignments", "later", {});
+      gateway.seedBlock("later", {
+        ...toggle(MANAGED_DESCRIPTION_TITLE, [paragraph("Old")]),
+        id: "later-managed",
+      });
+    }
+    async function applyFailing(gateway: FakeGateway, work: SyncPlan): Promise<ApplyPlanError> {
+      const failure: unknown = await applyPlan(gateway, config(), work, { now }).catch(
+        (error: unknown) => error,
+      );
+      expect(failure).toBeInstanceOf(ApplyPlanError);
+      return failure as ApplyPlanError;
+    }
+
+    it("applies the other pages after a verification mismatch, but no removals", async () => {
+      const gateway = new FakeGateway();
+      seedPages(gateway);
+      const append = gateway.appendBlocks.bind(gateway);
+      vi.spyOn(gateway, "appendBlocks").mockImplementation(async (id, children) => {
+        const ids = await append(id, children);
+        if (id === "page") gateway.seedBlock(ids[0]!, paragraph("Unexpected"));
+        return ids;
+      });
+      const work = twoPagePlan();
+      const { execution } = await applyFailing(gateway, work);
+
+      expect(execution.failedOperation).toMatchObject({
+        kind: "assignment-description-update",
+        target: "page",
+        outcome: "failed",
+      });
+      expect(execution.additionalFailures).toBeUndefined();
+      expect(execution.partialAssignments).toMatchObject([
+        { target: "page", state: "requires-repair", completedSubsteps: [] },
+      ]);
+      expect(execution.assignmentsSynchronized.map((value) => value.target)).toEqual(["later"]);
+      expect(execution.notAttempted).toEqual([{ kind: "assignment-remove", target: "gone" }]);
+      expect(await readManagedDescription(gateway, "page")).toBe("Old");
+      expect(await readManagedDescription(gateway, "later")).toBe("Description");
+      const updates = gateway.writes.filter((write) => write.kind === "update");
+      expect(updates.find((write) => write.id === "page")!.value).toEqual({
+        "Canvas Description Verified At": { date: null },
+      });
+      expect(updates.find((write) => write.id === "later")!.value).toHaveProperty(
+        "Canvas Description Verified At",
+        { date: { start: now().toISOString() } },
+      );
+      expect(updates.some((write) => write.id === "gone")).toBe(false);
+      expect(workCounts(work, execution)).toMatchObject({ updated: 1, removed: 0 });
+      expect(runMetrics(work, execution).descriptionIntegrityAuditsRun).toBe(2);
+    });
+
+    it("still halts at an ambiguous description write", async () => {
+      const gateway = new FakeGateway();
+      seedPages(gateway);
+      vi.spyOn(gateway, "listBlocks").mockRejectedValueOnce(
+        Object.assign(new Error("Lost response"), { code: "ECONNRESET" }),
+      );
+      const { execution } = await applyFailing(gateway, twoPagePlan());
+
+      expect(execution.failedOperation).toMatchObject({ target: "page", outcome: "ambiguous" });
+      expect(execution.notAttempted.map((value) => value.target)).toEqual([
+        "later",
+        "later",
+        "later",
+        "gone",
+      ]);
+      expect(await readManagedDescription(gateway, "later")).toBe("Old");
+      // The repair mark is an independent property write, so it is still sent.
+      expect(gateway.writes.filter((write) => write.kind === "update")).toEqual([
+        { kind: "update", id: "page", value: { "Canvas Description Verified At": { date: null } } },
+      ]);
+    });
+  });
 
   it("recovers a partially visible initial Sync Log body and preserves user content on rerun", async () => {
     const gateway = new FakeGateway();

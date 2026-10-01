@@ -252,20 +252,26 @@ describe("finalized reconciliation decisions", () => {
 });
 
 describe("execution ledger", () => {
-  it("accounts for a relation-resolution failure and withholds all remaining work", async () => {
+  it("withholds the rest of an assignment whose relation cannot be resolved, but not others", async () => {
     const { result } = plan([source("one"), source("two")]);
     result.assignmentsToCreate[0]!.courseKey = "unresolvable";
     const gateway = new FakeGateway();
+    gateway.simulateDefaultTemplate = true;
     let failure: ApplyPlanError | undefined;
     try {
-      await applyPlan(gateway, config(), result);
+      await applyPlan(gateway, config(), result, {
+        templateWait: { attempts: 2, sleep: async () => {} },
+      });
     } catch (error) {
       if (!(error instanceof ApplyPlanError)) throw error;
       failure = error;
     }
     expect(failure?.execution.failedOperation?.kind).toBe("assignment-page-create");
-    expect(failure?.execution.notAttempted).toEqual(plannedOperations(result).slice(2));
-    expect(gateway.assignments).toEqual([]);
+    expect(failure?.execution.notAttempted).toEqual(plannedOperations(result).slice(2, 5));
+    expect(failure?.execution.assignmentsSynchronized.map((value) => value.target)).toEqual([
+      "two",
+    ]);
+    expect(gateway.assignments).toHaveLength(1);
   });
 });
 

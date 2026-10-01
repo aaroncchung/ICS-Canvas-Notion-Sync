@@ -4,7 +4,7 @@ import { Client, LogLevel, type Logger as NotionSdkLogger } from "@notionhq/clie
 import type { Logger } from "pino";
 import type { RequestMetrics } from "../types.ts";
 import { classifyNotionFailure, retryAfterMs } from "./failure.ts";
-export { AmbiguousNotionWriteError } from "./failure.ts";
+export { AmbiguousNotionWriteError, NotionVerificationError } from "./failure.ts";
 
 export const NOTION_API_VERSION = "2026-03-11";
 /** Longest single wait a Retry-After header can impose before the next attempt. */
