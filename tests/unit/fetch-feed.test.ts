@@ -157,6 +157,81 @@ describe("Canvas feed fetching", () => {
     await assertion;
   });
 
+  describe("redirects", () => {
+    const secretPath = "/feeds/calendars/user_SECRET.ics";
+
+    function redirect(location?: string, status = 302): Response {
+      return new Response(null, { status, headers: location ? { Location: location } : {} });
+    }
+
+    function sequence(...responses: Response[]) {
+      const calls: Array<{ url: string; redirect: RequestRedirect | undefined }> = [];
+      const fetchImpl = ((input: string, init?: RequestInit) => {
+        calls.push({ url: input, redirect: init?.redirect });
+        const response = responses.shift();
+        return response ? Promise.resolve(response) : Promise.reject(new Error("no response"));
+      }) as typeof fetch;
+      return { calls, fetchImpl };
+    }
+
+    it.each([301, 302, 303, 307, 308])("follows a %i redirect to HTTPS by hand", async (status) => {
+      const { calls, fetchImpl } = sequence(
+        redirect(`https://cdn.canvas.test${secretPath}`, status),
+        redirect("/final.ics"),
+        new Response("BEGIN:VCALENDAR\nEND:VCALENDAR"),
+      );
+
+      await expect(fetchFeed(`https://canvas.test${secretPath}`, fetchImpl)).resolves.toBe(
+        "BEGIN:VCALENDAR\nEND:VCALENDAR",
+      );
+      expect(calls).toEqual([
+        { url: `https://canvas.test${secretPath}`, redirect: "manual" },
+        { url: `https://cdn.canvas.test${secretPath}`, redirect: "manual" },
+        { url: "https://cdn.canvas.test/final.ics", redirect: "manual" },
+      ]);
+    });
+
+    it("refuses a redirect to HTTP without sending the feed path or naming it", async () => {
+      const { calls, fetchImpl } = sequence(redirect(`http://canvas.test${secretPath}`));
+
+      await expect(fetchFeed(`https://canvas.test${secretPath}`, fetchImpl)).rejects.toThrow(
+        /^Canvas feed redirect to a non-HTTPS URL was refused$/,
+      );
+      expect(calls).toHaveLength(1);
+    });
+
+    it("stops after five redirects", async () => {
+      const { calls, fetchImpl } = sequence(
+        ...Array.from({ length: 7 }, (_, index) => redirect(`https://canvas.test/hop-${index}`)),
+      );
+
+      await expect(fetchFeed(`https://canvas.test${secretPath}`, fetchImpl)).rejects.toThrow(
+        "Canvas feed redirected more than 5 times",
+      );
+      expect(calls).toHaveLength(6);
+    });
+
+    it("rejects a redirect without a Location header", async () => {
+      const { fetchImpl } = sequence(redirect());
+
+      await expect(fetchFeed(`https://canvas.test${secretPath}`, fetchImpl)).rejects.toThrow(
+        "Canvas feed redirect has no valid Location header",
+      );
+    });
+
+    it("cancels the body of each redirect response", async () => {
+      const onCancel = vi.fn();
+      const body = new ReadableStream({ cancel: onCancel });
+      const { fetchImpl } = sequence(
+        new Response(body, { status: 302, headers: { Location: "/next" } }),
+        new Response("BEGIN:VCALENDAR\nEND:VCALENDAR"),
+      );
+
+      await fetchFeed(`https://canvas.test${secretPath}`, fetchImpl);
+      expect(onCancel).toHaveBeenCalledOnce();
+    });
+  });
+
   it("preserves non-success HTTP status handling", async () => {
     const response = new Response("unavailable", { status: 503 });
 

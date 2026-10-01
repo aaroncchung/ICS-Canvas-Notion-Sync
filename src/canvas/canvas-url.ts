@@ -44,6 +44,36 @@ export function canvasAssignmentUrlIdentity(
   };
 }
 
+export interface CanvasCalendarLinkIdentity {
+  kind: "assignment" | "calendar-event";
+  id: string;
+  origin: string;
+  courseId?: string;
+}
+
+/**
+ * Canvas writes each feed event's URL as a calendar view link:
+ * `/calendar?include_contexts=course_N&month=M&year=Y#assignment_N` or `#calendar_event_N`.
+ * The fragment names the item, and a single course context names its course.
+ */
+export function canvasCalendarLinkIdentity(value: string): CanvasCalendarLinkIdentity | undefined {
+  const url = httpUrl(value);
+  if (!url || !/^\/calendar2?\/?$/i.test(url.pathname)) return;
+  const fragment = url.hash.match(/^#(assignment|calendar_event)_(\d+)$/i);
+  if (!fragment?.[1] || !fragment[2]) return;
+  const courseIds = url.searchParams
+    .getAll("include_contexts")
+    .flatMap((contexts) => contexts.split(","))
+    .flatMap((context) => context.trim().match(/^course_(\d+)$/i)?.[1] ?? []);
+  const courseId = courseIds.length === 1 ? courseIds[0] : undefined;
+  return {
+    kind: fragment[1].toLowerCase() === "assignment" ? "assignment" : "calendar-event",
+    id: fragment[2],
+    origin: url.origin,
+    ...(courseId ? { courseId } : {}),
+  };
+}
+
 export function verifiedCanvasOrigin(value: string, courseId: string): string | undefined {
   const url = httpUrl(value);
   if (!url) return;

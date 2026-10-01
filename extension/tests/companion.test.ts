@@ -112,7 +112,7 @@ describe("identity and completion", () => {
     expect(alreadyHandled("attempt:2", "attempt:1")).toBe(true);
     expect(alreadyHandled("attempt:1", "attempt:2")).toBe(false);
   });
-  it("matches real-feed-shaped UID-only records without changing classifier behavior", () => {
+  it("matches real-feed-shaped UID-only records and agrees with the classifier on conflicts", () => {
     expect(target().assignmentId).toBe("123");
     expect(
       classifyEvent({
@@ -131,12 +131,16 @@ describe("identity and completion", () => {
       targetFromPage(page("event-assignment-999", "https://vanity.edu/courses/42/assignments/123"))
         ?.conflict,
     ).toBe(true);
+    // The importer quarantines the same conflict instead of writing either identity.
     expect(
       classifyEvent({
         uid: "event-assignment-999",
         url: "https://vanity.edu/courses/42/assignments/123",
-      }).canvasAssignmentId,
-    ).toBe("123");
+      }),
+    ).toEqual({
+      kind: "mismatch",
+      evidence: ["canvas-assignment-route", "canvas-assignment-uid", "canvas-identity-mismatch"],
+    });
   });
   it.each([
     [{}, true],
