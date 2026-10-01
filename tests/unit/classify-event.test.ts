@@ -151,6 +151,11 @@ describe("Canvas event classification", () => {
       "/calendar?include_contexts=course_1,course_2#assignment_456",
     ],
     [
+      "a calendar link with two encoded course contexts",
+      "event-assignment-456",
+      "https://canvas.example.edu/calendar?include_contexts=course_1%2Ccourse_2#assignment_456",
+    ],
+    [
       "a bare fragment naming another assignment",
       "event-assignment-456",
       "calendar#assignment_457",

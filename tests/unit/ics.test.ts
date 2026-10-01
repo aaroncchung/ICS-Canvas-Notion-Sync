@@ -325,6 +325,13 @@ describe("Canvas feed shapes and malformed events", () => {
       "course_1#assignment_456",
       'Open "/calendar?include_contexts=course_2#assignment_456"',
     ],
+    ["its own encoded second course", "course_1%2Ccourse_2#assignment_456", ""],
+    [
+      "an encoded LOCATION link",
+      "course_1#assignment_456",
+      "/calendar?include_contexts=course_1%252Ccourse_2%23assignment_456",
+    ],
+    ["an encoded LOCATION fragment", "course_1#assignment_456", "/calendar%23assignment_457"],
   ])(
     "quarantines a URL that disagrees with %s, with a distinct reason",
     (_other, target, location) => {

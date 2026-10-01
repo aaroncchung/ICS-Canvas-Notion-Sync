@@ -100,6 +100,22 @@ function fragmentItems(value: string): LinkIdentity[] {
   );
 }
 
+/**
+ * Decodes every `%XX` byte, repeatedly so that double encoding is undone too. Only ASCII matters
+ * for the scans that use it, so multibyte characters need not decode correctly.
+ */
+function percentDecoded(value: string): string {
+  let decoded = value;
+  for (let round = 0; round < 3; round += 1) {
+    const next = decoded.replace(/%([0-9a-f]{2})/gi, (_, hex: string) =>
+      String.fromCharCode(Number.parseInt(hex, 16)),
+    );
+    if (next === decoded) break;
+    decoded = next;
+  }
+  return decoded;
+}
+
 /** Every course named in any shape: `course_N` contexts and `/courses/N` paths. */
 function courseMentions(value: string): string[] {
   return [...value.matchAll(COURSE_MENTION)].flatMap((match) => match[1] ?? match[2] ?? []);
@@ -112,16 +128,18 @@ function courseMentions(value: string): string[] {
  * makes the event's identity unknowable.
  */
 function linkIdentity(values: string[]): LinkIdentity | "conflict" | undefined {
+  // Mentions are also read percent-decoded, so `course_1%2Ccourse_2` or `%23assignment_2` count.
+  const scanned = [...values, ...values.map(percentDecoded)];
   const links = [
     ...values.flatMap(absoluteUrls).flatMap((candidate) => absoluteLink(candidate) ?? []),
     ...values.flatMap(relativeRoutes),
-    ...values.flatMap(fragmentItems),
+    ...scanned.flatMap(fragmentItems),
   ];
   const [first] = links;
   if (!first) return;
   const courseIds = new Set([
     ...links.flatMap((link) => link.courseId ?? []),
-    ...values.flatMap(courseMentions),
+    ...scanned.flatMap(courseMentions),
   ]);
   if (
     links.some((link) => link.kind !== first.kind || link.id !== first.id) ||
