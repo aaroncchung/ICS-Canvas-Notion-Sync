@@ -729,6 +729,46 @@ describe("plan-first reconciliation", () => {
     expect(changed?.properties.overrideDueDate).toBeUndefined();
   });
 
+  it.each([
+    ["a prior Canvas date", "2026-07-20"],
+    ["no prior Canvas date", undefined],
+  ] as const)("keeps the override after Canvas reaches it from %s", (_label, initialCanvas) => {
+    const current = record({ canvasDueDate: "2026-07-20", effectiveDueDate: "2026-07-25" });
+    if (!initialCanvas) delete current.canvasDueDate;
+    // Plans one run against the stored page, then stores the patch as the next run's page.
+    const run = (dueAt: string | undefined) => {
+      const assignment = dueAt ? source({ dueAt }) : sourceWithoutDueDate();
+      const properties = plan([assignment], [current]).assignmentsToUpdate[0]?.properties ?? {};
+      for (const key of ["canvasDueDate", "effectiveDueDate", "overrideDueDate"] as const) {
+        const value = properties[key];
+        if (value) current[key] = value;
+        else if (value === null) delete current[key];
+      }
+      return properties;
+    };
+
+    expect(run(initialCanvas)).toEqual({ overrideDueDate: "2026-07-25" });
+    expect(run("2026-07-25")).toEqual({ canvasDueDate: "2026-07-25" });
+    expect(run("2026-07-25")).toEqual({});
+    expect(run("2026-07-30")).toEqual({ canvasDueDate: "2026-07-30" });
+    expect(current).toMatchObject({
+      canvasDueDate: "2026-07-30",
+      effectiveDueDate: "2026-07-25",
+      overrideDueDate: "2026-07-25",
+    });
+  });
+
+  it("follows Canvas again when Override Due Date is cleared after Canvas reached it", () => {
+    const update = plan(
+      [source({ dueAt: "2026-07-30" })],
+      [record({ canvasDueDate: "2026-07-25", effectiveDueDate: "2026-07-25" })],
+    ).assignmentsToUpdate[0];
+    expect(update?.properties).toEqual({
+      canvasDueDate: "2026-07-30",
+      effectiveDueDate: "2026-07-30",
+    });
+  });
+
   it("recaptures a cleared override while Effective Due Date still differs from Canvas", () => {
     const update = plan(
       [source({ dueAt: "2026-07-20" })],
