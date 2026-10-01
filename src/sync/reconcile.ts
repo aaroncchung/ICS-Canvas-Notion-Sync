@@ -66,6 +66,7 @@ interface AssignmentProgress {
   pageId?: string;
   completed: SyncOperationKind[];
   repaired: boolean;
+  descriptionFailed: boolean;
   templateBlocks?: Block[];
 }
 
@@ -91,6 +92,7 @@ export async function applyPlan(
       value = {
         completed: [],
         repaired: false,
+        descriptionFailed: false,
         ...(work.intent === "update" ? { pageId: work.value.pageId } : {}),
       };
       progress.set(work, value);
@@ -111,7 +113,19 @@ export async function applyPlan(
       ...(failedSubstep ? { failedSubstep } : {}),
     };
   }
+  /**
+   * After a failed description write, clears Verified At so the next run audits the page again.
+   * A page whose stored hash is stale or missing is already rewritten next run, so it needs none.
+   */
+  function repairMark(work: AssignmentWork): AssignmentPropertyUpdate {
+    return state(work).descriptionFailed &&
+      work.intent === "update" &&
+      work.value.descriptionHashNeedsUpdate === false
+      ? { descriptionVerifiedAt: null }
+      : {};
+  }
   function descriptionMetadata(work: AssignmentWork): AssignmentPropertyUpdate {
+    if (state(work).descriptionFailed) return repairMark(work);
     const descriptionHash =
       work.intent === "create"
         ? managedDescriptionHash(work.value.source.descriptionMarkdown)
@@ -169,7 +183,12 @@ export async function applyPlan(
         break;
       case "assignment-property-update": {
         const work = command.assignment;
-        await updateAssignment(gateway, work.value.pageId, assignmentProperties(work), now);
+        await updateAssignment(
+          gateway,
+          work.value.pageId,
+          { ...assignmentProperties(work), ...repairMark(work) },
+          now,
+        );
         break;
       }
       case "assignment-description-update": {
@@ -231,6 +250,8 @@ export async function applyPlan(
 
   const attempted = new Set<SyncCommand>();
   let firstError: unknown;
+  /** Set by any ambiguous failure or failed course write; only repair marks are sent after it. */
+  let halted = false;
   function record(command: SyncCommand, applied: Partial<AppliedSyncOperation> = {}): void {
     execution.appliedOperations.push({ ...operationOf(command), ...applied });
     if ("assignment" in command) state(command.assignment).completed.push(command.kind);
@@ -241,6 +262,10 @@ export async function applyPlan(
       outcome: isAmbiguousWriteError(error) ? "ambiguous" : "failed",
       message: operationError(error),
     };
+    if (command.kind === "assignment-description-update") {
+      state(command.assignment).descriptionFailed = true;
+    }
+    if (failed.outcome === "ambiguous" || !("assignment" in command)) halted = true;
     if (!execution.failedOperation) {
       execution.failedOperation = failed;
       firstError = error;
@@ -257,8 +282,28 @@ export async function applyPlan(
     }
   }
 
+  function failures(): FailedSyncOperation[] {
+    const first = execution.failedOperation;
+    return first ? [first, ...(execution.additionalFailures ?? [])] : [];
+  }
+
+  // A definite failure confined to one assignment's page skips that page's remaining substeps and
+  // lets the other assignments proceed. Anything else halts the run. Either way the run fails, and
+  // removals and missing-evidence updates are not attempted once anything has failed.
+  const failedWork = new Set<AssignmentWork>();
   for (let index = 0; index < commands.length; index += 1) {
     const command = commands[index]!;
+    if ("assignment" in command && failedWork.has(command.assignment)) {
+      if (
+        command.kind === "assignment-description-hash-update" &&
+        Object.keys(repairMark(command.assignment)).length
+      ) {
+        await perform(command);
+      }
+      continue;
+    }
+    if (halted || ("change" in command && execution.failedOperation)) continue;
+    const failedBefore = failures().length;
     const property = commands[index + 1];
     const metadata = commands[index + 2];
     if (
@@ -304,8 +349,8 @@ export async function applyPlan(
     } else {
       await perform(command);
     }
-    if (execution.failedOperation) {
-      const failed = execution.failedOperation;
+    const stepFailures = failures().slice(failedBefore);
+    if (stepFailures.length) {
       if ("assignment" in command) {
         const value = state(command.assignment);
         if (
@@ -313,13 +358,11 @@ export async function applyPlan(
           (value.completed.length ||
             (command.kind === "assignment-description-update" && attempted.has(command)))
         ) {
-          execution.partialAssignments.push(assignmentState(command.assignment, failed));
+          execution.partialAssignments.push(assignmentState(command.assignment, stepFailures[0]));
         }
+        failedWork.add(command.assignment);
       }
-      execution.notAttempted = commands.filter((value) => !attempted.has(value)).map(operationOf);
-      throw new ApplyPlanError(execution, `${failed.kind} ${failed.outcome}`, {
-        cause: firstError,
-      });
+      continue;
     }
     if ("assignment" in command) {
       const work = command.assignment;
@@ -327,6 +370,13 @@ export async function applyPlan(
       if (!next || !("assignment" in next) || next.assignment !== work)
         execution.assignmentsSynchronized.push(assignmentState(work));
     }
+  }
+  const failed = execution.failedOperation;
+  if (failed) {
+    execution.notAttempted = commands.filter((value) => !attempted.has(value)).map(operationOf);
+    throw new ApplyPlanError(execution, `${failed.kind} ${failed.outcome}`, {
+      cause: firstError,
+    });
   }
   return execution;
 }

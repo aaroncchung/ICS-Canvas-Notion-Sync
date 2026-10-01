@@ -105,7 +105,7 @@ describe("failure details stay out of GitHub Actions output", () => {
     expect(result.status).toBe("Failed");
     const error = annotations.filter((line) => line.startsWith("::error::"));
     expect(error).toEqual([
-      "::error::assignment-page-create failed; 3 later operation(s) not attempted. See the Notion Sync Log for details.\n",
+      "::error::assignment-page-create failed; 3 operation(s) not attempted. See the Notion Sync Log for details.\n",
     ]);
     const output = [...annotations, ...logLines].join("\n");
     expect(output).not.toContain(UID);

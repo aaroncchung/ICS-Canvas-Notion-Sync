@@ -182,7 +182,7 @@ export interface AssignmentPropertyUpdate {
   canvasMissingCount?: number | null;
   rawDescription?: string;
   descriptionHash?: string;
-  descriptionVerifiedAt?: string;
+  descriptionVerifiedAt?: string | null;
   removed?: boolean;
   canvasState?: "Active" | "Removed";
 }
@@ -266,7 +266,7 @@ export interface SyncExecutionResult {
   notAttempted: SyncOperation[];
   ambiguousWriteRecoveries: number;
   failedOperation?: FailedSyncOperation;
-  /** Other failed substeps when an independent property fallback also fails. */
+  /** Later failures: an independent property fallback, or other assignments' substeps. */
   additionalFailures?: FailedSyncOperation[];
 }
 
