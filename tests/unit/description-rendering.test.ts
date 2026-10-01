@@ -438,7 +438,7 @@ describe("Canvas HTML to Notion blocks", () => {
 describe("managed description hashes", () => {
   it("versions the hash and recognizes older formats", () => {
     const hash = managedDescriptionHash("Read **chapter 1**");
-    expect(DESCRIPTION_HASH_VERSION).toBe("canvas-description:v3");
+    expect(DESCRIPTION_HASH_VERSION).toBe("canvas-description:v4");
     expect(descriptionHashVersion(hash)).toBe(DESCRIPTION_HASH_VERSION);
     expect(isOutdatedDescriptionHash(hash)).toBe(false);
     expect(isOutdatedDescriptionHash(undefined)).toBe(false);

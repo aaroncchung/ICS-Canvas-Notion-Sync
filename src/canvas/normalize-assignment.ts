@@ -16,7 +16,10 @@ export interface RawCalendarEvent {
   uid?: string;
   summary?: string;
   start?: Date;
+  /** Plain text: Canvas writes DESCRIPTION as text converted from the assignment's HTML. */
   description?: string;
+  /** The assignment's HTML, from `X-ALT-DESC;FMTTYPE=text/html`. */
+  htmlDescription?: string;
   url?: string;
   location?: string;
   status?: string;
@@ -154,6 +157,58 @@ export function compileAssignmentTypeMatcher(
   };
 }
 
+/**
+ * Block containers outside the allowed tags. Discarding one keeps its text but loses its boundary,
+ * so `<div>a</div><div>b</div>` would read "ab"; each becomes a paragraph instead.
+ */
+const BLOCK_CONTAINERS = [
+  "div",
+  "section",
+  "article",
+  "aside",
+  "header",
+  "footer",
+  "main",
+  "nav",
+  "address",
+  "figure",
+  "figcaption",
+  "details",
+  "summary",
+  "center",
+  "dl",
+  "dt",
+  "dd",
+];
+
+/** Elements whose text is not part of the visible description. */
+const NON_TEXT_TAGS = ["script", "style", "textarea", "option", "noscript", "head", "title"];
+
+const HTML_ESCAPES: Record<string, string> = { "&": "&amp;", "<": "&lt;", ">": "&gt;" };
+
+/**
+ * Plain text as HTML that reads the same: markup characters are escaped, blank lines separate
+ * paragraphs, and every other line break is kept as `<br>`.
+ */
+export function plainTextHtml(text: string): string {
+  return text
+    .replace(/\r\n?/g, "\n")
+    .split(/\n[ \t]*\n/)
+    .map((paragraph) => paragraph.trim())
+    .filter(Boolean)
+    .map(
+      (paragraph) =>
+        `<p>${paragraph.replace(/[&<>]/g, (character) => HTML_ESCAPES[character] ?? character).replaceAll("\n", "<br>")}</p>`,
+    )
+    .join("");
+}
+
+/** Canvas's HTML when the feed carries it; otherwise the plain DESCRIPTION, kept as text. */
+export function descriptionHtml(event: RawCalendarEvent): string | undefined {
+  if (event.htmlDescription) return event.htmlDescription;
+  return event.description ? plainTextHtml(event.description) : undefined;
+}
+
 export function sanitizeDescription(html: string | undefined): {
   plainText?: string;
   markdown?: string;
@@ -190,6 +245,8 @@ export function sanitizeDescription(html: string | undefined): {
     allowedAttributes: { a: ["href"] },
     allowedSchemes: ["http", "https", "mailto"],
     disallowedTagsMode: "discard",
+    nonTextTags: NON_TEXT_TAGS,
+    transformTags: Object.fromEntries(BLOCK_CONTAINERS.map((tag) => [tag, "p"])),
   });
   // sanitize-html decodes character references, so this also catches `&#x1e;`. Control characters
   // have no visible form, and the table rules rely on Canvas text never containing them.
@@ -340,7 +397,7 @@ export function normalizeAssignment(
   if (!uid || !rawTitle) throw new Error("Assignment event is missing UID or SUMMARY");
   const course = parseCourse(rawTitle, event.description);
   const title = titleWithoutCourseLabel(rawTitle);
-  const description = sanitizeDescription(event.description);
+  const description = sanitizeDescription(descriptionHtml(event));
   const due = dueAt(event);
   return {
     uid,
