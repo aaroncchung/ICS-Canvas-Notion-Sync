@@ -84,6 +84,12 @@ describe("optional JSON configuration", () => {
     ).rejects.toThrow("Invalid environment configuration");
   });
 
+  it("names each invalid environment field once", async () => {
+    await expect(
+      loadConfig([], { ...environment, CANVAS_ICS_URL: "", NOTION_TOKEN: "" }),
+    ).rejects.toThrow(/^Invalid environment configuration: CANVAS_ICS_URL, NOTION_TOKEN$/);
+  });
+
   it("rejects malformed JSON with the configuration filename", () => {
     expect(() => parseJsonConfiguration("{", "config/course-aliases.json")).toThrow(
       "config/course-aliases.json: malformed JSON",

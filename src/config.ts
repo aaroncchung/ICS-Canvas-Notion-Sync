@@ -186,7 +186,10 @@ export async function loadConfig(
 ): Promise<AppConfig> {
   const parsed = envSchema.safeParse(env);
   if (!parsed.success) {
-    const fields = parsed.error.issues.map((issue) => issue.path.join(".")).join(", ");
+    // One field can fail several checks: an empty CANVAS_ICS_URL is neither a URL nor HTTPS.
+    const fields = [...new Set(parsed.error.issues.map((issue) => issue.path.join(".")))].join(
+      ", ",
+    );
     throw new Error(`Invalid environment configuration: ${fields}`);
   }
   try {
