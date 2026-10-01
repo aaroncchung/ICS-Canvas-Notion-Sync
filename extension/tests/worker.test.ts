@@ -37,6 +37,8 @@ let notionAccess: boolean;
 let revoke: ReturnType<typeof vi.fn>;
 let requests: Array<{ url: string; method: string }>;
 let access: ReturnType<typeof vi.fn>;
+/** How long every HTTP request takes to answer. */
+let latency: number;
 const json = (data: unknown) =>
   new Response(JSON.stringify(data), { headers: { "Content-Type": "application/json" } });
 function page() {
@@ -108,6 +110,7 @@ beforeEach(async () => {
   notionAccess = true;
   revoke = vi.fn(async () => true);
   requests = [];
+  latency = 0;
   access = vi.fn(async () => undefined);
   armed = undefined;
   scripts = [];
@@ -120,10 +123,10 @@ beforeEach(async () => {
           stored = structuredClone(value["companion-v1"]!);
         },
       },
-      session: { set: async () => undefined },
     },
     runtime: {
       id: "test-extension",
+      getPlatformInfo: vi.fn(async () => ({})),
       getURL: (path: string) => extensionOrigin + path,
       onMessage: {
         addListener: (fn: MessageListener) => {
@@ -211,6 +214,7 @@ beforeEach(async () => {
     vi.fn<typeof fetch>(async (input, init) => {
       const url = new URL(input instanceof Request ? input.url : input);
       requests.push({ url: url.toString(), method: init?.method ?? "GET" });
+      if (latency) await new Promise((resolve) => setTimeout(resolve, latency));
       const isCanvas = url.hostname !== "api.notion.com";
       if (isCanvas && canvas === "offline") throw new TypeError("offline");
       if (isCanvas && canvas === "signed-out") return new Response("{}", { status: 401 });
@@ -676,7 +680,7 @@ describe("scheduling", () => {
     // A page on the saved Canvas keeps reporting while sync is on; a page elsewhere never should.
     let told = visit();
     await settle();
-    expect(told).toHaveBeenCalledExactlyOnceWith({ stop: false });
+    expect(told).toHaveBeenCalledExactlyOnceWith({ stop: false, quiet: 0 });
     told = visit("https://example.com/");
     await settle();
     expect(told).toHaveBeenCalledExactlyOnceWith({ stop: true });
@@ -701,6 +705,34 @@ describe("scheduling", () => {
     await settle();
     expect(stored.config?.enabled).toBe(false);
     expect(quit).toHaveBeenCalledTimes(2);
+  });
+  it("tells a Canvas page how long no scan is due, for at most one cooldown", async () => {
+    visit();
+    await settle();
+    expect(scans()).toBe(1);
+    const due = stored.nextScanAt - Date.now();
+    let told = visit();
+    await settle();
+    expect(told).toHaveBeenCalledExactlyOnceWith({ stop: false, quiet: due });
+    // A longer wait, as after failures or a Retry-After, still has the page report each cooldown.
+    stored.nextScanAt = Date.now() + 60 * 60_000;
+    told = visit();
+    await settle();
+    expect(told).toHaveBeenCalledExactlyOnceWith({ stop: false, quiet: 15 * 60_000 });
+    expect(scans()).toBe(1);
+  });
+  it("keeps the worker alive through a long scan, and only while one runs", async () => {
+    const keepAlive = vi.mocked(chrome.runtime.getPlatformInfo);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(keepAlive).not.toHaveBeenCalled();
+    latency = 8_000;
+    visit();
+    await vi.advanceTimersByTimeAsync(5 * 60_000);
+    expect(stored.report?.updated).toBe(1);
+    const calls = keepAlive.mock.calls.length;
+    expect(calls).toBeGreaterThanOrEqual(2);
+    await vi.advanceTimersByTimeAsync(10 * 60_000);
+    expect(keepAlive).toHaveBeenCalledTimes(calls);
   });
   it("moves a Canvas page script left for another origin to the saved one", async () => {
     scripts = [{ id: "canvas-watcher", matches: ["https://old.test/*"], js: ["canvas.js"] }];
