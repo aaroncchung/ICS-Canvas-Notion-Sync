@@ -108,6 +108,8 @@ In the repository that runs the sync (the private runner described in [Scheduled
 - `CANVAS_ICS_URL` — the complete private HTTPS Canvas feed URL
 - `NOTION_TOKEN` — the internal integration token
 
+Add them under **Repository secrets**. The sync job declares no GitHub environment, so environment secrets never reach it, and secrets in another repository (this public one included) are invisible to the runner and the reverse. A run in a repository without both secrets stops at its first step, `Check required secrets`, which names each missing secret, links to that repository's secret settings, and prints no values.
+
 Add variables:
 
 - `NOTION_ASSIGNMENTS_DATA_SOURCE_ID`
@@ -121,7 +123,7 @@ Do not put secret values in variables, workflow inputs, issue text, or repositor
 
 ## 8. First deployment
 
-From **Actions → Canvas–Notion sync → Run workflow**:
+In the repository that holds the secrets (the runner), open **Actions → Canvas–Notion sync → Run workflow**:
 
 1. Run `validate`. Resolve every configuration, permission, feed, and schema error.
 2. Run `dry-run`. Review proposed counts and ambiguity/duplicate/skipped warnings; it writes nothing.
@@ -170,3 +172,14 @@ The workflows in this repository run only when started by hand. GitHub disables 
 4. Add the secrets and variables from step 7 to the runner, then run the step 8 sequence there.
 
 Each run uses this repository's `main` as it is at that moment, so a merge here takes effect on the next scheduled run. The health workflow reads the runner's own `sync.yml` runs and keeps its issue in the runner. When a workflow here changes (a new variable, input, or step), make the same change in the runner. If your copy of this repository is private, you can instead add the schedules to its own workflows.
+
+### Manual runs
+
+When the credentials live in the runner, start every manual run there too; the workflows in this repository have no secrets to read and stop at `Check required secrets`. In the runner, open **Actions → Canvas–Notion sync → Run workflow**, keep the branch at the runner's `main`, and pick a mode. From a terminal:
+
+```sh
+gh workflow run sync.yml --repo <owner>/<runner> -f mode=validate
+gh run watch --repo <owner>/<runner>
+```
+
+The runner's `main` holds only workflow files; the code always comes from this repository's `main`, so a manual run there tests whatever is merged here. To try an unmerged branch with real credentials, temporarily change the runner checkout's `ref:` to that branch, or use the local CLI with exported credentials.

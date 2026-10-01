@@ -120,7 +120,7 @@ Tests use synthetic ICS and in-memory Notion doubles; they require no live crede
 
 The workflows in this repository run only when started by hand. GitHub disables scheduled workflows in a public repository after 60 days without a commit, so a private runner repository holds the schedules, the secrets, and copies of `sync.yml` and `health-check.yml` that check out and run this repository's `main`. See [Scheduled runs](docs/notion-setup.md#9-scheduled-runs) for the setup.
 
-In the repository that runs the sync, add the two secrets, the three required data-source ID variables, and any optional variables under **Settings → Secrets and variables → Actions**. Then open **Actions → Canvas–Notion sync → Run workflow** and run in this order:
+Secrets must be available to the repository that runs the workflow. In that repository, under **Settings → Secrets and variables → Actions**, add the two secrets as repository secrets, plus the three required data-source ID variables and any optional variables. The jobs declare no GitHub environment, so environment secrets never reach them. With the private runner, that repository is the runner: this one holds no secrets, so start manual runs from the runner's Actions tab too. A run started where the secrets are missing stops at its first step, `Check required secrets`, which names each missing secret and prints no values. Open **Actions → Canvas–Notion sync → Run workflow** in the runner and run in this order:
 
 1. `validate`
 2. `dry-run`
