@@ -70,8 +70,6 @@ export interface ApiOptions {
   now?: () => number;
   /** Cancels a scan: checked before every attempt and passed to fetch. */
   signal?: AbortSignal;
-  /** Runs before every attempt. The worker uses it to stay alive through a long scan. */
-  beat?: () => Promise<void>;
 }
 const RETRIES = 2;
 const LONGEST_RETRY_WAIT = 20_000;
@@ -87,7 +85,6 @@ export class Api implements SyncApi {
   private readonly pause: (ms: number) => Promise<void>;
   private readonly now: () => number;
   private readonly signal: AbortSignal | undefined;
-  private readonly beat: (() => Promise<void>) | undefined;
   constructor(config: Pick<Config, "origin" | "token" | "dataSourceId">, options: ApiOptions = {}) {
     this.config = config;
     // Chrome rejects fetch when it is invoked as a method of another object.
@@ -112,7 +109,6 @@ export class Api implements SyncApi {
           this.signal?.addEventListener("abort", done);
         }));
     this.now = options.now ?? Date.now;
-    this.beat = options.beat;
   }
 
   /** Every request here is idempotent, including the PATCH, so transient failures are retried. */
@@ -161,7 +157,6 @@ export class Api implements SyncApi {
   ): Promise<{ data: unknown; response: Response }> {
     await this.pause(Math.max(0, this.nextRequest - this.now()));
     this.signal?.throwIfAborted();
-    await this.beat?.();
     this.nextRequest = this.now() + 400;
     const url = new URL(path, service === "Canvas" ? this.config.origin : "https://api.notion.com");
     // Canvas IDs are 64-bit. As JSON numbers they can exceed what JSON.parse represents exactly,

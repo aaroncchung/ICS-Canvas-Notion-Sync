@@ -34,6 +34,11 @@ let grant: Promise<boolean>;
 /** Whether the worker answers at all. */
 let reachable: boolean;
 let request: ReturnType<typeof vi.fn>;
+/** Every message the page sent the worker, by action. */
+let sent: string[];
+let shown: { visibilityState: DocumentVisibilityState };
+let storageChanged: (changes: object, area: string) => void;
+let visibilityChanged: () => void;
 
 /** Loads the page's script into a document with the elements the page's HTML declares. */
 async function open(page: keyof typeof pages) {
@@ -45,7 +50,14 @@ async function open(page: keyof typeof pages) {
     return button;
   });
   submit = html.includes('type="submit"') ? new FakeElement() : undefined;
+  shown = { visibilityState: "visible" };
   vi.stubGlobal("document", {
+    get visibilityState() {
+      return shown.visibilityState;
+    },
+    addEventListener: (type: string, listener: () => void) => {
+      if (type === "visibilitychange") visibilityChanged = listener;
+    },
     getElementById: (id: string) => byId.get(id) ?? null,
     querySelectorAll: (selector: string) => (selector === "button[data-action]" ? actions : []),
     querySelector: (selector: string) =>
@@ -55,8 +67,13 @@ async function open(page: keyof typeof pages) {
   await import("../src/ui.ts");
   await settle();
 }
-/** Lets pending replies arrive, well inside the 2-second poll. */
+/** Lets pending replies arrive, well inside the 2-second poll of a running scan. */
 const settle = () => vi.advanceTimersByTimeAsync(100);
+/** The worker saving its state, as chrome.storage reports it to the page. */
+async function saved() {
+  storageChanged({ "companion-v1": {} }, "local");
+  await settle();
+}
 const text = (id: string) => byId.get(id)!.textContent;
 const button = (action: string) => actions.find((item) => item.dataset.action === action)!;
 async function click(action: string) {
@@ -86,9 +103,18 @@ beforeEach(() => {
   grant = Promise.resolve(true);
   reachable = true;
   request = vi.fn(() => grant);
+  sent = [];
   vi.stubGlobal("chrome", {
+    storage: {
+      onChanged: {
+        addListener: (listener: typeof storageChanged) => {
+          storageChanged = listener;
+        },
+      },
+    },
     runtime: {
       sendMessage: async ({ action }: { action: string }) => {
+        sent.push(action);
         if (!reachable) throw new Error("Could not establish connection.");
         const reply = action === "state" ? { ok: true } : answer(action);
         return reply.ok ? { ...reply, state: structuredClone(state) } : reply;
@@ -113,12 +139,12 @@ describe("popup and settings", () => {
     await click("enable");
     expect(text("message")).toBe(refused);
     expect(text("problem")).toBe("Canvas: HTTP 401");
-    // The poll that follows does not replace it either.
-    await vi.advanceTimersByTimeAsync(4_000);
+    // Nor does a later answer replace it.
+    await saved();
     expect(text("message")).toBe(refused);
     // Once the stored error is gone, its line empties and the action's answer stays.
     delete state.error;
-    await vi.advanceTimersByTimeAsync(2_000);
+    await saved();
     expect(text("problem")).toBe("");
     expect(text("message")).toBe(refused);
   });
@@ -167,6 +193,39 @@ describe("popup and settings", () => {
     await save("https://other.test");
     expect(text("message")).toContain("Could not establish connection");
     expect(submit?.disabled).toBe(false);
+  });
+  it("asks the worker for state only after a change, while a scan runs, or when shown", async () => {
+    await open("options");
+    sent = [];
+    // Each ask keeps the worker running, so an idle page asks nothing however long it stays open.
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(sent).toEqual([]);
+    // Several saves in a row are one ask.
+    storageChanged({}, "local");
+    storageChanged({}, "local");
+    storageChanged({}, "session");
+    await settle();
+    expect(sent).toEqual(["state"]);
+    // A scan's progress is held only by the worker, so it is asked every two seconds meanwhile.
+    state.running = true;
+    await saved();
+    sent = [];
+    await vi.advanceTimersByTimeAsync(6_000);
+    expect(sent).toEqual(["state", "state", "state"]);
+    // Not while the page is in a background tab, until it is shown again.
+    shown.visibilityState = "hidden";
+    await vi.advanceTimersByTimeAsync(2_000);
+    sent = [];
+    await vi.advanceTimersByTimeAsync(10_000);
+    await saved();
+    expect(sent).toEqual([]);
+    shown.visibilityState = "visible";
+    state.running = false;
+    visibilityChanged();
+    await settle();
+    expect(sent).toEqual(["state"]);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(sent).toEqual(["state"]);
   });
   it("offers Verify and save only while no scan runs", async () => {
     state.running = true;

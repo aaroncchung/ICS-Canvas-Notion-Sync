@@ -187,11 +187,12 @@ async function execute(state: Configured, scanning: Scanning): Promise<void> {
   state.report = report;
   await save(state);
   await badge(state);
-  const api = new Api(state.config, {
-    signal: controller.signal,
-    // Calling an extension API resets the worker's 30-second idle timer.
-    beat: () => chrome.storage.session.set({ beat: Date.now() }).catch(() => undefined),
-  });
+  const api = new Api(state.config, { signal: controller.signal });
+  // Calling an extension API resets the worker's 30-second idle timer. One cheap call well inside
+  // that keeps the worker alive through a long scan, without a storage write for every request.
+  const alive = setInterval(() => {
+    chrome.runtime.getPlatformInfo().catch(() => undefined);
+  }, 20_000);
   try {
     // Site access can be withdrawn in chrome://extensions at any time, for Notion as much as for
     // Canvas. Every request to that site would then fail like a dead network, so it is named here
@@ -229,6 +230,8 @@ async function execute(state: Configured, scanning: Scanning): Promise<void> {
         state.previewReady = false;
       }
     }
+  } finally {
+    clearInterval(alive);
   }
   report.finishedAt = new Date().toISOString();
   await save(state);
@@ -447,9 +450,18 @@ chrome.runtime.onMessage.addListener((raw: unknown, sender, respond: (value: unk
     if (object(raw).action !== "wake") return false;
     const origin = new URL(sender.url).origin;
     wake(origin);
-    // A copy the worker could not stop when sync turned off or moved elsewhere stops now.
+    // A copy the worker could not stop when sync turned off or moved elsewhere stops now. One that
+    // goes on is told how long no scan is due, at most one cooldown, and stays quiet until then.
     load().then(
-      (state) => respond({ stop: !(state.config?.enabled && state.config.origin === origin) }),
+      (state) =>
+        respond(
+          state.config?.enabled && state.config.origin === origin
+            ? {
+                stop: false,
+                quiet: Math.min(Math.max(0, state.nextScanAt - Date.now()), COOLDOWN),
+              }
+            : { stop: true },
+        ),
       () => respond({}),
     );
     return true;
@@ -513,10 +525,9 @@ async function initialize(): Promise<void> {
     await watch(state);
   });
 }
-chrome.runtime.onStartup.addListener(() => {
-  void initialize().catch(() => undefined);
-});
-chrome.runtime.onInstalled.addListener(() => {
-  void initialize().catch(() => undefined);
-});
-void initialize().catch(() => undefined);
+// Every start of the worker initializes once, here. These listeners only make Chrome start it when
+// the browser starts and when the extension is installed or updated; running it again would repeat
+// the same reads and writes.
+const initialized = initialize().catch(() => undefined);
+chrome.runtime.onStartup.addListener(() => void initialized);
+chrome.runtime.onInstalled.addListener(() => void initialized);

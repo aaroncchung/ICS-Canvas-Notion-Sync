@@ -5,6 +5,20 @@ const input = (id: string): HTMLInputElement => element(id) as HTMLInputElement;
 const SUBMIT = "#config button[type=submit]";
 let filled = false;
 let busy = false;
+/** The scan rows on screen, so an unchanged list is not built again. */
+let shownDetails: string | undefined;
+let asking: ReturnType<typeof setTimeout> | undefined;
+/**
+ * Asks the worker for its state once, however many reasons to ask arrive meanwhile. Asking keeps
+ * the worker running, so a page left open in a background tab does not ask until it is shown.
+ */
+function refresh(delay = 0): void {
+  if (asking !== undefined) return;
+  asking = setTimeout(() => {
+    asking = undefined;
+    if (!busy && document.visibilityState === "visible") void send("state").catch(() => undefined);
+  }, delay);
+}
 function render(raw: unknown): void {
   const state = object(raw),
     report = object(state.report);
@@ -34,29 +48,35 @@ function render(raw: unknown): void {
   // The worker refuses new settings while a scan runs, so none are asked for.
   const submit = document.querySelector<HTMLButtonElement>(SUBMIT);
   if (submit) submit.disabled = busy || Boolean(state.running);
+  const rows: string[] = [];
   if (report.startedAt) {
     // An unfinished report with no scan running means the worker was stopped mid-scan.
     const stage = state.running ? " (running)" : report.finishedAt ? "" : " (interrupted)";
     element("summary").textContent =
       `${report.mode === "preview" ? "Preview" : "Sync"} · ${new Date(scalarText(report.finishedAt ?? report.startedAt)).toLocaleString()}${stage}\n${scalarText(report.updated)} updated · ${scalarText(report.eligible)} eligible · ${scalarText(report.skipped)} skipped · ${scalarText(report.unchecked)} unchecked · ${scalarText(report.failed)} failed`;
-    element("details").replaceChildren();
-    const row = (text: string) => {
-      const item = document.createElement("li");
-      item.textContent = text;
-      element("details").append(item);
-    };
     if (Array.isArray(report.details))
       for (const rawDetail of report.details) {
         const detail = object(rawDetail);
-        row(`${scalarText(detail.title)} — ${scalarText(detail.reason)}`);
+        rows.push(`${scalarText(detail.title)} — ${scalarText(detail.reason)}`);
       }
     if (typeof report.omitted === "number" && report.omitted > 0)
-      row(`${report.omitted} more rows not shown; routine skips are left out first.`);
+      rows.push(`${report.omitted} more rows not shown; routine skips are left out first.`);
   } else {
     // Verifying another connection starts over, so the previous connection's scan goes too.
     element("summary").textContent = "No scans yet.";
-    element("details").replaceChildren();
   }
+  const details = JSON.stringify(rows);
+  if (details !== shownDetails) {
+    shownDetails = details;
+    element("details").replaceChildren();
+    for (const text of rows) {
+      const item = document.createElement("li");
+      item.textContent = text;
+      element("details").append(item);
+    }
+  }
+  // Progress lives only in the worker's memory, and no save announces it, so it is asked for.
+  if (state.running) refresh(2000);
 }
 async function send(action: string, config?: Record<string, string>): Promise<void> {
   const raw: unknown = await chrome.runtime.sendMessage({ action, ...(config ? { config } : {}) });
@@ -121,7 +141,11 @@ document.getElementById("config")?.addEventListener("submit", (event) => {
       void send("state").catch(() => undefined);
     });
 });
+// Everything the worker shows outside a scan is saved, so a saved change is the time to ask.
+chrome.storage.onChanged.addListener((_changes, area) => {
+  if (area === "local") refresh();
+});
+document.addEventListener("visibilitychange", () => {
+  refresh();
+});
 void act("state");
-setInterval(() => {
-  if (!busy) void send("state").catch(() => undefined);
-}, 2000);
