@@ -26,6 +26,32 @@ function asString(value: unknown): string | undefined {
   return;
 }
 
+/** A parameter's value, matching its name case-insensitively as RFC 5545 requires. */
+function parameter(value: object, name: string): string | undefined {
+  if (!("params" in value) || !value.params || typeof value.params !== "object") return;
+  const entry = Object.entries(value.params).find(([key]) => key.toUpperCase() === name);
+  return typeof entry?.[1] === "string" ? entry[1] : undefined;
+}
+
+/**
+ * Canvas writes plain text, converted from the assignment's HTML, to DESCRIPTION and the HTML
+ * itself to `X-ALT-DESC;FMTTYPE=text/html`, which node-ical exposes as `ALT-DESC`. The HTML is
+ * used only when exactly one such value is marked as HTML; anything else falls back to the plain
+ * text, so an unusual ALT-DESC can never quarantine an event.
+ */
+function htmlAltDescription(value: unknown): string | undefined {
+  const candidates = (Array.isArray(value) ? value : [value]).filter(
+    (item): item is { val: string } =>
+      Boolean(item) &&
+      typeof item === "object" &&
+      typeof (item as { val?: unknown }).val === "string" &&
+      parameter(item as object, "FMTTYPE")
+        ?.trim()
+        .toLowerCase() === "text/html",
+  );
+  return candidates.length === 1 ? candidates[0]?.val : undefined;
+}
+
 function asDate(value: unknown): Date | undefined {
   return value instanceof Date ? value : undefined;
 }
@@ -48,6 +74,7 @@ function toEvent(value: unknown, uid: string | undefined): RawCalendarEvent | "r
     (start && "dateOnly" in start && (start as Date & { dateOnly?: boolean }).dateOnly);
   const summary = asString(item.summary);
   const description = asString(item.description);
+  const htmlDescription = htmlAltDescription(item["ALT-DESC"]);
   const url = asString(item.url);
   const location = asString(item.location);
   const status = asString(item.status);
@@ -56,6 +83,7 @@ function toEvent(value: unknown, uid: string | undefined): RawCalendarEvent | "r
     ...(summary ? { summary } : {}),
     ...(start ? { start } : {}),
     ...(description ? { description } : {}),
+    ...(htmlDescription ? { htmlDescription } : {}),
     ...(url ? { url } : {}),
     ...(location ? { location } : {}),
     ...(status ? { status } : {}),

@@ -22,8 +22,10 @@ export const PENDING_MANAGED_DESCRIPTION_TITLE =
  *
  * - v2: one paragraph per 1,900 characters of raw Markdown.
  * - v3: native blocks (headings, lists, quotes, code) with styled rich text.
+ * - v4: Canvas's `X-ALT-DESC` HTML when present; otherwise DESCRIPTION as plain text, with its
+ *   line breaks and literal `<` and `>` kept.
  */
-export const DESCRIPTION_HASH_VERSION = "canvas-description:v3";
+export const DESCRIPTION_HASH_VERSION = "canvas-description:v4";
 export const DESCRIPTION_INTEGRITY_MINIMUM_AGE_DAYS = 30;
 export const DESCRIPTION_INTEGRITY_MAXIMUM_AGE_DAYS = 60;
 export const DESCRIPTION_INTEGRITY_SLOT_COUNT = 30;

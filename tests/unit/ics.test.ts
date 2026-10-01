@@ -5,8 +5,10 @@ import { parseIcs } from "../../src/canvas/parse-ics.ts";
 import {
   compileAssignmentTypeMatcher,
   extractCourseCode,
+  plainTextHtml,
   sanitizeDescription,
 } from "../../src/canvas/normalize-assignment.ts";
+import { parseDescriptionMarkdown, type InlineRun } from "../../src/description-document.ts";
 import { CanvasIcsProvider } from "../../src/canvas/provider.ts";
 import { assignmentTypeMatcher, config } from "../helpers.ts";
 
@@ -19,6 +21,10 @@ function calendar(events: string): string {
 
 function event(values: string): string {
   return `BEGIN:VEVENT\n${values}\nEND:VEVENT`;
+}
+
+function plainRun(text: string): InlineRun {
+  return { text, bold: false, italic: false, code: false };
 }
 
 describe("RFC 5545 Canvas parsing", () => {
@@ -228,6 +234,7 @@ describe("Canvas feed shapes and malformed events", () => {
         canvasAssignmentId: "456",
         canvasUrl: assignmentUrl,
         descriptionPlainText: "Read chapter 1 and solve problems.",
+        descriptionMarkdown: "Read **chapter 1** and solve problems.",
       }),
     ]);
     expect(parsed.diagnostics.events).toEqual([
@@ -587,5 +594,94 @@ describe("course-code extraction", () => {
       ["Lab 1", "FA26 CS 101", "CS 101"],
     ]);
     expect("courseCode" in parsed.assignments[0]!).toBe(false);
+  });
+});
+
+describe("description source (#46)", () => {
+  const head =
+    "UID:event-assignment-77\nDTSTART:20260701T120000Z\nSUMMARY:Homework 2 [EE 10]\nURL:https://x.test/courses/1/assignments/77";
+  const parseOne = (values: string) =>
+    parseIcs(calendar(event(`${head}\n${values}`)), assignmentTypeMatcher);
+  const only = (values: string) => {
+    const parsed = parseOne(values);
+    expect(parsed.diagnostics.quarantinedUids).toEqual([]);
+    expect(parsed.assignments).toHaveLength(1);
+    return parsed.assignments[0]!;
+  };
+  // The reproduction in #46, written as Canvas escapes it.
+  const plain = String.raw`DESCRIPTION:Read chapter 2.\n\nSubmit:\n- answers\n- a graph where x<y and y>0`;
+
+  it("renders from X-ALT-DESC HTML when the feed carries it", () => {
+    const assignment = only(
+      `${plain}\nX-ALT-DESC;FMTTYPE=text/html:<p>Read <strong>chapter 2</strong>.</p><ul><li>answers</li><li>a graph</li></ul>`,
+    );
+    expect(assignment.descriptionMarkdown).toBe("Read **chapter 2**.\n\n-   answers\n-   a graph");
+    expect(assignment.descriptionPlainText).toBe("Read chapter 2. answers a graph");
+  });
+
+  it("keeps a plain-only DESCRIPTION's line breaks and literal angle brackets", () => {
+    const assignment = only(plain);
+    expect(parseDescriptionMarkdown(assignment.descriptionMarkdown!)).toEqual([
+      { kind: "paragraph", runs: [plainRun("Read chapter 2.")] },
+      { kind: "paragraph", runs: [plainRun("Submit:\n- answers\n- a graph where x<y and y>0")] },
+    ]);
+    expect(assignment.descriptionPlainText).toBe(
+      "Read chapter 2. Submit: - answers - a graph where x<y and y>0",
+    );
+  });
+
+  it("never reads plain text as markup", () => {
+    const assignment = only(
+      String.raw`DESCRIPTION:a<b and b>c\, &amp; <script>x</script> **not bold**`,
+    );
+    expect(parseDescriptionMarkdown(assignment.descriptionMarkdown!)).toEqual([
+      { kind: "paragraph", runs: [plainRun("a<b and b>c, &amp; <script>x</script> **not bold**")] },
+    ]);
+  });
+
+  it("falls back to DESCRIPTION when ALT-DESC is not exactly one HTML value", () => {
+    for (const altDesc of [
+      "X-ALT-DESC:<p>no format type</p>",
+      "X-ALT-DESC;FMTTYPE=text/plain:<p>plain</p>",
+      "X-ALT-DESC;FMTTYPE=text/html:<p>one</p>\nX-ALT-DESC;FMTTYPE=text/html:<p>two</p>",
+    ]) {
+      expect(only(`${plain}\n${altDesc}`).descriptionPlainText).toBe(
+        "Read chapter 2. Submit: - answers - a graph where x<y and y>0",
+      );
+    }
+  });
+
+  it("matches FMTTYPE case-insensitively, among other ALT-DESC values", () => {
+    for (const altDesc of [
+      "X-ALT-DESC;FMTTYPE=TEXT/HTML:<p><b>html</b></p>",
+      "X-ALT-DESC;fmttype=text/html:<p><b>html</b></p>",
+      "X-ALT-DESC;FMTTYPE=text/plain:<p>plain</p>\nX-ALT-DESC;FMTTYPE=text/html:<p><b>html</b></p>",
+    ]) {
+      expect(only(`${plain}\n${altDesc}`).descriptionMarkdown).toBe("**html**");
+    }
+  });
+
+  it("renders ALT-DESC even without a DESCRIPTION", () => {
+    expect(only("X-ALT-DESC;FMTTYPE=text/html:<p>only <em>html</em></p>").descriptionMarkdown).toBe(
+      "only _html_",
+    );
+  });
+
+  it("escapes plain text into paragraphs and line breaks", () => {
+    expect(plainTextHtml("a & <b>\r\nnext\r\n \r\n\r\n\nlast  ")).toBe(
+      "<p>a &amp; &lt;b&gt;<br>next</p><p>last</p>",
+    );
+    expect(plainTextHtml(" \n \n")).toBe("");
+  });
+
+  it("keeps block boundaries of Canvas HTML and drops document metadata", () => {
+    expect(
+      sanitizeDescription(
+        "<html><head><title>Page</title></head><body><div>One</div><div>Two</div><dl><dt>Term</dt><dd>Definition</dd></dl></body></html>",
+      ),
+    ).toEqual({
+      markdown: "One\n\nTwo\n\nTerm\n\nDefinition",
+      plainText: "One Two Term Definition",
+    });
   });
 });

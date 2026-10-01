@@ -8,7 +8,8 @@ BEGIN:VEVENT
 UID:event-assignment-1001@canvas.example.edu
 DTSTART;VALUE=DATE:20260720
 SUMMARY:Quiz 1 [EE 10]
-DESCRIPTION:<p>A quiz with <strong>HTML</strong>.</p>
+DESCRIPTION:A quiz with HTML.
+X-ALT-DESC;FMTTYPE=text/html:<p>A quiz with <strong>HTML</strong>.</p>
 URL:https://canvas.example.edu/courses/123/assignments/1001
 END:VEVENT
 BEGIN:VEVENT
