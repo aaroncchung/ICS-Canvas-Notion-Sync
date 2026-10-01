@@ -69,43 +69,58 @@ function absoluteLink(candidate: string): LinkIdentity | undefined {
   return identity;
 }
 
-function relativeRoute(value: string): LinkIdentity | undefined {
-  for (const match of value.matchAll(PATH_ROUTE)) {
-    if (!match[1] || !match[2]) continue;
+function relativeRoutes(value: string): LinkIdentity[] {
+  return [...value.matchAll(PATH_ROUTE)].flatMap((match): LinkIdentity[] => {
+    if (!match[1] || !match[2]) return [];
     const tokenPrefix = value.slice(0, match.index).split(/\s/).at(-1) ?? "";
-    if (tokenPrefix.includes("://")) continue;
-    return {
-      kind: "assignment",
-      id: match[2],
-      evidence: "canvas-assignment-route",
-      courseId: match[1],
-    };
-  }
-  return;
+    if (tokenPrefix.includes("://")) return [];
+    return [
+      { kind: "assignment", id: match[2], evidence: "canvas-assignment-route", courseId: match[1] },
+    ];
+  });
 }
 
 /**
  * Only URL and LOCATION can name the event's own Canvas item. A description is prose that may link
- * any number of other assignments, so it never decides identity (#47).
+ * any number of other assignments, so it never decides identity (#47). Every link in those fields
+ * is read, because one that names a different item makes the event's identity unknowable.
  */
-function linkIdentity(values: string[]): LinkIdentity | undefined {
-  for (const value of values) {
-    for (const candidate of absoluteUrls(value)) {
-      const identity = absoluteLink(candidate);
-      if (identity) return identity;
+function linkIdentity(values: string[]): LinkIdentity | "conflict" | undefined {
+  const links = [
+    ...values.flatMap(absoluteUrls).flatMap((candidate) => absoluteLink(candidate) ?? []),
+    ...values.flatMap(relativeRoutes),
+  ];
+  const [first] = links;
+  if (!first) return;
+  const courseIds = new Set(links.flatMap((link) => link.courseId ?? []));
+  if (
+    links.some((link) => link.kind !== first.kind || link.id !== first.id) ||
+    courseIds.size > 1
+  ) {
+    return "conflict";
+  }
+  const identity: LinkIdentity = { ...first };
+  // An assignment page route is the stronger evidence when it agrees with a calendar link.
+  if (links.some((link) => link.evidence === "canvas-assignment-route")) {
+    identity.evidence = "canvas-assignment-route";
+  }
+  const [courseId] = courseIds;
+  if (courseId) identity.courseId = courseId;
+  const canvasUrl = links.find((link) => link.canvasUrl)?.canvasUrl;
+  if (canvasUrl) identity.canvasUrl = canvasUrl;
+  else if (courseId && identity.kind === "assignment") {
+    const origin = values
+      .flatMap(absoluteUrls)
+      .map((candidate) => verifiedCanvasOrigin(candidate, courseId))
+      .find((value) => value !== undefined);
+    if (origin) {
+      identity.canvasUrl = new URL(
+        `/courses/${courseId}/assignments/${identity.id}`,
+        origin,
+      ).toString();
     }
   }
-  const route = values.map(relativeRoute).find((match) => match !== undefined);
-  if (!route?.courseId) return route;
-  const courseId = route.courseId;
-  const origin = values
-    .flatMap(absoluteUrls)
-    .map((candidate) => verifiedCanvasOrigin(candidate, courseId))
-    .find((value) => value !== undefined);
-  if (origin) {
-    route.canvasUrl = new URL(`/courses/${courseId}/assignments/${route.id}`, origin).toString();
-  }
-  return route;
+  return identity;
 }
 
 function uidIdentity(uid: string | undefined): { kind: CanvasItemKind; id: string } | undefined {
@@ -121,13 +136,17 @@ export function classifyEvent(input: ClassificationInput): ClassificationResult 
   const identityValues = [input.url, input.location].filter((value): value is string =>
     Boolean(value),
   );
-  const link = linkIdentity(identityValues);
+  const found = linkIdentity(identityValues);
+  const link = found === "conflict" ? undefined : found;
   if (link) evidence.push(link.evidence);
   const fromUid = uidIdentity(input.uid);
   if (fromUid?.kind === "assignment") evidence.push("canvas-assignment-uid");
   if (fromUid?.kind === "calendar-event") evidence.push("canvas-calendar-event-uid");
 
-  if (fromUid && link && (link.kind !== fromUid.kind || link.id !== fromUid.id)) {
+  if (
+    found === "conflict" ||
+    (fromUid && link && (link.kind !== fromUid.kind || link.id !== fromUid.id))
+  ) {
     return { kind: "mismatch", evidence: [...evidence, "canvas-identity-mismatch"] };
   }
 

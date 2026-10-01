@@ -108,6 +108,47 @@ describe("Canvas event classification", () => {
     ).toBe("mismatch");
   });
 
+  it.each([
+    [
+      "a matching URL and another assignment in LOCATION",
+      "event-assignment-456",
+      "/courses/1/assignments/457",
+    ],
+    [
+      "two links that disagree without a Canvas UID",
+      "abc-1@canvas",
+      "https://canvas.example.edu/courses/1/assignments/457",
+    ],
+    ["the same assignment in two courses", "event-assignment-456", "/courses/2/assignments/456"],
+  ])("quarantines %s", (_case, uid, location) => {
+    expect(
+      classifyEvent({
+        uid,
+        url: "https://canvas.example.edu/calendar?include_contexts=course_1#assignment_456",
+        location,
+      }),
+    ).toMatchObject({
+      kind: "mismatch",
+      evidence: expect.arrayContaining(["canvas-identity-mismatch"]) as string[],
+    });
+  });
+
+  it("combines agreeing links, preferring the assignment page route", () => {
+    expect(
+      classifyEvent({
+        uid: "abc-1@canvas",
+        url: "https://canvas.example.edu/calendar?include_contexts=course_1#assignment_456",
+        location: "https://canvas.example.edu/courses/1/assignments/456",
+      }),
+    ).toEqual({
+      kind: "assignment",
+      evidence: ["canvas-assignment-route"],
+      canvasUrl: "https://canvas.example.edu/courses/1/assignments/456",
+      canvasCourseId: "1",
+      canvasAssignmentId: "456",
+    });
+  });
+
   it("quarantines a calendar assignment link that no UID confirms", () => {
     expect(
       classifyEvent({

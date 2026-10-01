@@ -403,6 +403,36 @@ describe("Canvas feed shapes and malformed events", () => {
     ]);
   });
 
+  it("reads events whose component boundaries are folded", () => {
+    const folded = (id: number) =>
+      [
+        "BEGIN:VEV",
+        " ENT",
+        `UID:event-assignment-${id}`,
+        "DTSTART:20260701T120000Z",
+        `SUMMARY:Folded ${id} [EE 10]`,
+        "END:VE",
+        "\tVENT",
+      ].join("\r\n");
+    const parsed = parseIcs(
+      calendar(
+        [
+          folded(1),
+          event(`UID:event-assignment-2\nDTSTART:20260701T120000Z\nSUMMARY:Plain [EE 10]`),
+          folded(3),
+        ].join("\r\n"),
+      ),
+      assignmentTypeMatcher,
+    );
+    expect(parsed.assignments.map((item) => item.uid)).toEqual([
+      "event-assignment-1",
+      "event-assignment-2",
+      "event-assignment-3",
+    ]);
+    expect(parsed.diagnostics.totalEvents).toBe(3);
+    expect(parsed.diagnostics.events).toEqual([]);
+  });
+
   it("does not take a nested alarm's UID for a repeated event UID", () => {
     const parsed = parseIcs(
       calendar(

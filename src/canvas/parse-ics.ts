@@ -89,13 +89,12 @@ function unescapeText(value: string): string {
 }
 
 /**
- * The UID as written in the source event: unfolded, unescaped, and trimmed. Every comparison of
- * UIDs uses this one form, so copies that differ only by whitespace or escaping are duplicates.
+ * The UID as written in the unfolded source event, unescaped and trimmed. Every comparison of UIDs
+ * uses this one form, so copies that differ only by whitespace or escaping are duplicates.
  */
 function sourceUid(block: string): { uid?: string; repeated: boolean } {
   // A nested component such as VALARM may carry a UID of its own (RFC 9074).
-  const unfolded = block.replace(/\r?\n[ \t]/g, "").replace(NESTED_COMPONENT, "");
-  const values = [...unfolded.matchAll(UID_LINE)].map((match) =>
+  const values = [...block.replace(NESTED_COMPONENT, "").matchAll(UID_LINE)].map((match) =>
     unescapeText(match[1] ?? "").trim(),
   );
   const uid = values[0];
@@ -113,7 +112,9 @@ interface SourceEvent {
  * that one malformed event is quarantined instead of failing the whole feed. Parsing per event
  * also keeps events that node-ical would otherwise index together by UID.
  */
-function parseEvents(source: string): { events: SourceEvent[]; parserWarnings: number } {
+function parseEvents(folded: string): { events: SourceEvent[]; parserWarnings: number } {
+  // Component boundaries are content lines too, so they can be folded like any other.
+  const source = folded.replace(/\r?\n[ \t]/g, "");
   const blocks = source.match(VEVENT_BLOCK) ?? [];
   const head = source.replace(VEVENT_BLOCK, "").trimEnd().slice(0, -CALENDAR_END.length);
   if ((source.match(VEVENT_START) ?? []).length !== blocks.length) {
