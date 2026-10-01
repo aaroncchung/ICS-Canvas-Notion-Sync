@@ -100,6 +100,7 @@ describe("GitHub Actions observability", () => {
       /^::warning::/,
     );
     const successful = result("Success");
+    successful.warnings = [];
     successful.counts.ignoredEvents = 5;
     expect(workflowAnnotations(config({ GITHUB_ACTIONS: "true" }), successful)).toEqual([]);
   });

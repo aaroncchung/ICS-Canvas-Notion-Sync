@@ -27,6 +27,7 @@ export interface RunDependencies {
   provider?: AssignmentProvider;
   summaryAppender?: SummaryAppender;
   now?: () => Date;
+  logger?: Logger;
 }
 
 export type SummaryAppender = (path: string, data: string, encoding: "utf8") => Promise<void>;
@@ -75,13 +76,21 @@ function workflowCommand(kind: "error" | "warning", message: string, secrets: st
   return `::${kind}::${sanitized}`;
 }
 
+/**
+ * Annotations are public in a public repository's Actions logs, so they carry only aggregate
+ * counts, warning messages built from counts, and the failure summary. Failure details, which
+ * can name a Canvas UID or quote description text, stay in the Notion Sync Log.
+ */
 export function workflowAnnotations(config: AppConfig, result: RunResult): string[] {
   if (config.GITHUB_ACTIONS !== "true") return [];
   const secrets = [config.CANVAS_ICS_URL, config.NOTION_TOKEN];
-  if (result.status === "Failed") {
-    return [workflowCommand("error", result.errors[0] ?? "Synchronization failed", secrets)];
-  }
-  if (result.status !== "Warning") return [];
+  const annotations =
+    result.status === "Failed"
+      ? [workflowCommand("error", failureSummary(result) ?? "Synchronization failed", secrets)]
+      : [];
+  // Warnings are annotated whatever the status: dry runs are how a new feed is inspected, and a
+  // failed run may still have found suspicious events.
+  if (!result.warnings.length) return annotations;
   const diagnosticCounts = [
     `suspicious=${result.counts.suspiciousEvents}`,
     `malformed=${result.counts.malformedEvents}`,
@@ -92,13 +101,14 @@ export function workflowAnnotations(config: AppConfig, result: RunResult): strin
     .slice(0, 3)
     .map((warning) => warning.message)
     .join("; ");
-  return [
+  annotations.push(
     workflowCommand(
       "warning",
-      `Sync completed with meaningful diagnostics (${diagnosticCounts})${warningSummary ? `: ${warningSummary}` : ""}`,
+      `Run found meaningful diagnostics (${diagnosticCounts})${warningSummary ? `: ${warningSummary}` : ""}`,
       secrets,
     ),
-  ];
+  );
+  return annotations;
 }
 
 export async function run(
@@ -106,7 +116,7 @@ export async function run(
   dependencies: RunDependencies = {},
 ): Promise<RunResult> {
   const secrets = [config.CANVAS_ICS_URL, config.NOTION_TOKEN];
-  const logger = createLogger();
+  const logger = dependencies.logger ?? createLogger();
 
   const gateway = dependencies.gateway ?? new OfficialNotionGateway(config.NOTION_TOKEN, logger);
   const baseline = requestDifference(gateway.requestMetrics, createRequestMetrics());
@@ -173,7 +183,10 @@ export async function run(
     if (error instanceof ApplyPlanError) result.execution = error.execution;
     result.status = "Failed";
     result.errors.push(safeError(error, secrets));
-    logger.error({ diagnostic: safeDiagnostic(error, secrets) }, "Synchronization run failed");
+    const diagnostic = safeDiagnostic(error, secrets);
+    // The cause of an apply failure can quote assignment text; the Sync Log records it instead.
+    if (error instanceof ApplyPlanError) delete diagnostic.cause;
+    logger.error({ diagnostic }, "Synchronization run failed");
   }
   const reportingStart = requestDifference(gateway.requestMetrics, createRequestMetrics());
   result = finalizeRun(result, config.mode, requestDifference(reportingStart, baseline));
@@ -184,8 +197,11 @@ export async function run(
       result.status = "Failed";
       result.errors.push(`Sync Log write failed: ${safeError(error, secrets)}`);
       result.errors.push("Sync Log write failed; creation was not blindly retried");
+      // The Sync Log quotes failure details, and a failed write of it (for example a verification
+      // mismatch) can quote them back, so only the failure's classification is logged.
+      const { name, failureClass, status, code, operation } = safeDiagnostic(error, secrets);
       logger.error(
-        { diagnostic: safeDiagnostic(error, secrets) },
+        { diagnostic: { name, failureClass, status, code, operation } },
         "Could not persist the run to Notion Sync Log",
       );
     }

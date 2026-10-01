@@ -25,16 +25,21 @@ import { compilePlan, operationOf, type AssignmentWork, type SyncCommand } from 
 function operationError(error: unknown): string {
   const status = errorStatus(error);
   if (status) return `Notion request failed with status ${status}`;
-  if (error instanceof Error) return safeError(error).slice(0, 240);
+  if (error instanceof Error) return safeError(error);
   return "Notion operation failed";
 }
 
+/**
+ * The message names only the failed operation's kind and outcome, so the error can be logged in
+ * public workflow output. The target and the underlying error's message, which can quote
+ * assignment text, stay in `execution` for the Notion Sync Log.
+ */
 export class ApplyPlanError extends Error {
   public readonly execution: SyncExecutionResult;
   public readonly operation: SyncOperationKind | undefined;
 
-  public constructor(execution: SyncExecutionResult, message: string) {
-    super(message);
+  public constructor(execution: SyncExecutionResult, message: string, options?: ErrorOptions) {
+    super(message, options);
     this.name = "ApplyPlanError";
     this.execution = execution;
     this.operation = execution.failedOperation?.kind;
@@ -225,6 +230,7 @@ export async function applyPlan(
   }
 
   const attempted = new Set<SyncCommand>();
+  let firstError: unknown;
   function record(command: SyncCommand, applied: Partial<AppliedSyncOperation> = {}): void {
     execution.appliedOperations.push({ ...operationOf(command), ...applied });
     if ("assignment" in command) state(command.assignment).completed.push(command.kind);
@@ -235,8 +241,10 @@ export async function applyPlan(
       outcome: isAmbiguousWriteError(error) ? "ambiguous" : "failed",
       message: operationError(error),
     };
-    if (!execution.failedOperation) execution.failedOperation = failed;
-    else (execution.additionalFailures ??= []).push(failed);
+    if (!execution.failedOperation) {
+      execution.failedOperation = failed;
+      firstError = error;
+    } else (execution.additionalFailures ??= []).push(failed);
   }
   async function perform(command: SyncCommand): Promise<boolean> {
     attempted.add(command);
@@ -309,7 +317,9 @@ export async function applyPlan(
         }
       }
       execution.notAttempted = commands.filter((value) => !attempted.has(value)).map(operationOf);
-      throw new ApplyPlanError(execution, `${failed.kind} ${failed.target}: ${failed.message}`);
+      throw new ApplyPlanError(execution, `${failed.kind} ${failed.outcome}`, {
+        cause: firstError,
+      });
     }
     if ("assignment" in command) {
       const work = command.assignment;

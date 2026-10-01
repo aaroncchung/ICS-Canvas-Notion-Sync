@@ -112,10 +112,11 @@ function isTransportSignal(value: unknown): boolean {
 }
 
 export function classifyNotionFailure(error: unknown): NotionFailureClassification {
-  if (error instanceof AmbiguousNotionWriteError) {
+  const chain = boundedErrorChain(error);
+  // A wrapper such as ApplyPlanError carries the ambiguous write as its cause.
+  if (chain.some((value) => value instanceof AmbiguousNotionWriteError)) {
     return { kind: "ambiguous-write", retryable: false, ambiguousWrite: true };
   }
-  const chain = boundedErrorChain(error);
   for (const value of chain) {
     const status = responseStatus(value);
     if (status !== undefined) {

@@ -1,3 +1,4 @@
+import { sliceText, truncateText } from "../text.ts";
 import {
   AmbiguousNotionWriteError,
   errorStatus,
@@ -220,7 +221,7 @@ function isPrefix(actual: string[], expected: string[]): boolean {
 }
 
 function brief(value: CanonicalValue | undefined): string {
-  return String(JSON.stringify(value)).slice(0, 48);
+  return truncateText(String(JSON.stringify(value)), 48);
 }
 
 /** Where two canonical values first differ, with text reduced to a short excerpt. */
@@ -233,7 +234,7 @@ function firstDifference(
     if (actual === expected) return;
     let index = 0;
     while (actual[index] === expected[index]) index += 1;
-    const excerpt = (text: string) => brief(text.slice(Math.max(0, index - 8), index + 16));
+    const excerpt = (text: string) => brief(sliceText(text, Math.max(0, index - 8), index + 16));
     return `${path}: read ${actual.length} chars, expected ${expected.length}, differ at ${index}: ${excerpt(actual)} vs ${excerpt(expected)}`;
   }
   if (Array.isArray(actual) && Array.isArray(expected)) {

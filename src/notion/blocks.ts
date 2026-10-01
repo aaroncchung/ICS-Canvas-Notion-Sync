@@ -1,3 +1,5 @@
+import { isSurrogateBoundary } from "../text.ts";
+
 export type Block = Record<string, unknown>;
 
 /** Notion allows 2000 characters per rich text item; leave a margin. */
@@ -11,12 +13,6 @@ export function paragraph(content: string): Block {
     type: "paragraph",
     paragraph: { rich_text: [{ type: "text", text: { content } }] },
   };
-}
-
-function isSurrogateBoundary(content: string, end: number): boolean {
-  const high = content.charCodeAt(end - 1);
-  const low = content.charCodeAt(end);
-  return high >= 0xd800 && high <= 0xdbff && low >= 0xdc00 && low <= 0xdfff;
 }
 
 /**

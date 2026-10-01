@@ -1,7 +1,7 @@
-import { pino, type Logger } from "pino";
+import { pino, type DestinationStream, type Logger } from "pino";
 
-export function createLogger(): Logger {
-  return pino({
+export function createLogger(destination?: DestinationStream): Logger {
+  const options = {
     level: process.env.LOG_LEVEL ?? "info",
     redact: {
       paths: [
@@ -14,5 +14,6 @@ export function createLogger(): Logger {
       ],
       censor: "[REDACTED]",
     },
-  });
+  };
+  return destination ? pino(options, destination) : pino(options);
 }

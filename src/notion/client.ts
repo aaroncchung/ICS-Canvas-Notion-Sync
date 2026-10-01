@@ -1,6 +1,6 @@
 import { createRequestMetrics } from "../observability/run-report.ts";
 import { setTimeout as sleep } from "node:timers/promises";
-import { Client } from "@notionhq/client";
+import { Client, LogLevel, type Logger as NotionSdkLogger } from "@notionhq/client";
 import type { Logger } from "pino";
 import type { RequestMetrics } from "../types.ts";
 import { classifyNotionFailure, retryAfterMs } from "./failure.ts";
@@ -65,6 +65,27 @@ function classifyOperation(error: unknown, operation: NotionOperation): unknown 
     // Some third-party error objects are non-extensible; the original error remains useful.
   }
   return error;
+}
+
+const SAFE_SDK_FIELD = /^[A-Za-z0-9_.:-]{1,80}$/;
+
+/**
+ * Routes the SDK's own logging through pino at debug level. The SDK's default console logger
+ * prints each failed request's message, and a Notion validation message can echo the rejected
+ * value, such as an assignment title. Only the SDK's fixed event name and identifier-shaped fields
+ * pass through; the gateway's callers report failures themselves.
+ */
+export function notionSdkLogger(logger: Logger): NotionSdkLogger {
+  return (level, message, extraInfo) => {
+    const fields: Record<string, string | number> = { sdkLevel: level };
+    for (const key of ["code", "attempt", "requestId"]) {
+      const value = extraInfo[key];
+      if (typeof value === "number" || (typeof value === "string" && SAFE_SDK_FIELD.test(value))) {
+        fields[key] = value;
+      }
+    }
+    logger.debug(fields, `Notion SDK: ${message}`);
+  };
 }
 
 export async function withRetry<T>(
@@ -139,7 +160,13 @@ export class OfficialNotionGateway implements NotionGateway {
     this.logger = logger;
     this.requestMetrics = requestMetrics;
     // Recovery and physical request accounting belong to this gateway, including DELETE.
-    this.client = new Client({ auth: token, notionVersion: NOTION_API_VERSION, retry: false });
+    this.client = new Client({
+      auth: token,
+      notionVersion: NOTION_API_VERSION,
+      retry: false,
+      logLevel: LogLevel.WARN,
+      logger: notionSdkLogger(logger),
+    });
   }
 
   public async retrieveDataSource(id: string): Promise<Record<string, unknown>> {

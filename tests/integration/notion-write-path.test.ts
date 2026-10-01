@@ -431,7 +431,12 @@ describe("batched write safety", () => {
       if (id === "page") gateway.seedBlock(ids[0]!, paragraph("Unexpected"));
       return ids;
     });
-    await expect(applyPlan(gateway, config(), plan())).rejects.toThrow("could not be verified");
+    const failure: unknown = await applyPlan(gateway, config(), plan()).catch(
+      (error: unknown) => error,
+    );
+    expect(failure).toBeInstanceOf(ApplyPlanError);
+    expect((failure as ApplyPlanError).message).toBe("assignment-description-update ambiguous");
+    expect(((failure as ApplyPlanError).cause as Error).message).toContain("could not be verified");
     expect(await readManagedDescription(gateway, "page")).toBe("Old");
     const writes = gateway.writes.filter((write) => write.kind === "update");
     expect(writes).toHaveLength(1);

@@ -714,7 +714,9 @@ describe("application modes and failure handling", () => {
       if (!(error instanceof ApplyPlanError)) throw error;
       failure = error;
     }
-    expect(failure?.message).toContain("write failed");
+    expect(failure?.message).toBe("assignment-property-update failed");
+    expect((failure?.cause as Error | undefined)?.message).toContain("write failed");
+    expect(failure?.execution.failedOperation?.message).toContain("write failed");
     expect(gateway.writes.some((write) => write.id === "assignment-remove")).toBe(false);
     expect(workCounts(plan, failure?.execution).removed).toBe(0);
   });

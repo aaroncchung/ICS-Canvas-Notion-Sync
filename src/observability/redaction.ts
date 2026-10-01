@@ -3,6 +3,7 @@ import {
   property,
   type NotionFailureClassification,
 } from "../notion/failure.ts";
+import { truncateText } from "../text.ts";
 
 const TOKEN_PATTERN = /\b(?:secret|ntn|oauth|sk)[_-][A-Za-z0-9_-]{8,}\b/gi;
 const AUTH_PATTERN = /(?:authorization\s*[:=]\s*|bearer\s+)[^\s,}\]]+/gi;
@@ -52,13 +53,13 @@ function extract(
   const rawMessage =
     stringProperty(error, "message") ?? (typeof error === "string" ? error : "Operation failed");
   const diagnostic: SanitizedDiagnostic = {
-    name: redactText(name, secrets).slice(0, 120),
-    message: redactText(rawMessage, secrets).slice(0, 800),
+    name: truncateText(redactText(name, secrets), 120),
+    message: truncateText(redactText(rawMessage, secrets), 800),
   };
   const classification = classifyNotionFailure(error);
   diagnostic.failureClass = classification.kind;
   const stack = stringProperty(error, "stack");
-  if (stack) diagnostic.stack = redactText(stack, secrets).slice(0, 2500);
+  if (stack) diagnostic.stack = truncateText(redactText(stack, secrets), 2500);
   if (classification.kind === "definite-response") diagnostic.status = classification.status;
   if (classification.kind === "transport" && classification.code) {
     diagnostic.code = classification.code;
@@ -108,7 +109,7 @@ export function safeDiagnostic(error: unknown, secrets: string[] = []): Sanitize
   if (JSON.stringify(result).length > 6000) {
     delete result.cause;
     delete result.errors;
-    result.message = result.message.slice(0, 500);
+    result.message = truncateText(result.message, 500);
   }
   return result;
 }
@@ -117,8 +118,8 @@ export function safeError(error: unknown, secrets: string[] = []): string {
   const diagnostic = safeDiagnostic(error, secrets);
   const status = diagnostic.status ? ` (status ${diagnostic.status})` : "";
   const code = diagnostic.code ? ` (${diagnostic.code})` : "";
-  return `${diagnostic.failureClass}: ${diagnostic.name}: ${diagnostic.message}${status}${code}`.slice(
-    0,
+  return truncateText(
+    `${diagnostic.failureClass}: ${diagnostic.name}: ${diagnostic.message}${status}${code}`,
     1200,
   );
 }
