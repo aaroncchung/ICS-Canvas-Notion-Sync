@@ -96,6 +96,8 @@ export async function withRetry<T>(
     sleep?: (ms: number) => Promise<void>;
     operation?: NotionOperation;
     onRetry?: (operation: NotionOperation) => void;
+    /** Called with the wait a throttled (429/529) response asks for, even when not retrying. */
+    onThrottle?: (delayMs: number) => void;
     metrics?: RequestMetrics;
     now?: () => number;
   } = {},
@@ -122,6 +124,13 @@ export async function withRetry<T>(
         failure.kind === "definite-response"
           ? failure.retryable && (throttled || retriesAmbiguousFailures)
           : failure.kind === "transport" && failure.retryableRead && retriesAmbiguousFailures;
+      const requested = throttled ? retryAfterMs(error, now()) : undefined;
+      const delay =
+        requested === undefined
+          ? baseDelayMs * 2 ** attempt + Math.floor(Math.random() * baseDelayMs)
+          : Math.min(requested, MAX_RETRY_AFTER_MS);
+      // Report every throttle, including a final one that is not retried, so callers can hold off.
+      if (throttled) options.onThrottle?.(delay);
       if (attempt === attempts - 1 || !retryable) {
         throw classifyOperation(error, operationType);
       }
@@ -130,11 +139,6 @@ export async function withRetry<T>(
         options.metrics.propertyUpdateRetries += 1;
       }
       options.onRetry?.(operationType);
-      const requested = throttled ? retryAfterMs(error, now()) : undefined;
-      const delay =
-        requested === undefined
-          ? baseDelayMs * 2 ** attempt + Math.floor(Math.random() * baseDelayMs)
-          : Math.min(requested, MAX_RETRY_AFTER_MS);
       if (throttled && options.metrics) {
         options.metrics.throttleRetries += 1;
         options.metrics.throttleWaitMs += delay;
@@ -148,6 +152,7 @@ export async function withRetry<T>(
 export class OfficialNotionGateway implements NotionGateway {
   private readonly client: Client;
   private nextRequestAt = 0;
+  private throttledUntil = 0;
 
   private readonly logger: Logger;
   public readonly requestMetrics: RequestMetrics;
@@ -302,19 +307,27 @@ export class OfficialNotionGateway implements NotionGateway {
   ): Promise<T> {
     return withRetry(
       async () => {
-        const now = Date.now();
-        const scheduledAt = Math.max(now, this.nextRequestAt);
-        this.nextRequestAt = scheduledAt + 340;
-        const delay = scheduledAt - now;
-        if (delay > 0) {
-          this.logger.debug({ delay }, "Applying conservative Notion request pacing");
-          await sleep(delay);
+        // A request that took its slot before a throttle arrived waits out the hold before sending.
+        for (;;) {
+          const now = Date.now();
+          const scheduledAt = Math.max(now, this.nextRequestAt);
+          this.nextRequestAt = scheduledAt + 340;
+          const delay = scheduledAt - now;
+          if (delay > 0) {
+            this.logger.debug({ delay }, "Applying conservative Notion request pacing");
+            await sleep(delay);
+          }
+          if (Date.now() >= this.throttledUntil) return operation();
         }
-        return operation();
       },
       {
         operation: operationType,
         metrics: this.requestMetrics,
+        // Throttling applies to the integration, so every request waits out the throttle window.
+        onThrottle: (delayMs) => {
+          this.throttledUntil = Math.max(this.throttledUntil, Date.now() + delayMs);
+          this.nextRequestAt = Math.max(this.nextRequestAt, this.throttledUntil);
+        },
       },
     );
   }
