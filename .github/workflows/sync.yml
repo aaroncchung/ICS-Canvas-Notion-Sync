@@ -34,8 +34,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
-      # Every mode needs both secrets. The job declares no environment, so only repository secrets
-      # reach it; this fails before checkout and names each missing secret without printing values.
+      # Every mode needs both secrets. Check before checkout without printing values.
       - name: Check required secrets
         shell: bash
         env:
@@ -50,7 +49,7 @@ jobs:
           printf -v list '%s, ' "${missing[@]}"
           list=${list%, }
           settings="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/settings/secrets/actions"
-          message="Missing required secrets in $GITHUB_REPOSITORY: $list. Add them as repository secrets at $settings (this job uses no environment, so environment secrets do not reach it). If the credentials live in a private runner repository, start this workflow from that repository's Actions tab instead; see docs/notion-setup.md, section 9."
+          message="Missing required secrets in $GITHUB_REPOSITORY: $list. Repository secrets are scoped to the repository running the workflow. Start manual sync runs from the private ICS-Canvas-Notion-Sync-runner repository's Actions tab: $GITHUB_SERVER_URL/aaroncchung/ICS-Canvas-Notion-Sync-runner/actions/workflows/sync.yml. If this is the runner, add the missing repository secrets at $settings. This job uses no environment, so environment secrets do not reach it."
           echo "::error title=Missing required secrets::$message"
           echo "$message" >> "$GITHUB_STEP_SUMMARY"
           exit 1

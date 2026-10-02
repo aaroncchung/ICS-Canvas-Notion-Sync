@@ -103,7 +103,7 @@ Confirm the Course property in Assignments relates to the exact Courses data sou
 
 ## 7. Configure GitHub Actions
 
-In the repository that runs the sync (the private runner described in [Scheduled runs](#9-scheduled-runs)), under **Settings → Secrets and variables → Actions**, add secrets:
+In the private `ICS-Canvas-Notion-Sync-runner` repository described in [Scheduled runs](#9-scheduled-runs), under **Settings → Secrets and variables → Actions**, add secrets:
 
 - `CANVAS_ICS_URL` — the complete private HTTPS Canvas feed URL
 - `NOTION_TOKEN` — the internal integration token
@@ -175,11 +175,11 @@ Each run uses this repository's `main` as it is at that moment, so a merge here 
 
 ### Manual runs
 
-When the credentials live in the runner, start every manual run there too; the workflows in this repository have no secrets to read and stop at `Check required secrets`. In the runner, open **Actions → Canvas–Notion sync → Run workflow**, keep the branch at the runner's `main`, and pick a mode. From a terminal:
+Start every manual run from the private [ICS-Canvas-Notion-Sync-runner repository](https://github.com/aaroncchung/ICS-Canvas-Notion-Sync-runner/actions/workflows/sync.yml). Repository secrets are scoped to the repository running the workflow; checking out this public repository does not transfer secrets between repositories. A manual run here has no secrets to read and stops before checkout at `Check required secrets`. In the runner, open **Actions → Canvas–Notion sync → Run workflow**, keep the branch at the runner's `main`, and pick a mode. From a terminal:
 
 ```sh
-gh workflow run sync.yml --repo <owner>/<runner> -f mode=validate
-gh run watch --repo <owner>/<runner>
+gh workflow run sync.yml --repo aaroncchung/ICS-Canvas-Notion-Sync-runner -f mode=validate
+gh run watch --repo aaroncchung/ICS-Canvas-Notion-Sync-runner
 ```
 
 The runner's `main` holds only workflow files; the code always comes from this repository's `main`, so a manual run there tests whatever is merged here. To try an unmerged branch with real credentials, temporarily change the runner checkout's `ref:` to that branch, or use the local CLI with exported credentials.

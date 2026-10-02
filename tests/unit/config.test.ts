@@ -84,9 +84,9 @@ describe("optional JSON configuration", () => {
     ).rejects.toThrow("Invalid environment configuration");
   });
 
-  it("names each invalid environment field once", async () => {
+  it.each(["", undefined])("names each missing environment field once (%s)", async (missing) => {
     await expect(
-      loadConfig([], { ...environment, CANVAS_ICS_URL: "", NOTION_TOKEN: "" }),
+      loadConfig([], { ...environment, CANVAS_ICS_URL: missing, NOTION_TOKEN: missing }),
     ).rejects.toThrow(/^Invalid environment configuration: CANVAS_ICS_URL, NOTION_TOKEN$/);
   });
 
