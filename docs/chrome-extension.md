@@ -37,6 +37,8 @@ The token stays in `chrome.storage.local` and is not encrypted by the extension 
 
 ## Verify a release
 
+Whenever the extension is updated, bump `version` in `extension/static/manifest.json` in the same commit to match the change: patch for fixes and maintenance, minor for new features, and major for breaking changes. Use three numeric components (for example, `1.0.2`). The build copies this version to `dist/extension/manifest.json`, which Chrome displays after reloading the extension.
+
 Run `npm run lint`, `npm run format:check`, `npm run check:types-and-build`, `npm test`, and `npm audit`. Extension tests can also run alone with `npm run test:extension`.
 
 In Chrome, verify Settings and Preview, and check that Preview reports no "Title differs from Canvas" rows for assignments you recognize. Navigate while a scan is running, and confirm a qualifying assignment becomes Done. Manually reopen it and confirm another scan preserves the change. Go offline or sign out of Canvas, trigger a scan, and confirm sync stays enabled and recovers once you are back. With sync on, withdraw the extension's access to the Canvas site in `chrome://extensions` and confirm the badge shows `!` and the popup names the site without a scan being started; restore access and confirm the message clears. Click Pause during a scan and confirm it stops promptly. With sync on, browse other sites and switch tabs for a few minutes while Chrome's task manager (Shift+Esc) is open, and confirm the extension's service worker appears only around Canvas visits and scans. Inspect errors in `chrome://extensions` if needed. These live checks require the unpacked extension, a Canvas login, and the integration token; automated tests use synthetic data only.
