@@ -663,6 +663,22 @@ describe("managed description verification with native blocks", () => {
     );
   });
 
+  it("verifies neighbouring links whose URLs Notion reads back as the same text", async () => {
+    const markdown = "[A](https://example.edu/?q=a/b)[B](https://example.edu/?q=a%2Fb)";
+    expect(richText(descriptionBlocks(markdown)[0]!)).toHaveLength(2);
+    const gateway = linkRewritingGateway((url) => url.replace("q=a/b", "q=a%2Fb"));
+    expect(await replaceManagedDescription(gateway, "page", markdown)).toEqual({
+      repaired: true,
+      replaced: true,
+    });
+    const writes = gateway.writes.length;
+    expect(await replaceManagedDescription(gateway, "page", markdown)).toEqual({
+      repaired: false,
+      replaced: false,
+    });
+    expect(gateway.writes).toHaveLength(writes);
+  });
+
   it("compares link URLs by what their query names", () => {
     expect(comparableLinkUrl("https://e.edu/a%2fb?k%2f=a/b,c&flag&x=1=2#s%2f")).toBe(
       "https://e.edu/a%2Fb?k%2F=a%2Fb%2Cc&flag&x=1%3D2#s%2F",

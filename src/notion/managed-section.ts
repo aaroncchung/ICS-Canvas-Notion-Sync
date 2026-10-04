@@ -28,6 +28,9 @@ interface ManagedSectionReconciliation {
   replaced: boolean;
 }
 
+type LinkUrlForm = (url: string) => string;
+const asWritten: LinkUrlForm = (url) => url;
+
 type CanonicalValue =
   null | boolean | number | string | CanonicalValue[] | { [key: string]: CanonicalValue };
 
@@ -84,7 +87,8 @@ function canonicalAnnotations(value: unknown): CanonicalValue {
   };
 }
 
-function canonicalRichText(value: unknown): CanonicalValue[] {
+/** `linkUrl` gives the form in which link URLs are compared; it runs before neighbours merge. */
+function canonicalRichText(value: unknown, linkUrl: LinkUrlForm): CanonicalValue[] {
   if (!Array.isArray(value)) return [];
   const result: CanonicalValue[] = [];
   // The text item that a following item with the same link and style extends.
@@ -115,7 +119,7 @@ function canonicalRichText(value: unknown): CanonicalValue[] {
             : "";
       const canonicalText = {
         content,
-        link: typeof link?.url === "string" ? { url: link.url } : null,
+        link: typeof link?.url === "string" ? { url: linkUrl(link.url) } : null,
       };
       const style = JSON.stringify(annotations);
       // Rich-text item boundaries are transport details, not content. Notion can
@@ -150,20 +154,20 @@ const RICH_TEXT_BLOCK_TYPES = new Set([
   "quote",
 ]);
 
-function canonicalPayload(block: Block, type: string): CanonicalValue {
+function canonicalPayload(block: Block, type: string, linkUrl: LinkUrlForm): CanonicalValue {
   const value = block[type];
   const payload = value && typeof value === "object" ? (value as Record<string, unknown>) : {};
   if (RICH_TEXT_BLOCK_TYPES.has(type)) {
     return {
-      rich_text: canonicalRichText(payload.rich_text),
+      rich_text: canonicalRichText(payload.rich_text, linkUrl),
       color: typeof payload.color === "string" ? payload.color : "default",
       ...(/^heading_[123]$/.test(type) ? { is_toggleable: payload.is_toggleable === true } : {}),
     };
   }
   if (type === "code") {
     return {
-      rich_text: canonicalRichText(payload.rich_text),
-      caption: canonicalRichText(payload.caption),
+      rich_text: canonicalRichText(payload.rich_text, linkUrl),
+      caption: canonicalRichText(payload.caption, linkUrl),
       language: typeof payload.language === "string" ? payload.language : "plain text",
     };
   }
@@ -172,7 +176,11 @@ function canonicalPayload(block: Block, type: string): CanonicalValue {
   return canonicalValue(managedPayload);
 }
 
-function canonicalBlock(block: Block, includeChildren: boolean): CanonicalValue {
+function canonicalBlock(
+  block: Block,
+  includeChildren: boolean,
+  linkUrl: LinkUrlForm = asWritten,
+): CanonicalValue {
   const type = typeof block.type === "string" ? block.type : "";
   const payload = block[type];
   const inlineChildren =
@@ -181,7 +189,7 @@ function canonicalBlock(block: Block, includeChildren: boolean): CanonicalValue 
       : undefined;
   return {
     type,
-    payload: canonicalPayload(block, type),
+    payload: canonicalPayload(block, type, linkUrl),
     ...(includeChildren
       ? {
           has_children:
@@ -256,9 +264,7 @@ export function comparableLinkUrl(url: string): string {
  * hash is taken over, link URLs are in their comparable form.
  */
 function signature(block: Block): string {
-  return JSON.stringify(canonicalBlock(block, true), (key, value: unknown) =>
-    key === "url" && typeof value === "string" ? comparableLinkUrl(value) : value,
-  );
+  return JSON.stringify(canonicalBlock(block, true, comparableLinkUrl));
 }
 
 function signaturesEqual(actual: string[], expected: string[]): boolean {
