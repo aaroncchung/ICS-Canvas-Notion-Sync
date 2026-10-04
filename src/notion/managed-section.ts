@@ -205,8 +205,60 @@ function isToggle(block: Block, title: string): boolean {
   );
 }
 
+/** Uppercases the hex digits of percent-escapes, which name the same octet in either case. */
+function upperEscapes(text: string): string {
+  return text.replace(/%[0-9a-f]{2}/gi, (escape) => escape.toUpperCase());
+}
+
+/** One query key or value with every character except "+" in a single percent-encoded form. */
+function comparableQueryPart(text: string): string {
+  // "+" is a space to some servers and a plus sign to others, so it is never folded into either.
+  return text
+    .split("+")
+    .map((piece) => {
+      try {
+        return encodeURIComponent(decodeURIComponent(piece));
+      } catch {
+        return upperEscapes(piece);
+      }
+    })
+    .join("+");
+}
+
+/**
+ * The form in which a written link URL and the one Notion reads back are compared. Notion stores
+ * a link's query re-encoded: `?id=10.1371/journal` reads back as `?id=10.1371%2Fjournal`, and
+ * `%2c` as `%2C`. Those name the same link, so the query's keys and values are compared decoded
+ * and percent-escapes elsewhere are compared in upper case. The `&` and `=` that separate the
+ * query's parts stay distinct from their escaped forms.
+ */
+export function comparableLinkUrl(url: string): string {
+  const fragmentStart = url.indexOf("#");
+  const beforeFragment = fragmentStart < 0 ? url : url.slice(0, fragmentStart);
+  const queryStart = beforeFragment.indexOf("?");
+  if (queryStart < 0) return upperEscapes(url);
+  const query = beforeFragment
+    .slice(queryStart + 1)
+    .split("&")
+    .map((pair) => {
+      const separator = pair.indexOf("=");
+      return separator < 0
+        ? comparableQueryPart(pair)
+        : `${comparableQueryPart(pair.slice(0, separator))}=${comparableQueryPart(pair.slice(separator + 1))}`;
+    })
+    .join("&");
+  const fragment = fragmentStart < 0 ? "" : url.slice(fragmentStart);
+  return `${upperEscapes(beforeFragment.slice(0, queryStart))}?${query}${upperEscapes(fragment)}`;
+}
+
+/**
+ * What read-back verification compares. Unlike the canonical representation that the description
+ * hash is taken over, link URLs are in their comparable form.
+ */
 function signature(block: Block): string {
-  return JSON.stringify(canonicalBlock(block, true));
+  return JSON.stringify(canonicalBlock(block, true), (key, value: unknown) =>
+    key === "url" && typeof value === "string" ? comparableLinkUrl(value) : value,
+  );
 }
 
 function signaturesEqual(actual: string[], expected: string[]): boolean {
