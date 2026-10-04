@@ -27,7 +27,7 @@ import {
   managedDescriptionHash,
   replaceManagedDescription,
 } from "../../src/notion/descriptions.ts";
-import { blockText } from "../../src/notion/managed-section.ts";
+import { blockText, comparableLinkUrl } from "../../src/notion/managed-section.ts";
 import { applyPlan } from "../../src/sync/reconcile.ts";
 import type { SyncPlan } from "../../src/types.ts";
 import { config, FakeGateway } from "../helpers.ts";
@@ -599,6 +599,94 @@ describe("managed description verification with native blocks", () => {
       );
     },
   );
+
+  /** Reads every link back with `rewrite` applied to its URL, as Notion re-encodes stored links. */
+  function linkRewritingGateway(rewrite: (url: string) => string): FakeGateway {
+    class LinkRewritingGateway extends FakeGateway {
+      override async listBlocks(id: string) {
+        const blocks = structuredClone(await super.listBlocks(id));
+        for (const block of blocks) {
+          if (block.type !== "paragraph") continue;
+          for (const item of richText(block)) {
+            const text = item.text as { link?: { url: string } | null };
+            if (!text.link) continue;
+            text.link.url = rewrite(text.link.url);
+            item.href = text.link.url;
+          }
+        }
+        return blocks;
+      }
+    }
+    return new LinkRewritingGateway();
+  }
+
+  it.each([
+    [
+      "an encoded slash in the query",
+      "https://journals.plos.org/ploscompbiol/article?id=10.1371/journal.pcbi.1008032",
+      "https://journals.plos.org/ploscompbiol/article?id=10.1371%2Fjournal.pcbi.1008032",
+    ],
+    [
+      "upper-case escapes",
+      "https://patents.google.com/patent/US10513802B2/en?oq=10%2c513%2c802",
+      "https://patents.google.com/patent/US10513802B2/en?oq=10%2C513%2C802",
+    ],
+  ])("verifies a link that Notion reads back with %s", async (_, written, readBack) => {
+    const markdown = `Read [the paper](${written}) first.`;
+    const hash = managedDescriptionHash(markdown);
+    const gateway = linkRewritingGateway((url) => (url === written ? readBack : url));
+    expect(await replaceManagedDescription(gateway, "page", markdown)).toEqual({
+      repaired: true,
+      replaced: true,
+    });
+    const writes = gateway.writes.length;
+    expect(await replaceManagedDescription(gateway, "page", markdown)).toEqual({
+      repaired: false,
+      replaced: false,
+    });
+    expect(gateway.writes).toHaveLength(writes);
+    // Only the comparison is tolerant: the link is written, and hashed, exactly as Canvas gave it.
+    expect(JSON.stringify(gateway.writes)).toContain(written);
+    expect(managedDescriptionHash(markdown)).toBe(hash);
+    expect(managedDescriptionHash(`Read [the paper](${readBack}) first.`)).not.toBe(hash);
+  });
+
+  it.each([
+    ["value", "https://example.edu/a?id=1&next=2", "https://example.edu/a?id=1&next=3"],
+    ["separator", "https://example.edu/a?id=1&next=2", "https://example.edu/a?id=1%26next=2"],
+    ["plus sign", "https://example.edu/a?q=c+d", "https://example.edu/a?q=c%20d"],
+    ["path", "https://example.edu/a/b?id=1", "https://example.edu/a%2Fb?id=1"],
+  ])("rejects a link read back with a different %s", async (_, written, readBack) => {
+    const gateway = linkRewritingGateway(() => readBack);
+    await expect(replaceManagedDescription(gateway, "page", `[link](${written})`)).rejects.toThrow(
+      "could not be verified: block 1 of 1: payload.rich_text[0].text.link.url",
+    );
+  });
+
+  it("verifies neighbouring links whose URLs Notion reads back as the same text", async () => {
+    const markdown = "[A](https://example.edu/?q=a/b)[B](https://example.edu/?q=a%2Fb)";
+    expect(richText(descriptionBlocks(markdown)[0]!)).toHaveLength(2);
+    const gateway = linkRewritingGateway((url) => url.replace("q=a/b", "q=a%2Fb"));
+    expect(await replaceManagedDescription(gateway, "page", markdown)).toEqual({
+      repaired: true,
+      replaced: true,
+    });
+    const writes = gateway.writes.length;
+    expect(await replaceManagedDescription(gateway, "page", markdown)).toEqual({
+      repaired: false,
+      replaced: false,
+    });
+    expect(gateway.writes).toHaveLength(writes);
+  });
+
+  it("compares link URLs by what their query names", () => {
+    expect(comparableLinkUrl("https://e.edu/a%2fb?k%2f=a/b,c&flag&x=1=2#s%2f")).toBe(
+      "https://e.edu/a%2Fb?k%2F=a%2Fb%2Cc&flag&x=1%3D2#s%2F",
+    );
+    // An escape that is not UTF-8 cannot be decoded, so only its case is normalized.
+    expect(comparableLinkUrl("https://e.edu/?q=%e9+%zz")).toBe("https://e.edu/?q=%E9+%zz");
+    expect(comparableLinkUrl("mailto:ta@example.edu")).toBe("mailto:ta@example.edu");
+  });
 
   it("reuses a complete pending replacement whose text chunks were merged", async () => {
     const gateway = new FakeGateway();

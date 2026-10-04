@@ -28,6 +28,9 @@ interface ManagedSectionReconciliation {
   replaced: boolean;
 }
 
+type LinkUrlForm = (url: string) => string;
+const asWritten: LinkUrlForm = (url) => url;
+
 type CanonicalValue =
   null | boolean | number | string | CanonicalValue[] | { [key: string]: CanonicalValue };
 
@@ -84,7 +87,8 @@ function canonicalAnnotations(value: unknown): CanonicalValue {
   };
 }
 
-function canonicalRichText(value: unknown): CanonicalValue[] {
+/** `linkUrl` gives the form in which link URLs are compared; it runs before neighbours merge. */
+function canonicalRichText(value: unknown, linkUrl: LinkUrlForm): CanonicalValue[] {
   if (!Array.isArray(value)) return [];
   const result: CanonicalValue[] = [];
   // The text item that a following item with the same link and style extends.
@@ -115,7 +119,7 @@ function canonicalRichText(value: unknown): CanonicalValue[] {
             : "";
       const canonicalText = {
         content,
-        link: typeof link?.url === "string" ? { url: link.url } : null,
+        link: typeof link?.url === "string" ? { url: linkUrl(link.url) } : null,
       };
       const style = JSON.stringify(annotations);
       // Rich-text item boundaries are transport details, not content. Notion can
@@ -150,20 +154,20 @@ const RICH_TEXT_BLOCK_TYPES = new Set([
   "quote",
 ]);
 
-function canonicalPayload(block: Block, type: string): CanonicalValue {
+function canonicalPayload(block: Block, type: string, linkUrl: LinkUrlForm): CanonicalValue {
   const value = block[type];
   const payload = value && typeof value === "object" ? (value as Record<string, unknown>) : {};
   if (RICH_TEXT_BLOCK_TYPES.has(type)) {
     return {
-      rich_text: canonicalRichText(payload.rich_text),
+      rich_text: canonicalRichText(payload.rich_text, linkUrl),
       color: typeof payload.color === "string" ? payload.color : "default",
       ...(/^heading_[123]$/.test(type) ? { is_toggleable: payload.is_toggleable === true } : {}),
     };
   }
   if (type === "code") {
     return {
-      rich_text: canonicalRichText(payload.rich_text),
-      caption: canonicalRichText(payload.caption),
+      rich_text: canonicalRichText(payload.rich_text, linkUrl),
+      caption: canonicalRichText(payload.caption, linkUrl),
       language: typeof payload.language === "string" ? payload.language : "plain text",
     };
   }
@@ -172,7 +176,11 @@ function canonicalPayload(block: Block, type: string): CanonicalValue {
   return canonicalValue(managedPayload);
 }
 
-function canonicalBlock(block: Block, includeChildren: boolean): CanonicalValue {
+function canonicalBlock(
+  block: Block,
+  includeChildren: boolean,
+  linkUrl: LinkUrlForm = asWritten,
+): CanonicalValue {
   const type = typeof block.type === "string" ? block.type : "";
   const payload = block[type];
   const inlineChildren =
@@ -181,7 +189,7 @@ function canonicalBlock(block: Block, includeChildren: boolean): CanonicalValue 
       : undefined;
   return {
     type,
-    payload: canonicalPayload(block, type),
+    payload: canonicalPayload(block, type, linkUrl),
     ...(includeChildren
       ? {
           has_children:
@@ -205,8 +213,58 @@ function isToggle(block: Block, title: string): boolean {
   );
 }
 
+/** Uppercases the hex digits of percent-escapes, which name the same octet in either case. */
+function upperEscapes(text: string): string {
+  return text.replace(/%[0-9a-f]{2}/gi, (escape) => escape.toUpperCase());
+}
+
+/** One query key or value with every character except "+" in a single percent-encoded form. */
+function comparableQueryPart(text: string): string {
+  // "+" is a space to some servers and a plus sign to others, so it is never folded into either.
+  return text
+    .split("+")
+    .map((piece) => {
+      try {
+        return encodeURIComponent(decodeURIComponent(piece));
+      } catch {
+        return upperEscapes(piece);
+      }
+    })
+    .join("+");
+}
+
+/**
+ * The form in which a written link URL and the one Notion reads back are compared. Notion stores
+ * a link's query re-encoded: `?id=10.1371/journal` reads back as `?id=10.1371%2Fjournal`, and
+ * `%2c` as `%2C`. Those name the same link, so the query's keys and values are compared decoded
+ * and percent-escapes elsewhere are compared in upper case. The `&` and `=` that separate the
+ * query's parts stay distinct from their escaped forms.
+ */
+export function comparableLinkUrl(url: string): string {
+  const fragmentStart = url.indexOf("#");
+  const beforeFragment = fragmentStart < 0 ? url : url.slice(0, fragmentStart);
+  const queryStart = beforeFragment.indexOf("?");
+  if (queryStart < 0) return upperEscapes(url);
+  const query = beforeFragment
+    .slice(queryStart + 1)
+    .split("&")
+    .map((pair) => {
+      const separator = pair.indexOf("=");
+      return separator < 0
+        ? comparableQueryPart(pair)
+        : `${comparableQueryPart(pair.slice(0, separator))}=${comparableQueryPart(pair.slice(separator + 1))}`;
+    })
+    .join("&");
+  const fragment = fragmentStart < 0 ? "" : url.slice(fragmentStart);
+  return `${upperEscapes(beforeFragment.slice(0, queryStart))}?${query}${upperEscapes(fragment)}`;
+}
+
+/**
+ * What read-back verification compares. Unlike the canonical representation that the description
+ * hash is taken over, link URLs are in their comparable form.
+ */
 function signature(block: Block): string {
-  return JSON.stringify(canonicalBlock(block, true));
+  return JSON.stringify(canonicalBlock(block, true, comparableLinkUrl));
 }
 
 function signaturesEqual(actual: string[], expected: string[]): boolean {
