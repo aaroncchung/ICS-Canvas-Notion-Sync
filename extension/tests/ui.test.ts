@@ -8,6 +8,8 @@ class FakeElement {
   textContent = "";
   value = "";
   disabled = false;
+  hidden = false;
+  style: Record<string, string> = {};
   dataset: Record<string, string> = {};
   children: FakeElement[] = [];
   listeners: Record<string, (event: { preventDefault(): void }) => void> = {};
@@ -234,5 +236,73 @@ describe("popup and settings", () => {
     state.running = false;
     await vi.advanceTimersByTimeAsync(2_000);
     expect(submit?.disabled).toBe(false);
+  });
+  it("lists what needs reading first, filters the rows, and offers Pause or Enable sync", async () => {
+    state.report = {
+      mode: "sync",
+      startedAt: "2026-01-01T00:00:00Z",
+      finishedAt: "2026-01-01T00:00:05Z",
+      updated: 1,
+      eligible: 0,
+      skipped: 1,
+      unchecked: 0,
+      failed: 1,
+      details: [
+        { title: "Essay", outcome: "skipped", reason: "Already Done" },
+        { title: "Lab", outcome: "updated", reason: "Submitted" },
+        { title: "Quiz", outcome: "failed", reason: "Notion: HTTP 409" },
+      ],
+    };
+    await open("popup");
+    const listed = () =>
+      byId.get("details")!.children.map((row) => row.children[1]?.textContent ?? row.textContent);
+    const filter = (query: string) => {
+      byId.get("filter")!.value = query;
+      byId.get("filter")!.listeners.input!({ preventDefault: () => undefined });
+    };
+    expect(listed()).toEqual(["Quiz", "Lab", "Essay"]);
+    expect(byId.get("legend")!.children.map((key) => key.textContent)).toEqual([
+      "1 failed",
+      "1 done",
+      "1 skipped",
+    ]);
+    // An outcome's word finds its rows, as a reason or a title does.
+    filter("done");
+    expect(listed()).toEqual(["Lab", "Essay"]);
+    filter("no such row");
+    expect(listed()).toEqual(["No rows match."]);
+    expect(button("pause").hidden).toBe(true);
+    expect(button("enable").hidden).toBe(false);
+    state.enabled = true;
+    await saved();
+    expect(button("pause").hidden).toBe(false);
+    expect(button("enable").hidden).toBe(true);
+  });
+  it("says a scan found nothing once one has run, though its running was never seen", async () => {
+    state.previewReady = false;
+    await open("options");
+    const listed = () => byId.get("details")!.children.map((row) => row.textContent);
+    expect(listed()).toEqual(["No scans yet. Preview writes nothing."]);
+    // A preview run from the popup while this page was hidden: no totals, no rows.
+    state.previewReady = true;
+    state.report = {
+      mode: "preview",
+      startedAt: "2026-01-01T00:00:00Z",
+      finishedAt: "2026-01-01T00:00:05Z",
+      updated: 0,
+      eligible: 0,
+      skipped: 0,
+      unchecked: 0,
+      failed: 0,
+      details: [],
+    };
+    await saved();
+    expect(text("chip")).toBe("Ready");
+    expect(listed()).toEqual(["Nothing to report."]);
+    // And back, when another connection is verified and the scan goes with the old one.
+    state.previewReady = false;
+    delete state.report;
+    await saved();
+    expect(listed()).toEqual(["No scans yet. Preview writes nothing."]);
   });
 });

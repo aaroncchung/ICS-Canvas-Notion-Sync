@@ -7,23 +7,49 @@
     <link rel="stylesheet" href="style.css" />
   </head>
   <body>
-    <main>
-      <p class="eyebrow">CANVAS COMPANION</p>
-      <h1>Canvas → Notion</h1>
-      <p id="connection">Connecting…</p>
-      <p id="problem" role="status" aria-live="polite"></p>
-      <p id="message" role="status" aria-live="polite"></p>
-      <div class="actions">
-        <button data-action="sync">Sync now</button><button data-action="preview">Preview</button
-        ><button data-action="pause">Pause</button><button data-action="enable">Enable sync</button
-        ><button id="settings">Settings</button>
+    <main id="app" class="pop" data-state="setup">
+      <header class="head">
+        <span id="chip" class="chip" data-tone="idle">…</span>
+        <h1>Canvas → Notion</h1>
+        <span class="mono muted configured">acct <span id="account"></span></span>
+        <button data-open="settings" aria-label="Settings" title="Settings">
+          <svg
+            width="14"
+            height="14"
+            viewBox="0 0 16 16"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.5"
+            stroke-linecap="round"
+            aria-hidden="true"
+          >
+            <circle cx="8" cy="8" r="2.2" />
+            <path
+              d="M8 1.5v2M8 12.5v2M1.5 8h2M12.5 8h2M3.4 3.4l1.4 1.4M11.2 11.2l1.4 1.4M3.4 12.6l1.4-1.4M11.2 4.8l1.4-1.4"
+            />
+          </svg>
+        </button>
+      </header>
+      <p id="connection" class="muted">Connecting…</p>
+      <p id="problem" class="alert" role="status" aria-live="polite"></p>
+      <p id="message" class="alert" role="status" aria-live="polite"></p>
+      <div class="tools setup">
+        <button class="go" data-open="settings">Open Settings</button>
       </div>
-      <section>
-        <h2>Latest scan</h2>
+      <div class="tools configured">
+        <button class="go" data-action="sync">Sync now</button
+        ><button data-action="preview">Preview</button><button data-action="pause">Pause</button
+        ><button data-action="enable">Enable sync</button>
+      </div>
+      <section class="meter mono configured" aria-label="Latest scan">
         <p id="summary">No scans yet.</p>
-        <ul id="details"></ul>
+        <div id="stack" class="stack"></div>
+        <div id="legend" class="legend"></div>
       </section>
-      <p class="muted">
+      <input id="filter" class="configured" type="search" aria-label="Filter rows" />
+      <ul id="details" class="log configured"></ul>
+      <p id="omitted" class="foot"></p>
+      <p class="foot">
         Only Personal Status is updated. Reopened work stays open until a new submission.
       </p>
     </main>

@@ -7,51 +7,73 @@
     <link rel="stylesheet" href="style.css" />
   </head>
   <body class="settings">
-    <main>
-      <p class="eyebrow">CANVAS COMPANION</p>
-      <h1>Connect your assignments</h1>
-      <p>
-        Sign in to Canvas in this Chrome profile, then verify the connection. Preview changes before
-        enabling automatic syncing.
-      </p>
-      <form id="config">
-        <label
-          >Canvas origin<input
+    <main id="app" class="set" data-state="setup">
+      <header class="head wide">
+        <h1>Canvas → Notion settings</h1>
+        <span id="chip" class="chip" data-tone="idle">…</span>
+      </header>
+      <div class="alerts wide">
+        <p id="problem" class="alert" role="status" aria-live="polite"></p>
+        <p id="message" class="alert" role="status" aria-live="polite"></p>
+      </div>
+      <section class="panel">
+        <h2>Connection</h2>
+        <form id="config">
+          <label for="origin">Canvas origin</label>
+          <input
             id="origin"
+            class="mono"
             type="url"
             placeholder="https://canvas.your-school.edu"
             required
-        /></label>
-        <label
-          >Notion Assignments data-source ID<input id="dataSourceId" required autocomplete="off"
-        /></label>
-        <label
-          >Notion integration token<input
-            id="token"
-            type="password"
-            autocomplete="off"
-            placeholder="Leave blank to keep your saved token"
-        /></label>
-        <p class="muted">
-          The token stays in this Chrome profile. It is not encrypted by the extension or synced
-          through Chrome. Share your Assignments database with this integration.
+          />
+          <label for="dataSourceId">Notion Assignments data-source ID</label>
+          <input id="dataSourceId" class="mono" required autocomplete="off" />
+          <label for="token">Notion integration token</label>
+          <div class="with-button">
+            <input
+              id="token"
+              class="mono"
+              type="password"
+              autocomplete="off"
+              placeholder="Leave blank to keep your saved token"
+            />
+            <button id="reveal" type="button">Show</button>
+          </div>
+          <button class="go" type="submit">Verify and save</button>
+        </form>
+        <dl class="kv mono configured">
+          <dt>canvas account</dt>
+          <dd><span id="account"></span> · verified</dd>
+          <dt>preview</dt>
+          <dd id="previewed"></dd>
+          <dt>automatic</dt>
+          <dd id="automatic"></dd>
+        </dl>
+        <p class="foot">
+          Sign in to Canvas in this Chrome profile, then verify the connection. The token stays in
+          this Chrome profile. It is not encrypted by the extension or synced through Chrome. Share
+          your Assignments database with this integration.
         </p>
-        <button type="submit">Verify and save</button>
-      </form>
-      <p id="connection"></p>
-      <p id="problem" role="status" aria-live="polite"></p>
-      <p id="message" role="status" aria-live="polite"></p>
-      <div class="actions">
-        <button data-action="preview">Preview</button
-        ><button data-action="enable">Enable sync</button
-        ><button data-action="sync">Sync now</button><button data-action="pause">Pause</button>
-      </div>
-      <section>
-        <h2>Latest scan</h2>
-        <p id="summary">No scans yet.</p>
-        <ul id="details"></ul>
       </section>
-      <p class="muted">
+      <section class="panel">
+        <h2>Run</h2>
+        <p id="connection" class="muted"></p>
+        <div class="tools configured">
+          <button class="go" data-action="sync">Sync now</button
+          ><button data-action="preview">Preview</button><button data-action="pause">Pause</button
+          ><button data-action="enable">Enable sync</button>
+        </div>
+        <section class="meter mono configured" aria-label="Latest scan">
+          <p id="summary">No scans yet.</p>
+          <div id="stack" class="stack"></div>
+          <div id="legend" class="legend"></div>
+        </section>
+        <input id="filter" class="configured" type="search" aria-label="Filter rows" />
+        <ul id="details" class="log configured"></ul>
+        <p id="omitted" class="foot"></p>
+      </section>
+      <p class="foot wide">
         Submitted, excused, and graded work can become Done. Grades marked missing or incomplete do
         not count, and a page is updated only when its title matches the assignment in Canvas.
         Removing the extension or clearing its storage forgets previously handled submissions.
