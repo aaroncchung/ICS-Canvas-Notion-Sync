@@ -86,6 +86,7 @@ function view(state: State) {
     userId: state.config?.userId ?? "",
     enabled: state.config?.enabled ?? false,
     previewReady: state.previewReady,
+    nextScanAt: state.nextScanAt,
     running: Boolean(active),
     progress: active?.progress,
     report: active?.report ?? state.report,
