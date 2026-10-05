@@ -150,7 +150,9 @@ function render(raw: unknown): void {
   };
   rows.sort((a, b) => rank(a.outcome) - rank(b.outcome));
   const query = input("filter").value.trim().toLowerCase();
-  const details = JSON.stringify([totals, rows, query, Boolean(state.running)]);
+  // Whether a scan has run is part of it: one that found nothing has the rows of none at all.
+  const scanned = Boolean(report.startedAt);
+  const details = JSON.stringify([totals, rows, query, Boolean(state.running), scanned]);
   if (details !== shownDetails) {
     shownDetails = details;
     input("filter").placeholder = `Filter ${rows.length} rows by title, reason or outcome`;

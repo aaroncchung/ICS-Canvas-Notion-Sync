@@ -278,4 +278,31 @@ describe("popup and settings", () => {
     expect(button("pause").hidden).toBe(false);
     expect(button("enable").hidden).toBe(true);
   });
+  it("says a scan found nothing once one has run, though its running was never seen", async () => {
+    state.previewReady = false;
+    await open("options");
+    const listed = () => byId.get("details")!.children.map((row) => row.textContent);
+    expect(listed()).toEqual(["No scans yet. Preview writes nothing."]);
+    // A preview run from the popup while this page was hidden: no totals, no rows.
+    state.previewReady = true;
+    state.report = {
+      mode: "preview",
+      startedAt: "2026-01-01T00:00:00Z",
+      finishedAt: "2026-01-01T00:00:05Z",
+      updated: 0,
+      eligible: 0,
+      skipped: 0,
+      unchecked: 0,
+      failed: 0,
+      details: [],
+    };
+    await saved();
+    expect(text("chip")).toBe("Ready");
+    expect(listed()).toEqual(["Nothing to report."]);
+    // And back, when another connection is verified and the scan goes with the old one.
+    state.previewReady = false;
+    delete state.report;
+    await saved();
+    expect(listed()).toEqual(["No scans yet. Preview writes nothing."]);
+  });
 });
