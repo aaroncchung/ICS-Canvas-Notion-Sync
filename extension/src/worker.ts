@@ -1,5 +1,6 @@
 import { Api, ApiError } from "./api.ts";
 import { scan, serialExecutor, verifyAccount } from "./engine.ts";
+import { HINT, LONGEST_COOLDOWN, type Hint } from "./hint.ts";
 import {
   canvasOrigin,
   emptyState,
@@ -34,12 +35,16 @@ const ready = (async () => {
     /* Unsupported here. */
   }
 })();
+// The session area holds nothing but the hint, which the Canvas page script reads without starting
+// the worker. Chrome keeps that area to trusted contexts unless told otherwise. A page that cannot
+// read the hint asks the worker instead, as it did before there was one.
+chrome.storage.session
+  .setAccessLevel({ accessLevel: "TRUSTED_AND_UNTRUSTED_CONTEXTS" })
+  .catch(() => undefined);
 const STATE_KEY = "companion-v1";
 const COOLDOWN = 15 * 60_000;
 /** The wait after one failed scan, doubled for each further failure in a row. */
 const FAILURE_COOLDOWN = 60_000;
-/** The most failures or a Retry-After header may hold automatic scans back; Sync now never waits. */
-const LONGEST_COOLDOWN = 60 * 60_000;
 const TICK = "tick";
 /** The content script built from canvas.ts, registered for the Canvas origin while sync is on. */
 const WATCHER = "canvas-watcher";
@@ -157,9 +162,24 @@ async function watch(state: State): Promise<void> {
     chrome.scripting.executeScript({ target, files: ["canvas.js"] }),
   );
 }
-/** Brings both wakeups in line with a state that was just saved. */
+/**
+ * Tells Canvas pages when the next automatic scan is due, so a page that loads or comes into view
+ * before then sends no wake and starts no worker. Written with every change to the schedule, so
+ * pages see a scan brought forward at once. Removed while automatic sync is off, so a copy of the
+ * page script still running finds none, asks, and is told to stop. The worker never reads it back:
+ * the cooldown check in wake() decides, whatever a page holds.
+ */
+async function hint(state: State): Promise<void> {
+  if (state.config?.enabled) {
+    const value: Hint = { origin: state.config.origin, until: state.nextScanAt };
+    await chrome.storage.session.set({ [HINT]: value });
+  } else await chrome.storage.session.remove(HINT);
+}
+/** Brings every wakeup in line with a state that was just saved. */
 async function schedule(state: State): Promise<void> {
   await arm(state);
+  // Ahead of the injections in watch(), so the pages they start in read the new time.
+  await hint(state);
   await watch(state);
 }
 async function prepare(mode: Report["mode"], force: boolean): Promise<Configured | undefined> {
@@ -446,13 +466,15 @@ chrome.runtime.onMessage.addListener((raw: unknown, sender, respond: (value: unk
   const allowed = [chrome.runtime.getURL("popup.html"), chrome.runtime.getURL("options.html")];
   if (sender.id !== chrome.runtime.id || !sender.url) return false;
   if (!allowed.includes(sender.url)) {
-    // The Canvas page script saying the page is in view. It carries nothing, and only prompts the
-    // cooldown-gated check the alarm makes; wake() ignores a page off the configured origin.
+    // The Canvas page script saying the page is in view, when its hint says a scan is due or it has
+    // none to go by. It carries nothing, and only prompts the cooldown-gated check the alarm makes;
+    // wake() ignores a page off the configured origin.
     if (object(raw).action !== "wake") return false;
     const origin = new URL(sender.url).origin;
     wake(origin);
     // A copy the worker could not stop when sync turned off or moved elsewhere stops now. One that
-    // goes on is told how long no scan is due, at most one cooldown, and stays quiet until then.
+    // goes on is told how long no scan is due, at most one cooldown, which it goes by for as long
+    // as it has no hint to read.
     load().then(
       (state) =>
         respond(
@@ -522,6 +544,9 @@ async function initialize(): Promise<void> {
     const alarm = await chrome.alarms.get(TICK);
     if (alarm?.periodInMinutes || !state.config?.enabled || state.nextScanAt > Date.now())
       await arm(state);
+    // Chrome empties the session area when the browser restarts and when the extension is reloaded
+    // or updated.
+    await hint(state);
     // Also puts back a registration that no longer matches the saved state, whatever removed it.
     await watch(state);
   });

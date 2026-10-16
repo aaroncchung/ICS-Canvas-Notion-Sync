@@ -37,6 +37,10 @@ let notionAccess: boolean;
 let revoke: ReturnType<typeof vi.fn>;
 let requests: Array<{ url: string; method: string }>;
 let access: ReturnType<typeof vi.fn>;
+/** The session area, which Chrome empties when the browser restarts. */
+let session: Record<string, unknown>;
+let sessionAccess: ReturnType<typeof vi.fn>;
+let sessionWrite: ReturnType<typeof vi.fn>;
 /** How long every HTTP request takes to answer. */
 let latency: number;
 const json = (data: unknown) =>
@@ -112,6 +116,11 @@ beforeEach(async () => {
   requests = [];
   latency = 0;
   access = vi.fn(async () => undefined);
+  session = {};
+  sessionAccess = vi.fn(async () => undefined);
+  sessionWrite = vi.fn(async (items: Record<string, unknown>) => {
+    Object.assign(session, structuredClone(items));
+  });
   armed = undefined;
   scripts = [];
   vi.stubGlobal("chrome", {
@@ -122,6 +131,13 @@ beforeEach(async () => {
         set: async (value: Record<string, State>) => {
           stored = structuredClone(value["companion-v1"]!);
         },
+      },
+      session: {
+        setAccessLevel: sessionAccess,
+        set: sessionWrite,
+        remove: vi.fn(async (key: string) => {
+          delete session[key];
+        }),
       },
     },
     runtime: {
@@ -636,13 +652,14 @@ describe("scheduling", () => {
     expect((await enabling).ok).toBe(true);
     expect(scripts.map((script) => script.matches)).toEqual([[`${config.origin}/*`]]);
     expect(armed).toBeDefined();
-    // A scan that turns sync off takes both wakeups with it.
+    // A scan that turns sync off takes both wakeups with it, and the hint for Canvas pages.
     userId = 8;
     ring();
     await settle();
     expect(stored.config?.enabled).toBe(false);
     expect(armed).toBeUndefined();
     expect(scripts).toEqual([]);
+    expect(session).toEqual({});
   });
   it("starts the page script in Canvas tabs that were open before Enable sync", async () => {
     await ask("pause");
@@ -657,6 +674,11 @@ describe("scheduling", () => {
       target: { tabId: 5 },
       files: ["canvas.js"],
     });
+    // The script reads the hint first thing, so the hint is in place before the script starts.
+    expect(session).toEqual({ "quiet-hint": { origin: config.origin, until: stored.nextScanAt } });
+    expect(sessionWrite.mock.invocationCallOrder.at(-1)).toBeLessThan(
+      vi.mocked(chrome.scripting.executeScript).mock.invocationCallOrder[0]!,
+    );
     // The due alarm rings while another site is in view, and is spent.
     activeTabUrl = "https://example.com/";
     ring();
@@ -720,6 +742,43 @@ describe("scheduling", () => {
     await settle();
     expect(told).toHaveBeenCalledExactlyOnceWith({ stop: false, quiet: 15 * 60_000 });
     expect(scans()).toBe(1);
+  });
+  it("tells Canvas pages when the next scan is due through the session area, at every change", async () => {
+    const hint = () => session["quiet-hint"];
+    const due = () => ({ origin: config.origin, until: stored.nextScanAt });
+    expect(sessionAccess).toHaveBeenCalledWith({ accessLevel: "TRUSTED_AND_UNTRUSTED_CONTEXTS" });
+    // Written at startup, here for a first scan that is already due.
+    expect(hint()).toEqual({ origin: config.origin, until: 0 });
+    visit();
+    await settle();
+    expect(wait()).toBe(15 * 60_000);
+    expect(hint()).toEqual(due());
+    // A Sync now that fails brings the next scan forward, and pages read the new time at once.
+    canvas = "signed-out";
+    expect((await ask("sync")).ok).toBe(true);
+    await settle();
+    expect(wait()).toBe(60_000);
+    expect(hint()).toEqual(due());
+    // Pause removes it, so a copy of the page script still running asks and is told to stop.
+    await ask("pause");
+    expect(session).toEqual({});
+    canvas = "up";
+    const enabling = ask("enable");
+    await settle();
+    expect((await enabling).ok).toBe(true);
+    expect(hint()).toEqual(due());
+    // The browser restarting empties the session area, and the worker's start writes it again.
+    session = {};
+    await restart();
+    expect(hint()).toEqual(due());
+    // A Retry-After puts the next scan off for longer than the failure alone would, and so does
+    // the hint.
+    notion = "busy";
+    await untilDue();
+    visit();
+    await settle();
+    expect(wait()).toBe(10 * 60_000);
+    expect(hint()).toEqual(due());
   });
   it("keeps the worker alive through a long scan, and only while one runs", async () => {
     const keepAlive = vi.mocked(chrome.runtime.getPlatformInfo);
@@ -871,6 +930,7 @@ describe("settings", () => {
     expect((await configure({ origin: "https://other.test" })).ok).toBe(true);
     expect(scripts).toEqual([]);
     expect(armed).toBeUndefined();
+    expect(session).toEqual({});
     // The copy running in the old Canvas page stops too, before its host access goes.
     expect(chrome.scripting.executeScript).toHaveBeenCalledExactlyOnceWith({
       target: { tabId: 5 },
@@ -886,6 +946,7 @@ describe("settings", () => {
       target: { tabId: 6 },
       files: ["canvas.js"],
     });
+    expect(session["quiet-hint"]).toMatchObject({ origin: "https://other.test" });
   });
   it("turns sync off when the saved connection fails verification, but not for a new one", async () => {
     const untouched = () => {
