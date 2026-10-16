@@ -384,7 +384,7 @@ describe("worker orchestration", () => {
       expect(stored.error).toContain(text);
       expect(stored.report?.failed).toBe(1);
     }
-    expect(requests.some((r) => r.url.endsWith("/query"))).toBe(false);
+    expect(scans()).toBe(0);
   });
   it("stays away for as long as a throttling service asks, up to an hour", async () => {
     notion = "busy";
