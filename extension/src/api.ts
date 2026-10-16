@@ -351,7 +351,8 @@ export class Api implements SyncApi {
   }
   assignments(courseId: string, cursor?: string, ids?: readonly string[]): Promise<Page<unknown>> {
     // This listing cannot leave out the description (Canvas ignores exclude_response_fields here),
-    // so groupedAssignments() is asked first, and this only for what that one leaves out. It can
+    // so a course a page names is asked through groupedAssignments() first, and here only for what
+    // that one left out. The walk for pages that name no course reads this listing in full. It can
     // be narrowed with assignment_ids[], which returns the same records, but Canvas then answers
     // 400 "Invalid assignment_ids" unless every ID is in this course, named once, and on one page
     // (assignments_api_controller#get_assignments), so only IDs a page ties to this course fit.

@@ -195,9 +195,9 @@ async function observe(
         const list = (cursor?: string) => api.groupedAssignments(courseId, chunk, cursor);
         for (const assignmentId of await read(courseId, list, wanted, seen)) held.add(assignmentId);
       }
-      // The group listing leaves out an ungraded survey as well as an assignment that has moved to
-      // another course. The assignments listing shows the survey, so whatever is absent is asked
-      // there, which costs a request only in a course where something was.
+      // The group listing leaves out an ungraded survey as well as an assignment no longer in this
+      // course, as when it has moved. The assignments listing shows the survey, so whatever is
+      // absent is asked for there. A course where nothing was absent costs no further request.
       const absent = ids.filter((assignmentId) => !held.has(assignmentId));
       try {
         for (const chunk of chunks(absent))
