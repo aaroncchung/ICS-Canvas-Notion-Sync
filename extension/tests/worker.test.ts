@@ -736,7 +736,8 @@ describe("scheduling", () => {
     let told = visit();
     await settle();
     expect(told).toHaveBeenCalledExactlyOnceWith({ stop: false, quiet: due });
-    // A longer wait, as after failures or a Retry-After, still has the page report each cooldown.
+    // A longer wait, as after failures or a Retry-After, is answered with one cooldown at most, so a
+    // page with no hint to read asks again after that.
     stored.nextScanAt = Date.now() + 60 * 60_000;
     told = visit();
     await settle();
