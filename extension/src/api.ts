@@ -89,8 +89,8 @@ const LONGEST_RETRY_WAIT = 20_000;
  */
 export const ASSIGNMENTS_PER_REQUEST = 100;
 /**
- * The properties the extension reads, by type. A page is asked for only these, which leaves out
- * the importer's other properties, such as the long Raw Description excerpt.
+ * The properties the extension reads, by type. The query and the reread ask for only these, which
+ * leaves out the importer's other properties, such as the long Raw Description excerpt.
  */
 const PROPERTIES = {
   "Canvas UID": "rich_text",
