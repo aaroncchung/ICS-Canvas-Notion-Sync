@@ -13,6 +13,7 @@ import {
   targetKey,
   UserError,
   VerificationError,
+  type CourseActivity,
   type Report,
   type Target,
 } from "../src/model.ts";
@@ -57,9 +58,16 @@ function submission(overrides: Record<string, unknown> = {}) {
   };
 }
 const homework = () => ({ id: 123, name: "Homework", course_id: 42, submission: submission() });
-/** Course 42 is active and holds assignment 123; course 43 is only a completed enrollment. */
+const DAY = 24 * 60 * 60_000;
+/**
+ * Course 42 is active and holds assignment 123; course 43 is only a completed enrollment. The
+ * scan's clock starts at 0, just as active courses were last listed, so the daily check that tells
+ * which courses have ended lists none until `later` moves it on by a day or more.
+ */
 function fixture() {
   const acknowledged: Record<string, string> = {};
+  const courses: CourseActivity = { listedAt: 0, seen: {} };
+  let time = 0;
   const saveAcknowledged = vi.fn(async () => undefined);
   let current = target();
   const api: SyncApi = {
@@ -81,19 +89,25 @@ function fixture() {
   return {
     api,
     acknowledged,
+    courses,
     saveAcknowledged,
     run: async (mode: Report["mode"] = "sync") => {
-      const report = newReport(mode, Date.now());
+      const report = newReport(mode, time);
       await scan(config, report, {
         api,
         acknowledged,
+        courses,
         saveAcknowledged,
         progress: () => undefined,
+        now: () => time,
       });
       return report;
     },
     reopen: () => {
       current = { ...current, status: "In progress" };
+    },
+    later: (ms: number) => {
+      time += ms;
     },
   };
 }
@@ -250,8 +264,10 @@ describe("scan", () => {
     await scan({ ...config, userId: BIG_ID }, report, {
       api,
       acknowledged: {},
+      courses: { listedAt: 0, seen: {} },
       saveAcknowledged: async () => undefined,
       progress: () => undefined,
+      now: () => 0,
     });
     expect(report.updated).toBe(1);
     expect(api.assignments).toHaveBeenCalledWith(BIG_ID, undefined);
@@ -574,6 +590,26 @@ describe("scan", () => {
       throw new ApiError("Canvas", 503);
     });
     await expect(run()).rejects.toMatchObject({ status: 503 });
+  });
+  it("reads every course the pages name when Canvas refuses to list the active ones", async () => {
+    const { api, run, later, courses } = fixture();
+    api.targets = vi.fn(async () => ({ items: [target({ courseId: "42" })] }));
+    // Course 42 was last listed as active 30 days ago, so a listing that left it out would skip it.
+    Object.assign(courses, { listedAt: 0, seen: { "42": 0 } });
+    later(30 * DAY);
+    api.courses = vi.fn(async () => {
+      throw new ApiError("Canvas", 403);
+    });
+    expect(await run()).toMatchObject({ updated: 1, skipped: 0 });
+    expect(api.courses).toHaveBeenCalledTimes(1);
+    // Nothing was learned, so the next scan asks for the listing again.
+    expect(courses).toEqual({ listedAt: 0, seen: { "42": 0 } });
+    // A failing network is not about the listing, so it ends the scan as it would anywhere else.
+    const offline = new ApiError("Canvas", 0);
+    api.courses = vi.fn(async () => {
+      throw offline;
+    });
+    await expect(run()).rejects.toBe(offline);
   });
   it("ends the scan when Canvas throttles or the network fails, which is not about one course", async () => {
     for (const failure of [
@@ -1014,17 +1050,25 @@ describe("Canvas requests per scan", () => {
         return json({ message: "Invalid assignment_ids" }, 400);
       return json((asked.length ? asked : ids).map(record));
     });
+    // As in fixture(), the clock starts just as active courses were last listed.
+    const activity: CourseActivity = { listedAt: 0, seen: {} };
+    let time = 0;
     const run = async (mode: Report["mode"] = "sync") => {
-      const report = newReport(mode, 0);
+      const report = newReport(mode, time);
       await scan(config, report, {
         api: new Api(config, { fetcher, pause: async () => undefined }),
         acknowledged: {},
+        courses: activity,
         saveAcknowledged: async () => undefined,
         progress: () => undefined,
+        now: () => time,
       });
       return report;
     };
-    return { requests, run, profiles: () => profiles };
+    const later = (ms: number) => {
+      time += ms;
+    };
+    return { requests, run, later, activity, profiles: () => profiles };
   }
   const grouped = (courseId: string, ...ids: string[]) =>
     `/api/v1/courses/${courseId}/assignment_groups?${ids.map((id) => `assignment_ids[]=${id}&`).join("")}include[]=assignments&include[]=submission&exclude_response_fields[]=description&exclude_response_fields[]=rubric&per_page=100`;
@@ -1138,5 +1182,78 @@ describe("Canvas requests per scan", () => {
     ]);
     // Once at the start of the scan, and once for the first 401, not again for the second.
     expect(profiles()).toBe(2);
+  });
+  it("reads a course for 30 days after Canvas last listed it as active, then skips its pages", async () => {
+    // Course 40 had ended before its page was first seen; course 43 ends during the test.
+    const term: Record<"active" | "completed", Record<string, string[]>> = {
+      active: { "42": ["123"], "43": ["125"] },
+      completed: { "40": ["90"] },
+    };
+    const { requests, run, later, activity } = world(term, [
+      tracked("90", "40"),
+      tracked("123", "42"),
+      tracked("125", "43"),
+    ]);
+    const every = [grouped("40", "90"), grouped("42", "123"), grouped("43", "125")];
+    later(DAY);
+    expect(await run("preview")).toMatchObject({ eligible: 3, skipped: 0 });
+    expect(requests.splice(0)).toEqual([coursesIn("active"), ...every]);
+    expect(activity).toEqual({ listedAt: DAY, seen: { "40": DAY, "42": DAY, "43": DAY } });
+    term.completed["43"] = term.active["43"]!;
+    delete term.active["43"];
+    // Active courses are listed at most once a day.
+    later(DAY - 1);
+    expect(await run("preview")).toMatchObject({ eligible: 3 });
+    expect(requests.splice(0)).toEqual(every);
+    // The next listing leaves out course 43, which is still read while teachers may grade there.
+    later(1);
+    expect(await run("preview")).toMatchObject({ eligible: 3 });
+    expect(requests.splice(0)).toEqual([coursesIn("active"), ...every]);
+    expect(activity.seen).toEqual({ "40": DAY, "42": 2 * DAY, "43": DAY });
+    later(29 * DAY);
+    const report = await run("preview");
+    expect(report).toMatchObject({ eligible: 1, skipped: 2, unchecked: 0 });
+    for (const title of ["Work 90", "Work 125"])
+      expect(report.details).toContainEqual({
+        title,
+        outcome: "skipped",
+        reason: "Course not active in Canvas for 30 days",
+      });
+    expect(requests).toEqual([coursesIn("active"), grouped("42", "123")]);
+  });
+  it("reads a skipped course again from the first listing that shows it active", async () => {
+    // Course 43 was last listed as active 30 days ago. Later it is listed again, as when a student's
+    // access is extended to finish incomplete work.
+    const term: Record<"active" | "completed", Record<string, string[]>> = {
+      active: { "42": ["123"] },
+      completed: { "43": ["125"] },
+    };
+    const { requests, run, later, activity } = world(term, [
+      tracked("123", "42"),
+      tracked("125", "43"),
+    ]);
+    // Course 41 is no longer named by any page, so it is forgotten.
+    Object.assign(activity, { listedAt: 0, seen: { "41": 0, "42": 0, "43": 0 } });
+    later(30 * DAY);
+    expect(await run("preview")).toMatchObject({ eligible: 1, skipped: 1 });
+    expect(requests.splice(0)).toEqual([coursesIn("active"), grouped("42", "123")]);
+    expect(activity.seen).toEqual({ "42": 30 * DAY, "43": 0 });
+    term.active["43"] = term.completed["43"]!;
+    delete term.completed["43"];
+    later(DAY - 1);
+    expect(await run("preview")).toMatchObject({ eligible: 1, skipped: 1 });
+    expect(requests.splice(0)).toEqual([grouped("42", "123")]);
+    later(1);
+    expect(await run("preview")).toMatchObject({ eligible: 2, skipped: 0 });
+    expect(requests).toEqual([coursesIn("active"), grouped("42", "123"), grouped("43", "125")]);
+  });
+  it("lists active courses once a scan, for the daily check and the walk alike", async () => {
+    const { requests, run, later } = world(
+      { active: { "41": ["101"], "42": ["123"] }, completed: {} },
+      [tracked("123", "42"), tracked("101")],
+    );
+    later(DAY);
+    expect(await run()).toMatchObject({ updated: 2 });
+    expect(requests).toEqual([coursesIn("active"), grouped("42", "123"), listing("41")]);
   });
 });

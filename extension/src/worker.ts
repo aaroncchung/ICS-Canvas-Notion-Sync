@@ -223,10 +223,12 @@ async function execute(state: Configured, scanning: Scanning): Promise<void> {
     await scan(state.config, report, {
       api,
       acknowledged: state.acknowledged,
+      courses: (state.courses ??= { listedAt: 0, seen: {} }),
       saveAcknowledged: () => save(state),
       progress: (text) => {
         scanning.progress = text;
       },
+      now: Date.now,
     });
     if (report.mode === "preview") state.previewReady = true;
     state.nextScanAt = Date.now() + COOLDOWN;
