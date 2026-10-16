@@ -61,6 +61,15 @@ export interface SyncApi {
   courses(enrollment: "active" | "completed", cursor?: string): Promise<Page<string>>;
   /** The course's assignments, or with `ids` only those, at most ASSIGNMENTS_PER_REQUEST of them. */
   assignments(courseId: string, cursor?: string, ids?: readonly string[]): Promise<Page<unknown>>;
+  /**
+   * Those of `ids`, at most ASSIGNMENTS_PER_REQUEST, that the course holds, without descriptions
+   * or rubrics. An ID outside the course is left out, not refused, and so is an ungraded survey.
+   */
+  groupedAssignments(
+    courseId: string,
+    ids: readonly string[],
+    cursor?: string,
+  ): Promise<Page<unknown>>;
   target(pageId: string): Promise<Target | undefined>;
   markDone(pageId: string): Promise<void>;
 }
@@ -75,9 +84,26 @@ const RETRIES = 2;
 const LONGEST_RETRY_WAIT = 20_000;
 /**
  * The page size of an assignments request. Canvas answers 400 when a request names more
- * assignment_ids[] than fit on one page, so it is also the most IDs one request may name.
+ * assignment_ids[] than fit on one page, so it is also the most IDs one request may name. The
+ * group listing has no such limit, but its IDs are split the same way to bound the URL's length.
  */
 export const ASSIGNMENTS_PER_REQUEST = 100;
+/**
+ * The properties the extension reads, by type. The query and the reread ask for only these, which
+ * leaves out the importer's other properties, such as the long Raw Description excerpt.
+ */
+const PROPERTIES = {
+  "Canvas UID": "rich_text",
+  "Canvas URL": "url",
+  "Imported From": "select",
+  "Personal Status": "status",
+  "Removed from Canvas": "checkbox",
+  "Canvas State": "select",
+  Assignment: "title",
+};
+const ONLY_PROPERTIES = Object.keys(PROPERTIES)
+  .map((name) => `filter_properties=${encodeURIComponent(name)}`)
+  .join("&");
 export class Api implements SyncApi {
   private nextRequest = 0;
   private readonly config: Pick<Config, "origin" | "token" | "dataSourceId">;
@@ -263,16 +289,7 @@ export class Api implements SyncApi {
   async validateSchema(): Promise<void> {
     const data = await this.dataSource(`/v1/data_sources/${this.config.dataSourceId}`);
     const properties = object(object(data).properties);
-    const expected = {
-      "Canvas UID": "rich_text",
-      "Canvas URL": "url",
-      "Imported From": "select",
-      "Personal Status": "status",
-      "Removed from Canvas": "checkbox",
-      "Canvas State": "select",
-      Assignment: "title",
-    };
-    for (const [name, type] of Object.entries(expected)) {
+    for (const [name, type] of Object.entries(PROPERTIES)) {
       if (object(properties[name]).type !== type)
         throw new VerificationError(`Notion schema needs ${name} (${type})`);
     }
@@ -297,7 +314,8 @@ export class Api implements SyncApi {
     }
   }
   async targets(cursor?: string): Promise<Page<Target>> {
-    const data = await this.dataSource(`/v1/data_sources/${this.config.dataSourceId}/query`, {
+    const query = `/v1/data_sources/${this.config.dataSourceId}/query?${ONLY_PROPERTIES}`;
+    const data = await this.dataSource(query, {
       filter: { property: "Imported From", select: { equals: "Canvas ICS" } },
       page_size: 100,
       ...(cursor ? { start_cursor: cursor } : {}),
@@ -333,7 +351,8 @@ export class Api implements SyncApi {
   }
   assignments(courseId: string, cursor?: string, ids?: readonly string[]): Promise<Page<unknown>> {
     // This listing cannot leave out the description (Canvas ignores exclude_response_fields here),
-    // and the submissions listing that can does not carry the name the title check needs. It can
+    // so a course a page names is asked through groupedAssignments() first, and here only for what
+    // that one left out. The walk for pages that name no course reads this listing in full. It can
     // be narrowed with assignment_ids[], which returns the same records, but Canvas then answers
     // 400 "Invalid assignment_ids" unless every ID is in this course, named once, and on one page
     // (assignments_api_controller#get_assignments), so only IDs a page ties to this course fit.
@@ -343,10 +362,33 @@ export class Api implements SyncApi {
       cursor,
     );
   }
+  async groupedAssignments(
+    courseId: string,
+    ids: readonly string[],
+    cursor?: string,
+  ): Promise<Page<unknown>> {
+    // The same assignment and submission records as assignments(), grouped, but this listing does
+    // leave out the description and rubric, about half of each record. It filters assignment_ids[]
+    // without checking them, and it leaves out New Quizzes ungraded surveys
+    // (assignment_groups_controller#visible_assignments). It is paginated by group.
+    const only = ids.map((assignmentId) => `assignment_ids%5B%5D=${assignmentId}&`);
+    const page = await this.canvasList(
+      `/api/v1/courses/${courseId}/assignment_groups?${only.join("")}include%5B%5D=assignments&include%5B%5D=submission&exclude_response_fields%5B%5D=description&exclude_response_fields%5B%5D=rubric&per_page=100`,
+      cursor,
+    );
+    return {
+      ...page,
+      items: page.items.flatMap((group) => {
+        const assignments = object(group).assignments;
+        return Array.isArray(assignments) ? (assignments as unknown[]) : [];
+      }),
+    };
+  }
   async target(pageId: string): Promise<Target | undefined> {
     let data: unknown;
     try {
-      ({ data } = await this.request("Notion", `/v1/pages/${encodeURIComponent(pageId)}`));
+      const path = `/v1/pages/${encodeURIComponent(pageId)}?${ONLY_PROPERTIES}`;
+      ({ data } = await this.request("Notion", path));
     } catch (error) {
       // A page deleted since the query is no longer a destination.
       if (error instanceof ApiError && error.status === 404) return;

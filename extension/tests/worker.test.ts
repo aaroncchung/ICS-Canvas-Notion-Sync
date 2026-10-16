@@ -83,7 +83,7 @@ const wait = () => stored.nextScanAt - Date.parse(stored.report?.finishedAt ?? "
 /** Runs the clock up to the moment the next automatic scan is due. */
 const untilDue = () => vi.advanceTimersByTimeAsync(Math.max(0, stored.nextScanAt - Date.now()));
 /** Scans that got as far as reading Notion. */
-const scans = () => requests.filter((r) => r.url.endsWith("/query")).length;
+const scans = () => requests.filter((r) => new URL(r.url).pathname.endsWith("/query")).length;
 /** The pending alarm going off, which spends it. */
 function ring() {
   armed = undefined;
@@ -384,7 +384,7 @@ describe("worker orchestration", () => {
       expect(stored.error).toContain(text);
       expect(stored.report?.failed).toBe(1);
     }
-    expect(requests.some((r) => r.url.endsWith("/query"))).toBe(false);
+    expect(scans()).toBe(0);
   });
   it("stays away for as long as a throttling service asks, up to an hour", async () => {
     notion = "busy";

@@ -56,6 +56,7 @@ function submission(overrides: Record<string, unknown> = {}) {
     ...overrides,
   };
 }
+const homework = () => ({ id: 123, name: "Homework", course_id: 42, submission: submission() });
 /** Course 42 is active and holds assignment 123; course 43 is only a completed enrollment. */
 function fixture() {
   const acknowledged: Record<string, string> = {};
@@ -68,11 +69,9 @@ function fixture() {
     courses: vi.fn(async (enrollment) => ({
       items: enrollment === "active" ? ["42"] : ["42", "43"],
     })),
-    assignments: vi.fn(async (courseId) => ({
-      items:
-        courseId === "42"
-          ? [{ id: 123, name: "Homework", course_id: 42, submission: submission() }]
-          : [],
+    assignments: vi.fn(async (courseId) => ({ items: courseId === "42" ? [homework()] : [] })),
+    groupedAssignments: vi.fn<SyncApi["groupedAssignments"]>(async (courseId, ids) => ({
+      items: courseId === "42" && ids.includes("123") ? [homework()] : [],
     })),
     target: vi.fn(async () => current),
     markDone: vi.fn(async () => {
@@ -255,7 +254,7 @@ describe("scan", () => {
       progress: () => undefined,
     });
     expect(report.updated).toBe(1);
-    expect(api.assignments).toHaveBeenCalledWith(BIG_ID, undefined, undefined);
+    expect(api.assignments).toHaveBeenCalledWith(BIG_ID, undefined);
   });
   it("marks once, respects reopening, handles a new attempt, and leaves past courses alone", async () => {
     const { api, run, reopen, saveAcknowledged } = fixture();
@@ -310,7 +309,7 @@ describe("scan", () => {
           },
     );
     expect((await run()).updated).toBe(1);
-    expect(api.assignments).toHaveBeenCalledWith("42", "page2", undefined);
+    expect(api.assignments).toHaveBeenCalledWith("42", "page2");
   });
   it("preview does not write or consume completion history", async () => {
     const { api, run, acknowledged, saveAcknowledged } = fixture();
@@ -339,6 +338,7 @@ describe("scan", () => {
     }));
     // Assignment 123 is in course 42, so the course the page names does not have it.
     expect(await run()).toMatchObject({ skipped: 3, unchecked: 1 });
+    expect(api.groupedAssignments).toHaveBeenCalledWith("99", ["123"], undefined);
     expect(api.assignments).toHaveBeenCalledWith("99", undefined, ["123"]);
     expect(api.courses).not.toHaveBeenCalled();
     expect(api.markDone).not.toHaveBeenCalled();
@@ -346,10 +346,32 @@ describe("scan", () => {
   it("fails when Canvas refuses every course the pages name and every course it walks", async () => {
     const { api, run } = fixture();
     api.targets = vi.fn(async () => ({ items: [target({ courseId: "42" })] }));
+    api.groupedAssignments = vi.fn(async () => {
+      throw new ApiError("Canvas", 403);
+    });
     api.assignments = vi.fn(async () => {
       throw new ApiError("Canvas", 403);
     });
     await expect(run("preview")).rejects.toThrow("did not let any course be read");
+  });
+  it("asks the assignments listing only for what the group listing did not hold", async () => {
+    const { api, run } = fixture();
+    api.targets = vi.fn(async () => ({ items: [target({ courseId: "42" })] }));
+    expect((await run("preview")).eligible).toBe(1);
+    expect(api.assignments).not.toHaveBeenCalled();
+    // Held without a submission record, as in a course where this user is not a student: the
+    // assignments listing would say no more, so it is not asked.
+    api.groupedAssignments = vi.fn(async () => ({
+      items: [{ id: 123, name: "Homework", course_id: 42 }],
+    }));
+    const report = await run("preview");
+    expect(report).toMatchObject({ eligible: 0, unchecked: 1 });
+    expect(report.details[0]?.reason).toBe("No accessible submission record");
+    expect(api.assignments).not.toHaveBeenCalled();
+    // Left out, as an ungraded survey is: the assignments listing is asked for just that one.
+    api.groupedAssignments = vi.fn(async () => ({ items: [] }));
+    expect((await run("preview")).eligible).toBe(1);
+    expect(api.assignments).toHaveBeenCalledExactlyOnceWith("42", undefined, ["123"]);
   });
   it("retries a write that did not land on the next scan instead of parking the page", async () => {
     const { api, run, acknowledged } = fixture();
@@ -633,6 +655,63 @@ describe("HTTP boundary", () => {
       properties: { "Personal Status": { status: { name: "Done" } } },
     });
   });
+  it("reads assignments out of their groups, without descriptions or rubrics", async () => {
+    const next = "https://school.instructure.com/api/v1/courses/42/assignment_groups?page=2";
+    const { api, fetcher } = setup([
+      json(
+        [
+          { id: "1", assignments: [{ id: "123" }] },
+          // A group none of the IDs are in, and one that came without the field at all.
+          { id: "2", assignments: [] },
+          { id: "3" },
+          { id: "4", assignments: [{ id: "124" }, { id: "125" }] },
+        ],
+        { Link: `<${next}>; rel="next"` },
+      ),
+    ]);
+    const result = await api.groupedAssignments("42", ["123", "124", "125"]);
+    expect(result).toEqual({
+      items: [{ id: "123" }, { id: "124" }, { id: "125" }],
+      next: "/api/v1/courses/42/assignment_groups?page=2",
+    });
+    const url = new URL(fetcher.mock.calls[0]?.[0] as URL);
+    expect(url.pathname).toBe("/api/v1/courses/42/assignment_groups");
+    expect(url.searchParams.getAll("assignment_ids[]")).toEqual(["123", "124", "125"]);
+    expect(url.searchParams.getAll("include[]")).toEqual(["assignments", "submission"]);
+    expect(url.searchParams.getAll("exclude_response_fields[]")).toEqual(["description", "rubric"]);
+  });
+  it("asks Notion only for the seven properties the extension reads", async () => {
+    // Notion leaves out what the filter does not name; JSON leaves out these undefined ones.
+    const sparse = {
+      ...page(),
+      properties: {
+        ...page().properties,
+        "Removed from Canvas": undefined,
+        "Canvas State": undefined,
+      },
+    };
+    const { api, fetcher } = setup([
+      json({ results: [sparse], has_more: true, next_cursor: "cursor" }),
+      json({ results: [], has_more: false }),
+      json(sparse),
+    ]);
+    expect((await api.targets()).items).toEqual([target()]);
+    await api.targets("cursor");
+    expect(await api.target("page-123")).toEqual(target());
+    const named = Object.keys(page().properties).sort();
+    for (const [call, method] of [
+      [0, "POST"],
+      [1, "POST"],
+      [2, "GET"],
+    ] as const) {
+      const url = new URL(fetcher.mock.calls[call]?.[0] as URL);
+      expect(url.searchParams.getAll("filter_properties").sort()).toEqual(named);
+      expect(fetcher.mock.calls[call]?.[1]?.method).toBe(method);
+    }
+    expect(JSON.parse(fetcher.mock.calls[1]?.[1]?.body as string)).toMatchObject({
+      start_cursor: "cursor",
+    });
+  });
   it("asks Canvas for string IDs so 64-bit IDs survive, and rejects a rounded numeric ID", async () => {
     const { api, fetcher } = setup([
       json({ id: BIG_ID }),
@@ -878,13 +957,15 @@ describe("Canvas requests per scan", () => {
   }
   /**
    * Canvas and Notion behind one fake fetcher, which records every Canvas course request. Like the
-   * live Canvas, assignment_ids[] answers 400 unless every ID is in that course, is asked for once,
-   * and fits on one page. A course in `refused` answers every request with that status.
+   * live Canvas, the assignments listing answers 400 to assignment_ids[] unless every ID is in that
+   * course, is asked for once, and fits on one page, while the group listing keeps whichever IDs
+   * the course holds, in two groups, but never `surveys`. A course in `refused` answers every
+   * request with that status.
    */
   function world(
     courses: Record<"active" | "completed", Record<string, string[]>>,
     pages: ReturnType<typeof tracked>[],
-    refused: Record<string, number> = {},
+    { refused = {}, surveys = [] }: { refused?: Record<string, number>; surveys?: string[] } = {},
   ) {
     const requests: string[] = [];
     let profiles = 0;
@@ -909,20 +990,29 @@ describe("Canvas requests per scan", () => {
       if (refused[courseId]) return json({ message: "unauthorized" }, refused[courseId]);
       const ids = held[courseId] ?? [];
       const asked = url.searchParams.getAll("assignment_ids[]");
+      const record = (id: string) => ({
+        id,
+        name: `Work ${id}`,
+        course_id: courseId,
+        submission: submission({ assignment_id: id }),
+      });
+      if (url.pathname.endsWith("/assignment_groups")) {
+        const shown = ids.filter(
+          (id) => !surveys.includes(id) && (!asked.length || asked.includes(id)),
+        );
+        const half = Math.ceil(shown.length / 2);
+        return json([
+          { id: "1", assignments: shown.slice(0, half).map(record) },
+          { id: "2", assignments: shown.slice(half).map(record) },
+        ]);
+      }
       if (
         asked.length > Number(url.searchParams.get("per_page")) ||
         new Set(asked).size !== asked.length ||
         asked.some((id) => !ids.includes(id))
       )
         return json({ message: "Invalid assignment_ids" }, 400);
-      return json(
-        (asked.length ? asked : ids).map((id) => ({
-          id,
-          name: `Work ${id}`,
-          course_id: courseId,
-          submission: submission({ assignment_id: id }),
-        })),
-      );
+      return json((asked.length ? asked : ids).map(record));
     });
     const run = async (mode: Report["mode"] = "sync") => {
       const report = newReport(mode, 0);
@@ -936,6 +1026,8 @@ describe("Canvas requests per scan", () => {
     };
     return { requests, run, profiles: () => profiles };
   }
+  const grouped = (courseId: string, ...ids: string[]) =>
+    `/api/v1/courses/${courseId}/assignment_groups?${ids.map((id) => `assignment_ids[]=${id}&`).join("")}include[]=assignments&include[]=submission&exclude_response_fields[]=description&exclude_response_fields[]=rubric&per_page=100`;
   const narrowed = (courseId: string, ...ids: string[]) =>
     `/api/v1/courses/${courseId}/assignments?${ids.map((id) => `assignment_ids[]=${id}&`).join("")}include[]=submission&per_page=100`;
   const listing = (courseId: string) =>
@@ -949,7 +1041,16 @@ describe("Canvas requests per scan", () => {
       [tracked("123", "42"), tracked("124", "42"), tracked("125", "43")],
     );
     expect(await run()).toMatchObject({ updated: 3 });
-    expect(requests).toEqual([narrowed("42", "123", "124"), narrowed("43", "125")]);
+    expect(requests).toEqual([grouped("42", "123", "124"), grouped("43", "125")]);
+  });
+  it("asks the assignments listing for an ungraded survey the group listing leaves out", async () => {
+    const { requests, run } = world(
+      { active: { "42": ["123", "124", "126"] }, completed: {} },
+      [tracked("123", "42"), tracked("124", "42"), tracked("126", "42")],
+      { surveys: ["124"] },
+    );
+    expect(await run()).toMatchObject({ updated: 3 });
+    expect(requests).toEqual([grouped("42", "123", "124", "126"), narrowed("42", "124")]);
   });
   it("walks every course only for the pages that name none", async () => {
     const { requests, run } = world(
@@ -958,7 +1059,7 @@ describe("Canvas requests per scan", () => {
     );
     expect(await run()).toMatchObject({ updated: 3 });
     expect(requests).toEqual([
-      narrowed("42", "123"),
+      grouped("42", "123"),
       coursesIn("active"),
       listing("41"),
       listing("42"),
@@ -967,21 +1068,26 @@ describe("Canvas requests per scan", () => {
       listing("40"),
     ]);
   });
-  it("reads the whole course when Canvas refuses the narrowed request, and reports a moved assignment unchecked", async () => {
-    // Assignment 125 moved to course 43 since the page recorded course 42.
+  it("reads the whole course when Canvas refuses what the group listing left out, and reports a moved assignment unchecked", async () => {
+    // Assignment 125 moved to course 43 since the page recorded course 42, and 126 is a survey.
     const { requests, run } = world(
-      { active: { "42": ["123", "124"], "43": ["125"] }, completed: {} },
-      [tracked("123", "42"), tracked("125", "42"), tracked("124")],
+      { active: { "42": ["123", "124", "126"], "43": ["125"] }, completed: {} },
+      [tracked("123", "42"), tracked("125", "42"), tracked("126", "42"), tracked("124")],
+      { surveys: ["126"] },
     );
     const report = await run();
-    expect(report).toMatchObject({ updated: 2, unchecked: 1, skipped: 0 });
+    expect(report).toMatchObject({ updated: 3, unchecked: 1, skipped: 0 });
     expect(report.details).toContainEqual({
       title: "Work 125",
       outcome: "unchecked",
       reason: "No accessible submission record",
     });
     // The full listing also found the page without a course, so no course listing was needed.
-    expect(requests).toEqual([narrowed("42", "123", "125"), listing("42")]);
+    expect(requests).toEqual([
+      grouped("42", "123", "125", "126"),
+      narrowed("42", "125", "126"),
+      listing("42"),
+    ]);
   });
   it("splits more tracked assignments than fit on one page across requests", async () => {
     const ids = Array.from({ length: 150 }, (_, index) => String(1000 + index));
@@ -991,19 +1097,22 @@ describe("Canvas requests per scan", () => {
     );
     expect(await run("preview")).toMatchObject({ eligible: 150 });
     expect(requests).toEqual([
-      narrowed("42", ...ids.slice(0, 100)),
-      narrowed("42", ...ids.slice(100)),
+      grouped("42", ...ids.slice(0, 100)),
+      grouped("42", ...ids.slice(100)),
     ]);
   });
-  it("rereads the whole course when a later chunk is refused after an earlier one was read", async () => {
-    // The last of 120 assignments moved to course 43, so only the second request is refused.
-    const ids = Array.from({ length: 120 }, (_, index) => String(1000 + index));
+  it("splits what the group listing left out the same way, and reads the whole course when a later chunk is refused", async () => {
+    // 150 surveys, the last of which moved to course 43, so only the second request is refused.
+    const ids = Array.from({ length: 150 }, (_, index) => String(1000 + index));
     const { requests, run } = world(
-      { active: { "42": ids.slice(0, 119), "43": ids.slice(119) }, completed: {} },
+      { active: { "42": ids.slice(0, 149), "43": ids.slice(149) }, completed: {} },
       ids.map((id) => tracked(id, "42")),
+      { surveys: ids },
     );
-    expect(await run("preview")).toMatchObject({ eligible: 119, unchecked: 1 });
+    expect(await run("preview")).toMatchObject({ eligible: 149, unchecked: 1 });
     expect(requests).toEqual([
+      grouped("42", ...ids.slice(0, 100)),
+      grouped("42", ...ids.slice(100)),
       narrowed("42", ...ids.slice(0, 100)),
       narrowed("42", ...ids.slice(100)),
       listing("42"),
@@ -1014,7 +1123,7 @@ describe("Canvas requests per scan", () => {
     const { requests, run, profiles } = world(
       { active: { "40": ["91"], "41": ["101"], "42": ["102"] }, completed: {} },
       [tracked("90", "39"), tracked("91", "40")],
-      { "39": 401, "40": 401 },
+      { refused: { "39": 401, "40": 401 } },
     );
     const report = await run("preview");
     expect(report).toMatchObject({ unchecked: 2, eligible: 0 });
@@ -1022,8 +1131,8 @@ describe("Canvas requests per scan", () => {
     expect(report.details).toContainEqual(expect.objectContaining({ title: "Course 40" }));
     // The walk skips the refused course and stops at the first course it can read.
     expect(requests).toEqual([
-      narrowed("39", "90"),
-      narrowed("40", "91"),
+      grouped("39", "90"),
+      grouped("40", "91"),
       coursesIn("active"),
       listing("41"),
     ]);

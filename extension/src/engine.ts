@@ -58,6 +58,13 @@ async function pages<T>(
   }
   throw new UserError("Canvas or Notion returned an implausible number of pages");
 }
+/** IDs in groups of at most ASSIGNMENTS_PER_REQUEST, as one request may name. */
+function chunks(ids: readonly string[]): string[][] {
+  const groups: string[][] = [];
+  for (let start = 0; start < ids.length; start += ASSIGNMENTS_PER_REQUEST)
+    groups.push(ids.slice(start, start + ASSIGNMENTS_PER_REQUEST));
+  return groups;
+}
 function trackable(all: Target[], report: Report): Target[] {
   const counts = new Map<string, number>();
   for (const target of all)
@@ -84,7 +91,8 @@ async function observe(
   { api, progress }: ScanContext,
 ): Promise<Map<string, Observation>> {
   // A page with an assignment URL names its course, so only that course is asked, and only for
-  // those assignments. The rest are looked for in every course's full listing.
+  // those assignments. The rest are looked for in every course's full assignments listing, which
+  // unlike the group listing also shows ungraded surveys.
   const named = new Map<string, string[]>();
   const unplaced = new Set<string>();
   for (const { assignmentId, courseId } of targets) {
@@ -112,37 +120,38 @@ async function observe(
   /** Whether some course listing or course was tried and could not be read, for any reason. */
   let failedAny = false;
   let fault: UserError | undefined;
-  /** Reads one course's assignments, or with `ids` only those, keeping what is said of `wanted`. */
-  const read = (
+  /**
+   * Reads one listing of a course's assignments, keeping what it says of `wanted`. Returns those
+   * of `wanted` the listing held, whether or not they came with a submission record.
+   */
+  const read = async (
     courseId: string,
+    list: (cursor?: string) => Promise<Page<unknown>>,
     wanted: ReadonlySet<string>,
     seen: Map<string, Observation | undefined>,
-    ids?: string[],
-  ) =>
-    pages(
-      (cursor) => api.assignments(courseId, cursor, ids),
-      (items) => {
-        for (const raw of items) {
-          const assignment = object(raw),
-            assignmentId = id(assignment.id);
-          if (
-            assignmentId &&
-            wanted.has(assignmentId) &&
-            id(assignment.course_id) === courseId &&
-            id(object(assignment.submission).assignment_id) === assignmentId
-          )
-            seen.set(
-              assignmentId,
-              completion(
-                assignment.submission,
-                courseId,
-                config.userId,
-                typeof assignment.name === "string" ? assignment.name : "",
-              ),
-            );
-        }
-      },
-    );
+  ): Promise<Set<string>> => {
+    const held = new Set<string>();
+    await pages(list, (items) => {
+      for (const raw of items) {
+        const assignment = object(raw),
+          assignmentId = id(assignment.id);
+        if (!assignmentId || !wanted.has(assignmentId) || id(assignment.course_id) !== courseId)
+          continue;
+        held.add(assignmentId);
+        if (id(object(assignment.submission).assignment_id) === assignmentId)
+          seen.set(
+            assignmentId,
+            completion(
+              assignment.submission,
+              courseId,
+              config.userId,
+              typeof assignment.name === "string" ? assignment.name : "",
+            ),
+          );
+      }
+    });
+    return held;
+  };
   /**
    * Keeps what one course showed, or notes why it could not be read and keeps none of it.
    * Returns whether it was read.
@@ -181,16 +190,25 @@ async function observe(
     progress(`Checking course ${index + 1} of ${named.size}`);
     const wanted = new Set(ids);
     const wasRead = await check(courseId, async (seen) => {
+      const held = new Set<string>();
+      for (const chunk of chunks(ids)) {
+        const list = (cursor?: string) => api.groupedAssignments(courseId, chunk, cursor);
+        for (const assignmentId of await read(courseId, list, wanted, seen)) held.add(assignmentId);
+      }
+      // The group listing leaves out an ungraded survey as well as an assignment no longer in this
+      // course, as when it has moved. The assignments listing shows the survey, so whatever is
+      // absent is asked for there. A course where nothing was absent costs no further request.
+      const absent = ids.filter((assignmentId) => !held.has(assignmentId));
       try {
-        for (let start = 0; start < ids.length; start += ASSIGNMENTS_PER_REQUEST)
-          await read(courseId, wanted, seen, ids.slice(start, start + ASSIGNMENTS_PER_REQUEST));
+        for (const chunk of chunks(absent))
+          await read(courseId, (cursor) => api.assignments(courseId, cursor, chunk), wanted, seen);
       } catch (error) {
         // Canvas refuses the whole request when one ID is not in this course, as when an
         // assignment has moved. The full listing still holds the others, and any unplaced ones.
         if (!(error instanceof ApiError) || error.status !== 400) throw error;
-        seen.clear();
         listed.add(courseId);
-        await read(courseId, new Set([...ids, ...unplaced]), seen);
+        const list = (cursor?: string) => api.assignments(courseId, cursor);
+        await read(courseId, list, new Set([...absent, ...unplaced]), seen);
       }
     });
     if (!wasRead) listed.add(courseId);
@@ -226,7 +244,9 @@ async function observe(
       if (listed.has(courseId)) continue;
       listed.add(courseId);
       progress(`Checking ${enrollment} course ${index + 1} of ${courses.length}`);
-      await check(courseId, (seen) => read(courseId, unplaced, seen));
+      await check(courseId, async (seen) => {
+        await read(courseId, (cursor) => api.assignments(courseId, cursor), unplaced, seen);
+      });
     }
   }
   // One broken course does not hold back the rest. When none could be read, the fault is wider:
