@@ -83,7 +83,7 @@ const wait = () => stored.nextScanAt - Date.parse(stored.report?.finishedAt ?? "
 /** Runs the clock up to the moment the next automatic scan is due. */
 const untilDue = () => vi.advanceTimersByTimeAsync(Math.max(0, stored.nextScanAt - Date.now()));
 /** Scans that got as far as reading Notion. */
-const scans = () => requests.filter((r) => r.url.endsWith("/query")).length;
+const scans = () => requests.filter((r) => new URL(r.url).pathname.endsWith("/query")).length;
 /** The pending alarm going off, which spends it. */
 function ring() {
   armed = undefined;
