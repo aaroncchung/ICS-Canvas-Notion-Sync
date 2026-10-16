@@ -1256,4 +1256,25 @@ describe("Canvas requests per scan", () => {
     expect(await run()).toMatchObject({ updated: 2 });
     expect(requests).toEqual([coursesIn("active"), grouped("42", "123"), listing("41")]);
   });
+  it("lists for the daily check only when a page names a course, and again once the clock goes back", async () => {
+    const pages: ReturnType<typeof tracked>[] = [];
+    const { requests, run, later, activity } = world(
+      { active: { "41": ["101"], "42": ["123"] }, completed: {} },
+      pages,
+    );
+    later(DAY);
+    await run();
+    expect(requests.splice(0)).toEqual([]);
+    // Only the walk lists, for the page that names no course, and the daily check stays due.
+    pages.push(tracked("101"));
+    expect(await run()).toMatchObject({ updated: 1 });
+    expect(requests.splice(0)).toEqual([coursesIn("active"), listing("41")]);
+    expect(activity).toEqual({ listedAt: 0, seen: {} });
+    // A clock set back leaves the last listing in the future, which does not put off the next.
+    pages.splice(0, 1, tracked("123", "42"));
+    Object.assign(activity, { listedAt: 5 * DAY, seen: { "42": 5 * DAY } });
+    expect(await run()).toMatchObject({ updated: 1 });
+    expect(requests).toEqual([coursesIn("active"), grouped("42", "123")]);
+    expect(activity).toEqual({ listedAt: DAY, seen: { "42": DAY } });
+  });
 });
