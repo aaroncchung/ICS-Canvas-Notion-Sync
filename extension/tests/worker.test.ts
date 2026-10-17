@@ -43,6 +43,10 @@ let sessionAccess: ReturnType<typeof vi.fn>;
 let sessionWrite: ReturnType<typeof vi.fn>;
 /** How long every HTTP request takes to answer. */
 let latency: number;
+/** The page's assignment link, which names its course, or none. */
+let canvasUrl: string | null;
+/** The courses Canvas lists as active. */
+let activeCourses: number[];
 const json = (data: unknown) =>
   new Response(JSON.stringify(data), { headers: { "Content-Type": "application/json" } });
 function page() {
@@ -52,7 +56,7 @@ function page() {
     properties: {
       Assignment: { title: [{ plain_text: "Homework" }] },
       "Canvas UID": { rich_text: [{ plain_text: "event-assignment-123" }] },
-      "Canvas URL": { url: null },
+      "Canvas URL": { url: canvasUrl },
       "Imported From": { type: "select", select: { name: "Canvas ICS" } },
       "Personal Status": { status: { name: notionStatus } },
       "Canvas State": { select: { name: "Active" } },
@@ -115,6 +119,8 @@ beforeEach(async () => {
   revoke = vi.fn(async () => true);
   requests = [];
   latency = 0;
+  canvasUrl = null;
+  activeCourses = [42];
   access = vi.fn(async () => undefined);
   session = {};
   sessionAccess = vi.fn(async () => undefined);
@@ -242,22 +248,27 @@ beforeEach(async () => {
       if (!isCanvas && notion === "unshared" && url.pathname.startsWith("/v1/data_sources/"))
         return new Response("{}", { status: 404 });
       if (url.pathname.endsWith("/profile")) return json({ id: userId });
-      if (url.pathname === "/api/v1/courses") return json([{ id: 42 }]);
-      if (url.pathname.endsWith("/assignments"))
-        return json([
-          {
-            id: 123,
-            name: "Homework",
-            course_id: 42,
-            submission: {
-              assignment_id: 123,
-              user_id: 7,
-              workflow_state: "submitted",
-              attempt: 1,
-              submitted_at: "2026-09-21T12:00:00Z",
-            },
-          },
-        ]);
+      if (url.pathname === "/api/v1/courses")
+        return json(
+          (url.searchParams.get("enrollment_state") === "active" ? activeCourses : [42]).map(
+            (id) => ({ id }),
+          ),
+        );
+      const homework = {
+        id: 123,
+        name: "Homework",
+        course_id: 42,
+        submission: {
+          assignment_id: 123,
+          user_id: 7,
+          workflow_state: "submitted",
+          attempt: 1,
+          submitted_at: "2026-09-21T12:00:00Z",
+        },
+      };
+      if (url.pathname.endsWith("/assignments")) return json([homework]);
+      if (url.pathname.endsWith("/assignment_groups"))
+        return json([{ id: 1, assignments: [homework] }]);
       if (url.pathname.endsWith("/query")) return json({ results: [page()], has_more: false });
       if (url.pathname.startsWith("/v1/data_sources/")) {
         const options = (...names: string[]) => ({
@@ -872,6 +883,7 @@ describe("settings", () => {
   });
   it("keeps the saved token and history for the same connection, and requires a new preview", async () => {
     stored.acknowledged = { "page-123:123": "attempt:1" };
+    stored.courses = { listedAt: 1, seen: { "42": 1 } };
     const elsewhere = { "https://other.test 8 x": { "page-9:9": "attempt:2" } };
     stored.histories = structuredClone(elsewhere);
     const result = await configure({ dataSourceId: config.dataSourceId.replaceAll("-", "") });
@@ -880,13 +892,16 @@ describe("settings", () => {
     expect(stored.config).toMatchObject({ token: config.token, userId: "7", enabled: false });
     expect(stored.previewReady).toBe(false);
     expect(stored.acknowledged).toEqual({ "page-123:123": "attempt:1" });
+    expect(stored.courses).toEqual({ listedAt: 1, seen: { "42": 1 } });
     expect(stored.histories).toEqual(elsewhere);
     expect(revoke).not.toHaveBeenCalled();
   });
   it("starts fresh history for another data source or Canvas, releasing the old host", async () => {
     stored.acknowledged = { "page-123:123": "attempt:1" };
+    stored.courses = { listedAt: 1, seen: { "42": 1 } };
     await configure({ dataSourceId: "99999999-1234-1234-1234-123456789012", token: "new-token" });
     expect(stored.acknowledged).toEqual({});
+    expect(stored.courses).toBeUndefined();
     expect(stored.config?.token).toBe("new-token");
     expect(revoke).not.toHaveBeenCalled();
     await configure({ origin: "https://other.test" });
@@ -919,6 +934,33 @@ describe("settings", () => {
     expect(stored.report).toMatchObject({ mode: "sync", failed: 0 });
     expect(notionStatus).toBe("In progress");
     expect(requests.filter((r) => r.method === "PATCH")).toHaveLength(1);
+  });
+  it("remembers across restarts when a course was last active, and stops reading it 30 days on", async () => {
+    canvasUrl = `${config.origin}/courses/42/assignments/123`;
+    await ask("sync");
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(stored.report).toMatchObject({ updated: 1, failed: 0 });
+    const listedAt = stored.courses?.listedAt ?? 0;
+    expect(listedAt).toBeGreaterThan(0);
+    expect(stored.courses).toEqual({ listedAt, seen: { "42": listedAt } });
+    // The term ends, so Canvas no longer lists the course as active.
+    activeCourses = [];
+    notionStatus = "In progress";
+    vi.setSystemTime(listedAt + 30 * 24 * 60 * 60_000);
+    await restart();
+    requests = [];
+    await ask("sync");
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(stored.report).toMatchObject({ updated: 0, skipped: 1, failed: 0 });
+    expect(stored.report?.details).toContainEqual({
+      title: "Homework",
+      outcome: "skipped",
+      reason: "Course not active in Canvas for 30 days",
+    });
+    expect(requests.some(({ url }) => new URL(url).pathname.startsWith("/api/v1/courses/"))).toBe(
+      false,
+    );
+    expect(notionStatus).toBe("In progress");
   });
   it("wakes for no Canvas page until sync is enabled for the new Canvas", async () => {
     openTabs = [

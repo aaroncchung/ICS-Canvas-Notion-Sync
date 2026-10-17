@@ -53,11 +53,23 @@ export interface Report {
   /** Rows left out of `details` once it was full. */
   omitted?: number;
 }
+/** What scans have seen of the courses pages name, so that a course which has ended stops being read. */
+export interface CourseActivity {
+  /** When Canvas last listed the courses where this user is an active student. */
+  listedAt: number;
+  /**
+   * By course ID, when Canvas last listed the course as active, or when a page first named it if
+   * that came later. Only courses some page still names are kept.
+   */
+  seen: Record<string, number>;
+}
 /** Scans live only in worker memory; an interrupted scan is simply rerun from the start. */
 export interface State {
   config?: Config;
   report?: Report;
   acknowledged: Record<string, string>;
+  /** Belongs to the current connection, like `acknowledged`, but is not kept for a later return. */
+  courses?: CourseActivity;
   /**
    * The `acknowledged` records of connections verified before the current one, by historyKey.
    * Verifying one of them again takes its records back, so reopened pages stay open.

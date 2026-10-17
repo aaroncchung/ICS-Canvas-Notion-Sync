@@ -11,6 +11,7 @@ import {
   UserError,
   VerificationError,
   type Config,
+  type CourseActivity,
   type Observation,
   type Report,
   type Target,
@@ -42,9 +43,21 @@ export interface ScanContext {
   api: SyncApi;
   /** Completion evidence already handled, by targetKey. Mutated here; saveAcknowledged persists it. */
   acknowledged: Record<string, string>;
+  /** Mutated here and saved with the rest of the state, by saveAcknowledged or after the scan. */
+  courses: CourseActivity;
   saveAcknowledged: () => Promise<void>;
   progress: (text: string) => void;
+  now: () => number;
 }
+const DAY = 24 * 60 * 60_000;
+/**
+ * How long a course is still read after Canvas last listed it as active. Before a term starts and
+ * after it ends, Canvas takes no submissions there, but teachers may grade or excuse work for a
+ * while after the end.
+ */
+const GRACE = 30 * DAY;
+/** How often the active courses are listed for that, so an active course never comes near GRACE. */
+const RELIST = DAY;
 async function pages<T>(
   read: (cursor?: string) => Promise<Page<T>>,
   each: (items: T[]) => void,
@@ -57,6 +70,14 @@ async function pages<T>(
     cursor = page.next;
   }
   throw new UserError("Canvas or Notion returned an implausible number of pages");
+}
+async function listCourses(api: SyncApi, enrollment: "active" | "completed"): Promise<string[]> {
+  const courses: string[] = [];
+  await pages(
+    (cursor) => api.courses(enrollment, cursor),
+    (items) => courses.push(...items),
+  );
+  return courses;
 }
 /** IDs in groups of at most ASSIGNMENTS_PER_REQUEST, as one request may name. */
 function chunks(ids: readonly string[]): string[][] {
@@ -84,11 +105,50 @@ function trackable(all: Target[], report: Report): Target[] {
     return !reason;
   });
 }
+/**
+ * Leaves out, as skipped, the pages of courses Canvas has not listed as active for GRACE, so that
+ * finished terms stop costing a request in every scan. Pages that name no course are kept.
+ */
+async function inCurrentCourses(
+  targets: Target[],
+  report: Report,
+  { courses, now, progress }: ScanContext,
+  active: () => Promise<string[]>,
+): Promise<Target[]> {
+  const time = now();
+  const named = new Set(targets.flatMap(({ courseId }) => (courseId ? [courseId] : [])));
+  let activeNow: Set<string> | undefined;
+  // A clock that was set back leaves the last listing in the future, which must not put off the next.
+  if (named.size && (time < courses.listedAt || time - courses.listedAt >= RELIST)) {
+    progress("Finding active courses");
+    try {
+      activeNow = new Set(await active());
+    } catch (error) {
+      // Nothing then says which courses have ended, so this scan reads them all as it did before
+      // there was a listing, and the next scan lists again.
+      if (!confinedToCourse(error)) throw error;
+      return targets;
+    }
+    courses.listedAt = time;
+  }
+  courses.seen = Object.fromEntries(
+    [...named].map((courseId) => [
+      courseId,
+      activeNow?.has(courseId) ? time : (courses.seen[courseId] ?? time),
+    ]),
+  );
+  return targets.filter((target) => {
+    if (!target.courseId || time - courses.seen[target.courseId]! < GRACE) return true;
+    record(report, target, "skipped", `Course not active in Canvas for ${GRACE / DAY} days`);
+    return false;
+  });
+}
 async function observe(
   config: Config,
   targets: Target[],
   report: Report,
   { api, progress }: ScanContext,
+  active: () => Promise<string[]>,
 ): Promise<Map<string, Observation>> {
   // A page with an assignment URL names its course, so only that course is asked, and only for
   // those assignments. The rest are looked for in every course's full assignments listing, which
@@ -213,20 +273,17 @@ async function observe(
     });
     if (!wasRead) listed.add(courseId);
   }
-  // Courses are listed only for pages that name none, and past courses only while one of those is
-  // still unaccounted for. When no course a page names could be read, as at the end of a term when
+  // The walk reads courses only for pages that name none, and past courses only while one of those
+  // is still unaccounted for. When no course a page names could be read, as at the end of a term when
   // every page still names last term's courses, the walk goes on until some course is read, so a
   // Canvas that can still be read reports those pages as unchecked instead of failing the scan.
   const walking = () => missing() || !readAny;
   for (const enrollment of ["active", "completed"] as const) {
     if (!walking()) break;
     progress(`Finding ${enrollment} courses`);
-    const courses: string[] = [];
+    let courses: string[];
     try {
-      await pages(
-        (cursor) => api.courses(enrollment, cursor),
-        (items) => courses.push(...items),
-      );
+      courses = enrollment === "active" ? await active() : await listCourses(api, enrollment);
     } catch (error) {
       // Without the active courses there is nothing to go on. Past courses are an extra, so a
       // listing that keeps failing costs only them, not what the active courses already showed.
@@ -277,9 +334,13 @@ export async function scan(config: Config, report: Report, context: ScanContext)
     (cursor) => api.targets(cursor),
     (items) => all.push(...items),
   );
-  const targets = trackable(all, report);
+  // Active courses are listed at most once a scan, whether to tell which courses have ended or to
+  // look for pages that name no course.
+  let listing: Promise<string[]> | undefined;
+  const active = () => (listing ??= listCourses(api, "active"));
+  const targets = await inCurrentCourses(trackable(all, report), report, context, active);
   const observations = targets.length
-    ? await observe(config, targets, report, context)
+    ? await observe(config, targets, report, context, active)
     : new Map<string, Observation>();
   progress("Comparing with Notion");
   let verifiedForWriting = false;
