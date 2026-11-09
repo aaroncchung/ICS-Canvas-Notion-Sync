@@ -23,11 +23,11 @@
     "test:integration": "vitest run tests/integration"
   },
   "dependencies": {
-    "@notionhq/client": "5.27.0",
+    "@notionhq/client": "5.31.0",
     "node-ical": "0.27.3",
     "pino": "10.4.0",
-    "sanitize-html": "2.18.0",
-    "turndown": "7.2.4",
+    "sanitize-html": "2.18.1",
+    "turndown": "7.2.5",
     "zod": "4.6.7"
   },
   "devDependencies": {
